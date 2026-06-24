@@ -2,14 +2,14 @@
 
 use crate::messaging::contracts::messaging::{Dialog, DialogKind, Language, Messaging, Mo, Party};
 use crate::models::config::BotConfig;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
 use log::{error, info};
+use std::env;
 use std::fmt::{Debug, Display};
+use std::future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::future;
-use std::env;
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
 use teloxide::error_handlers::LoggingErrorHandler;
 use teloxide::prelude::{CallbackQuery, Message, Request, ResponseResult, Update};
@@ -286,7 +286,7 @@ where
 }
 
 /// Similar to [mt()], but meant to enqueue convoluted async processes or the sending of multiple messages
-pub fn mts<OkType: Debug, ErrorType: Into<anyhow::Error> + Display> (
+pub fn mts<OkType: Debug, ErrorType: Into<anyhow::Error> + Display>(
     process: impl Future<Output = Result<OkType, ErrorType>> + Send + 'static,
 ) -> TelegramBoxSendFuture {
     Box::pin(async move {

@@ -6,7 +6,7 @@ use crate::messaging::impls::telegram_gateway::{TelegramGateway, TelegramMo, mt,
 use crate::models::config::BotConfig;
 use crate::plot;
 use crate::resources::{FRAMES, RESULT};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use log::info;
 use std::sync::Arc;
@@ -215,7 +215,7 @@ async fn sqlite_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
         Ok::<(), teloxide::RequestError>(())
     })
     .await
-        .map_err(|err| anyhow!("`sqlitebenchmark` failed: {err}"))
+    .map_err(|err| anyhow!("`sqlitebenchmark` failed: {err}"))
 }
 
 async fn redb_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
@@ -229,7 +229,7 @@ async fn redb_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
         Ok::<(), teloxide::RequestError>(())
     })
     .await
-        .map_err(|err| anyhow!("`redbbenchmark` failed: {err}"))
+    .map_err(|err| anyhow!("`redbbenchmark` failed: {err}"))
 }
 
 async fn heed_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
@@ -243,7 +243,7 @@ async fn heed_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
         Ok::<(), teloxide::RequestError>(())
     })
     .await
-        .map_err(|err| anyhow!("`heedbenchmark` failed: {err}"))
+    .map_err(|err| anyhow!("`heedbenchmark` failed: {err}"))
 }
 
 async fn follow_asset(bot: Bot, chat_id: ChatId) -> Result<()> {

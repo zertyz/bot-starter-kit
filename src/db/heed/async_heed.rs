@@ -1,5 +1,5 @@
 use ::heed::{Database, Env, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
-use anyhow::{Context, Result, ensure, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use futures::{Stream, StreamExt};
 use std::path::Path;
 use std::pin::pin;
@@ -151,24 +151,29 @@ impl AsyncHeed {
         for<'item> KC: heed::BytesEncode<'item, EItem = KeyType>,
         for<'item> DC: heed::BytesEncode<'item, EItem = ValueType>,
     {
-        let mut write_txn = self
-            .begin_write()
-            .await
-            .map_err(|err| anyhow!("Heed: beginning Stream ingestion -- couldn't create the write transaction: {err}"))?;
+        let mut write_txn = self.begin_write().await.map_err(|err| {
+            anyhow!(
+                "Heed: beginning Stream ingestion -- couldn't create the write transaction: {err}"
+            )
+        })?;
 
         let mut count = 0;
         let mut input_stream = pin!(input_stream);
         while let Some((key, value)) = input_stream.next().await {
             database
                 .put(write_txn.inner_mut(), &key, &value)
-                .map_err(|err| anyhow!("Heed: Couldn't insert/replace item #{count} during Stream ingestion: {err}"))?;
+                .map_err(|err| {
+                    anyhow!(
+                        "Heed: Couldn't insert/replace item #{count} during Stream ingestion: {err}"
+                    )
+                })?;
             count += 1;
         }
 
         write_txn
             .commit()
             .await
-            .map_err(|err| anyhow!("Heed: Could not commit transaction after Stream ingestion"))?;
+            .map_err(|err| anyhow!("Heed: Could not commit transaction after Stream ingestion: {err}"))?;
 
         Ok(count)
     }
@@ -183,10 +188,13 @@ impl AsyncHeed {
             .r_lock
             .acquire_many(self.max_readers)
             .await
-            .map_err(|err| anyhow!("Failed to acquire all `heed` reader permits for resize: {err}"))?;
+            .map_err(|err| {
+                anyhow!("Failed to acquire all `heed` reader permits for resize: {err}")
+            })?;
 
         // SAFETY: all wrapper-created read and write transactions are excluded above.
-        unsafe { self.env.resize(new_map_size_bytes) }.map_err(|err| anyhow!("Failed to resize `heed` map: {err}"))
+        unsafe { self.env.resize(new_map_size_bytes) }
+            .map_err(|err| anyhow!("Failed to resize `heed` map: {err}"))
     }
 
     /// Force dirty mmap pages to disk.
@@ -226,7 +234,9 @@ impl<'env> HeedReadTransaction<'env> {
     }
 
     pub async fn close(self) -> Result<()> {
-        self.inner.commit().map_err(|err| anyhow!("Failed to close `heed` reader: {err}"))
+        self.inner
+            .commit()
+            .map_err(|err| anyhow!("Failed to close `heed` reader: {err}"))
     }
 }
 

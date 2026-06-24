@@ -1,6 +1,6 @@
 //! Central point for instantiating sqlx & sqlite connections
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
 use sqlx::{
     SqlitePool,
@@ -69,7 +69,9 @@ impl Sqlite {
             sqlx::query(model_setup_sql)
                 .execute(&pool)
                 .await
-                .map_err(|err| anyhow!("SQLite: applying the model setup SQL #{i}: {model_setup_sql:?}: {err}"))?;
+                .map_err(|err| {
+                    anyhow!("SQLite: applying the model setup SQL #{i}: {model_setup_sql:?}: {err}")
+                })?;
         }
 
         Ok(Self { pool })
@@ -161,8 +163,11 @@ impl Sqlite {
             count += 1;
         }
 
-        tx.commit().await
-            .map_err(|err| anyhow!("SQLite: ingesting stream with sql '{insert_sql}' failed @ the final commit: {err}"))?;
+        tx.commit().await.map_err(|err| {
+            anyhow!(
+                "SQLite: ingesting stream with sql '{insert_sql}' failed @ the final commit: {err}"
+            )
+        })?;
 
         Ok(count)
     }

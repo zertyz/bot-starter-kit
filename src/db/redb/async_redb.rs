@@ -1,7 +1,7 @@
 //! `redb`-specific helpers & wrappers for async & stream operation using full zero-copy mmap
 //! and read zero-copy rkyv serializers.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt, stream};
 use redb::{ReadTransaction, ReadableDatabase, TableDefinition, WriteTransaction};
 use std::{path::Path, pin::pin};
@@ -47,8 +47,12 @@ impl AsyncReDb {
     ) -> Result<Self> {
         let db_path = db_path.as_ref();
 
-        let redb = redb::Database::create(db_path)
-            .map_err(|err| anyhow!("ReDB: Failed to open or create `database {:?}: {err}", db_path))?;
+        let redb = redb::Database::create(db_path).map_err(|err| {
+            anyhow!(
+                "ReDB: Failed to open or create `database {:?}: {err}",
+                db_path
+            )
+        })?;
 
         Ok(Self {
             redb,
@@ -84,7 +88,9 @@ impl AsyncReDb {
             .r_lock
             .acquire_many(self.max_readers)
             .await
-            .map_err(|err| anyhow!("Failed to acquire all `redb` reader permits for compaction: {err}"))?;
+            .map_err(|err| {
+                anyhow!("Failed to acquire all `redb` reader permits for compaction: {err}")
+            })?;
 
         self.redb
             .compact()
@@ -154,7 +160,11 @@ impl AsyncReDb {
         let mut table = write_txn
             .inner()
             .open_table(table_definition)
-            .map_err(|err| anyhow!("ReDb: failed to open table '{table_definition}' for Stream ingestion: {err}"))?;
+            .map_err(|err| {
+                anyhow!(
+                    "ReDb: failed to open table '{table_definition}' for Stream ingestion: {err}"
+                )
+            })?;
 
         let mut count = 0;
         let mut input_stream = pin!(input_stream);
@@ -208,7 +218,9 @@ impl<'db> ReDbReadTransaction<'db> {
     ///
     /// This method is async only to preserve the wrapper's async API shape.
     pub async fn close(self) -> Result<()> {
-        self.inner.close().map_err(|err| anyhow!("Failed to close `redb` reader: {err}"))
+        self.inner
+            .close()
+            .map_err(|err| anyhow!("Failed to close `redb` reader: {err}"))
     }
 }
 
