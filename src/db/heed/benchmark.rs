@@ -72,28 +72,15 @@ pub async fn benchmark(
 
     let started = Instant::now();
 
-    let mut input_stream = Box::pin(
-        make_event_stream(run_id, expected_records)
-            .enumerate()
-            .then(|(i, event)| async move {
-                if i % 100000 == 0 {
-                    _ = println(format!("Inserted records: {i} / {expected_records}...")).await;
-                }
-                (key(i), event)
-            }),
-    );
-
-    let mut write_txn = heed.begin_write().await?;
-    let mut inserted = 0usize;
-    while let Some((event_key, event)) = input_stream.next().await {
-        events
-            .put(write_txn.inner_mut(), &event_key, &event)
-            .with_context(|| {
-                format!("Heed: could not insert/replace item #{inserted} in benchmark")
-            })?;
-        inserted += 1;
-    }
-    write_txn.commit().await?;
+    let input_stream = make_event_stream(run_id, expected_records)
+        .enumerate()
+        .then(|(i, event)| async move {
+            if i % 100000 == 0 {
+                _ = println(format!("Inserted records: {i} / {expected_records}...")).await;
+            }
+            (key(i), event)
+        });
+    let inserted = heed.ingest_stream(&events, input_stream).await?;
 
     let elapsed = started.elapsed();
     let rows_per_sec = inserted as f64 / elapsed.as_secs_f64();

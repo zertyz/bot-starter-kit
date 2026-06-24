@@ -49,8 +49,7 @@ impl<'a, T> HeedPodRef<'a, T> {
     where
         T: bytemuck::Pod,
     {
-        debug_assert_eq!(self.bytes.len(), size_of::<T>());
-        unsafe { self.bytes.as_ptr().cast::<T>().read_unaligned() }
+        bytemuck::pod_read_unaligned(self.bytes)
     }
 }
 

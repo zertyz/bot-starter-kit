@@ -19,7 +19,7 @@ pub trait TelegramUsersRepository {
     ///  - [UserStatesRepository]
     ///  - [TelegramUsersRepository]
     ///  - [UserConfigsRepository],
-    /// 
+    ///
     ///  may provide finer-grained queries over the users.
     async fn enumerate_all_users(&self) -> impl Stream<Item = Result<Self::TelegramUser, Error>>;
 }

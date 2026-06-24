@@ -4,8 +4,8 @@
 //! session-like bot state than a userspace database cache, as long as read transactions remain
 //! short-lived.
 
-mod heed_wrapper;
-pub use heed_wrapper::*;
+mod async_heed;
+pub use async_heed::*;
 
 pub mod benchmark;
 pub mod serde;

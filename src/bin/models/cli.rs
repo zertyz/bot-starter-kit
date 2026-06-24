@@ -1,5 +1,5 @@
-use ogre_config_meld::clap;
 use bot_starter_kit::models::config::{BotConfig, TelegramConfig};
+use ogre_config_meld::clap;
 
 /// Command Line Options
 #[derive(clap::Parser, Debug)]

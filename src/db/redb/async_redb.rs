@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use futures::{Stream, StreamExt, stream};
 use redb::{ReadTransaction, ReadableDatabase, TableDefinition, WriteTransaction};
 use std::{path::Path, pin::pin};
-use tokio::{sync::{Mutex, MutexGuard, Semaphore, SemaphorePermit}};
+use tokio::sync::{Mutex, MutexGuard, Semaphore, SemaphorePermit};
 
 /// By using `redb` through the following API, and only through the following API, we make it
 /// more async-friendly than using `redb` directly from arbitrary Tokio tasks.

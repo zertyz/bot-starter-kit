@@ -1,7 +1,8 @@
-use std::path::Path;
-
 use ::heed::{Database, Env, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
 use anyhow::{Context, Result, ensure};
+use futures::{Stream, StreamExt};
+use std::path::Path;
+use std::pin::pin;
 use tokio::sync::{Mutex, MutexGuard, Semaphore, SemaphorePermit};
 
 /// Default map size for the starter-kit demos.
@@ -70,6 +71,9 @@ impl AsyncHeed {
         let env = unsafe { options.open(env_path) }
             .with_context(|| format!("Heed: failed to open env at {env_path:?}"))?;
 
+        env.clear_stale_readers()
+            .context("Heed: failed to clear stale reader slots")?;
+
         Ok(Self {
             env,
             w_lock: Mutex::new(()),
@@ -136,6 +140,39 @@ impl AsyncHeed {
             .with_context(|| format!("Heed: failed to open database {name:?}"))?;
         read_txn.close().await?;
         Ok(db)
+    }
+
+    pub async fn ingest_stream<KC, DC, KeyType, ValueType>(
+        &self,
+        database: &Database<KC, DC>,
+        input_stream: impl Stream<Item = (KeyType, ValueType)>,
+    ) -> Result<usize>
+    where
+        for<'item> KC: heed::BytesEncode<'item, EItem = KeyType>,
+        for<'item> DC: heed::BytesEncode<'item, EItem = ValueType>,
+    {
+        let mut write_txn = self
+            .begin_write()
+            .await
+            .context("Heed: beginning Stream ingestion -- couldn't create the write transaction")?;
+
+        let mut count = 0;
+        let mut input_stream = pin!(input_stream);
+        while let Some((key, value)) = input_stream.next().await {
+            database
+                .put(write_txn.inner_mut(), &key, &value)
+                .with_context(|| {
+                    format!("Heed: Couldn't insert/replace item #{count} during Stream ingestion")
+                })?;
+            count += 1;
+        }
+
+        write_txn
+            .commit()
+            .await
+            .context("Heed: Could not commit transaction after Stream ingestion")?;
+
+        Ok(count)
     }
 
     /// Wait for all wrapper-managed readers, then resize the LMDB map.
@@ -228,5 +265,146 @@ impl<'env> HeedWriteTransaction<'env> {
 
     pub async fn abort(self) {
         self.inner.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::heed::HeedPod;
+    use ::heed::byteorder::BigEndian;
+    use ::heed::types::U64;
+    use futures::stream;
+    use std::path::PathBuf;
+
+    type TestKey = U64<BigEndian>;
+    type TestValue = HeedPod<TestModel>;
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+    struct TestModel {
+        count: u64,
+        whatever: u64,
+    }
+
+    fn expected_data_iter() -> impl Iterator<Item = TestModel> {
+        (0..128).map(|i| TestModel {
+            count: 127 - i,
+            whatever: i,
+        })
+    }
+
+    fn key(i: usize) -> u64 {
+        i as u64
+    }
+
+    fn unique_env_path() -> PathBuf {
+        let run_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is before Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "test_heed_wrapper_{}_{}",
+            std::process::id(),
+            run_id
+        ))
+    }
+
+    #[tokio::test]
+    async fn hello_api() -> Result<()> {
+        let env_path = unique_env_path();
+        let _ = std::fs::remove_dir_all(&env_path);
+
+        let heed = AsyncHeed::open_with_options(&env_path, 16 * 1024 * 1024, 16, 4)
+            .await
+            .expect("Could not create database");
+
+        let database: Database<TestKey, TestValue> = heed
+            .create_database(Some("heed_wrapper_data"))
+            .await
+            .expect("Could not open/create database");
+
+        let expected_count = expected_data_iter().count();
+        let input_stream = stream::iter(
+            expected_data_iter()
+                .enumerate()
+                .map(|(i, value)| (key(i), value)),
+        );
+
+        let inserted = heed
+            .ingest_stream(&database, input_stream)
+            .await
+            .expect("Could not ingest Stream");
+        assert_eq!(inserted, expected_count);
+
+        let reopened_database = heed
+            .open_database::<TestKey, TestValue>(Some("heed_wrapper_data"))
+            .await
+            .expect("Could not open existing database")
+            .expect("Database should exist");
+
+        let read_txn = heed
+            .begin_read()
+            .await
+            .expect("Could not begin read transaction");
+
+        for (i, expected_value) in expected_data_iter().enumerate() {
+            let observed_value = reopened_database
+                .get(read_txn.inner(), &key(i))
+                .expect("Could not read test record")
+                .unwrap_or_else(|| panic!("Test record #{i} is not present"));
+
+            assert_eq!(
+                observed_value.read_unaligned(),
+                expected_value,
+                "Point query failed @ row #{i}"
+            );
+        }
+
+        let mut observed_iter = reopened_database
+            .iter(read_txn.inner())
+            .expect("Could not iterate database");
+
+        for (i, expected_value) in expected_data_iter().enumerate() {
+            let (observed_key, observed_value) = observed_iter
+                .next()
+                .transpose()
+                .expect("Could not read next iterator item")
+                .unwrap_or_else(|| panic!("Stream query failed: row #{i} is not present"));
+
+            assert_eq!(
+                observed_key,
+                key(i),
+                "Stream query failed: row #{i} yielded key {observed_key}"
+            );
+            assert_eq!(
+                observed_value.read_unaligned(),
+                expected_value,
+                "Stream query failed @ row #{i}"
+            );
+        }
+
+        assert!(
+            observed_iter
+                .next()
+                .transpose()
+                .expect("Could not check end of iterator")
+                .is_none(),
+            "Stream query failed: more elements than expected were produced"
+        );
+
+        drop(observed_iter);
+        read_txn
+            .close()
+            .await
+            .expect("Could not close read transaction");
+
+        heed.force_sync()
+            .await
+            .expect("Could not force-sync database");
+        heed.close().await.expect("Could not close database");
+        let _ = std::fs::remove_dir_all(&env_path);
+
+        Ok(())
     }
 }

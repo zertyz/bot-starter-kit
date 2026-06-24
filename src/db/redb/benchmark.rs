@@ -71,15 +71,14 @@ pub async fn benchmark(
 
     // SQLite has one writer. Merge producer streams into one transaction pipeline so memory stays
     // bounded and the database does not thrash on writer contention.
-    let input_stream =
-        make_event_stream(run_id, expected_records)
-            .enumerate()
-            .then(|(i, event)| async move {
-                if i % 100000 == 0 {
-                    _ = println(format!("Inserted records: {i} / {expected_records}...")).await;
-                }
-                (key(i), event)
-            });
+    let input_stream = make_event_stream(run_id, expected_records)
+        .enumerate()
+        .then(|(i, event)| async move {
+            if i % 100000 == 0 {
+                _ = println(format!("Inserted records: {i} / {expected_records}...")).await;
+            }
+            (key(i), event)
+        });
 
     let inserted = redb.ingest_stream(EVENTS_TABLE, input_stream).await?;
 
