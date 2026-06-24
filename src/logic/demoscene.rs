@@ -5,6 +5,7 @@ use crate::messaging::contracts::messaging::Messaging;
 use crate::messaging::impls::telegram_gateway::{TelegramGateway, TelegramMo, mt, mts};
 use crate::models::config::BotConfig;
 use crate::plot;
+use crate::resources::{FRAMES, RESULT};
 use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use std::sync::Arc;
@@ -16,7 +17,6 @@ use teloxide::{
 };
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
-use crate::resources::{FRAMES, RESULT};
 
 const MT_CONCURRENCY: usize = 4;
 
@@ -159,17 +159,20 @@ async fn run_long_job(bot: Bot, chat_id: ChatId) -> ResponseResult<Message> {
             .await?;
     }
 
+    bot.edit_message_text(chat_id, m.id, "✅ Done. See the file bellow.")
+        .await;
     // Final artifact
     bot.send_document(chat_id, InputFile::memory(RESULT).file_name("result.zip"))
         .caption("Here’s your result.")
-        .await?;
-    bot.edit_message_text(chat_id, m.id, "✅ Done. See the file above.")
         .await
 }
 
 async fn render_swap(bot: Bot, chat_id: ChatId) -> ResponseResult<Message> {
     let m = bot
-        .send_photo(chat_id, InputFile::memory(FRAMES[0]).file_name("frame0.png"))
+        .send_photo(
+            chat_id,
+            InputFile::memory(FRAMES[0]).file_name("frame0.png"),
+        )
         .caption("Rendering 0%")
         .await?;
 
@@ -181,7 +184,8 @@ async fn render_swap(bot: Bot, chat_id: ChatId) -> ResponseResult<Message> {
     for (f, cap, name) in frames {
         sleep(Duration::from_millis(900)).await;
         let media = InputMedia::Photo(
-            InputMediaPhoto::new(InputFile::memory(f).file_name(name)).caption(format!("Rendering {cap}")),
+            InputMediaPhoto::new(InputFile::memory(f).file_name(name))
+                .caption(format!("Rendering {cap}")),
         );
         bot.edit_message_media(chat_id, m.id, media).await?;
     }
