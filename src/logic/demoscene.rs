@@ -16,6 +16,7 @@ use teloxide::{
 };
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
+use crate::resources::{FRAMES, RESULT};
 
 const MT_CONCURRENCY: usize = 4;
 
@@ -159,7 +160,7 @@ async fn run_long_job(bot: Bot, chat_id: ChatId) -> ResponseResult<Message> {
     }
 
     // Final artifact
-    bot.send_document(chat_id, InputFile::file("result.zip"))
+    bot.send_document(chat_id, InputFile::memory(RESULT).file_name("result.zip"))
         .caption("Here’s your result.")
         .await?;
     bot.edit_message_text(chat_id, m.id, "✅ Done. See the file above.")
@@ -168,19 +169,19 @@ async fn run_long_job(bot: Bot, chat_id: ChatId) -> ResponseResult<Message> {
 
 async fn render_swap(bot: Bot, chat_id: ChatId) -> ResponseResult<Message> {
     let m = bot
-        .send_photo(chat_id, InputFile::file("frame0.png"))
+        .send_photo(chat_id, InputFile::memory(FRAMES[0]).file_name("frame0.png"))
         .caption("Rendering 0%")
         .await?;
 
     let frames = [
-        ("frame1.png", "25%"),
-        ("frame2.png", "70%"),
-        ("frame3.png", "99%"),
+        (FRAMES[1], "25%", "frame1.png"),
+        (FRAMES[2], "70%", "frame2.png"),
+        (FRAMES[3], "99%", "frame3.png"),
     ];
-    for (f, cap) in frames {
+    for (f, cap, name) in frames {
         sleep(Duration::from_millis(900)).await;
         let media = InputMedia::Photo(
-            InputMediaPhoto::new(InputFile::file(f)).caption(format!("Rendering {cap}")),
+            InputMediaPhoto::new(InputFile::memory(f).file_name(name)).caption(format!("Rendering {cap}")),
         );
         bot.edit_message_media(chat_id, m.id, media).await?;
     }
