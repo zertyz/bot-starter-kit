@@ -1,5 +1,5 @@
 use ::heed::{Database, Env, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, ensure, anyhow};
 use futures::{Stream, StreamExt};
 use std::path::Path;
 use std::pin::pin;
@@ -55,7 +55,7 @@ impl AsyncHeed {
 
         let env_path = env_path.as_ref();
         std::fs::create_dir_all(env_path)
-            .with_context(|| format!("Heed: failed to create env directory {env_path:?}"))?;
+            .map_err(|err| anyhow!("Heed: failed to create env directory {env_path:?}: {err}"))?;
 
         let mut options = EnvOpenOptions::new().read_txn_without_tls();
         options
@@ -69,10 +69,10 @@ impl AsyncHeed {
         // - Concurrent access goes through LMDB's locks plus the async writer/read gates here.
         // Callers must still avoid external mutation of the LMDB files and remote filesystems.
         let env = unsafe { options.open(env_path) }
-            .with_context(|| format!("Heed: failed to open env at {env_path:?}"))?;
+            .map_err(|err| anyhow!("Heed: failed to open env at {env_path:?}: {err}"))?;
 
         env.clear_stale_readers()
-            .context("Heed: failed to clear stale reader slots")?;
+            .map_err(|err| anyhow!("Heed: failed to clear stale reader slots: {err}"))?;
 
         Ok(Self {
             env,
@@ -91,12 +91,12 @@ impl AsyncHeed {
             .r_lock
             .acquire()
             .await
-            .context("Failed to acquire `heed` reader permit")?;
+            .map_err(|err| anyhow!("Failed to acquire `heed` reader permit: {err}"))?;
 
         let read_txn = self
             .env
             .read_txn()
-            .context("Failed to begin `heed` read transaction")?;
+            .map_err(|err| anyhow!("Failed to begin `heed` read transaction: {err}"))?;
 
         Ok(HeedReadTransaction::new(read_txn, read_permit))
     }
@@ -106,7 +106,7 @@ impl AsyncHeed {
         let write_txn = self
             .env
             .write_txn()
-            .context("Failed to begin `heed` write transaction")?;
+            .map_err(|err| anyhow!("Failed to begin `heed` write transaction: {err}"))?;
 
         Ok(HeedWriteTransaction::new(write_txn, write_guard))
     }
@@ -120,7 +120,7 @@ impl AsyncHeed {
         let db = self
             .env
             .create_database(write_txn.inner_mut(), name)
-            .with_context(|| format!("Heed: failed to create/open database {name:?}"))?;
+            .map_err(|err| anyhow!("Heed: failed to create/open database {name:?}: {err}"))?;
         write_txn.commit().await?;
         Ok(db)
     }
@@ -137,7 +137,7 @@ impl AsyncHeed {
         let db = self
             .env
             .open_database(read_txn.inner(), name)
-            .with_context(|| format!("Heed: failed to open database {name:?}"))?;
+            .map_err(|err| anyhow!("Heed: failed to open database {name:?}: {err}"))?;
         read_txn.close().await?;
         Ok(db)
     }
@@ -154,23 +154,21 @@ impl AsyncHeed {
         let mut write_txn = self
             .begin_write()
             .await
-            .context("Heed: beginning Stream ingestion -- couldn't create the write transaction")?;
+            .map_err(|err| anyhow!("Heed: beginning Stream ingestion -- couldn't create the write transaction: {err}"))?;
 
         let mut count = 0;
         let mut input_stream = pin!(input_stream);
         while let Some((key, value)) = input_stream.next().await {
             database
                 .put(write_txn.inner_mut(), &key, &value)
-                .with_context(|| {
-                    format!("Heed: Couldn't insert/replace item #{count} during Stream ingestion")
-                })?;
+                .map_err(|err| anyhow!("Heed: Couldn't insert/replace item #{count} during Stream ingestion: {err}"))?;
             count += 1;
         }
 
         write_txn
             .commit()
             .await
-            .context("Heed: Could not commit transaction after Stream ingestion")?;
+            .map_err(|err| anyhow!("Heed: Could not commit transaction after Stream ingestion"))?;
 
         Ok(count)
     }
@@ -185,10 +183,10 @@ impl AsyncHeed {
             .r_lock
             .acquire_many(self.max_readers)
             .await
-            .context("Failed to acquire all `heed` reader permits for resize")?;
+            .map_err(|err| anyhow!("Failed to acquire all `heed` reader permits for resize: {err}"))?;
 
         // SAFETY: all wrapper-created read and write transactions are excluded above.
-        unsafe { self.env.resize(new_map_size_bytes) }.context("Failed to resize `heed` map")
+        unsafe { self.env.resize(new_map_size_bytes) }.map_err(|err| anyhow!("Failed to resize `heed` map: {err}"))
     }
 
     /// Force dirty mmap pages to disk.
@@ -197,7 +195,7 @@ impl AsyncHeed {
     pub async fn force_sync(&self) -> Result<()> {
         self.env
             .force_sync()
-            .context("Failed to force-sync `heed` env")
+            .map_err(|err| anyhow!("Failed to force-sync `heed` env: {err}"))
     }
 
     pub async fn close(self) -> Result<()> {
@@ -228,7 +226,7 @@ impl<'env> HeedReadTransaction<'env> {
     }
 
     pub async fn close(self) -> Result<()> {
-        self.inner.commit().context("Failed to close `heed` reader")
+        self.inner.commit().map_err(|err| anyhow!("Failed to close `heed` reader: {err}"))
     }
 }
 
@@ -260,7 +258,7 @@ impl<'env> HeedWriteTransaction<'env> {
     pub async fn commit(self) -> Result<()> {
         self.inner
             .commit()
-            .context("Failed to commit `heed` transaction")
+            .map_err(|err| anyhow!("Failed to commit `heed` transaction: {err}"))
     }
 
     pub async fn abort(self) {

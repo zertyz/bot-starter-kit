@@ -1,7 +1,7 @@
 //! `redb`-specific helpers & wrappers for async & stream operation using full zero-copy mmap
 //! and read zero-copy rkyv serializers.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures::{Stream, StreamExt, stream};
 use redb::{ReadTransaction, ReadableDatabase, TableDefinition, WriteTransaction};
 use std::{path::Path, pin::pin};
@@ -48,7 +48,7 @@ impl AsyncReDb {
         let db_path = db_path.as_ref();
 
         let redb = redb::Database::create(db_path)
-            .with_context(|| format!("ReDB: Failed to open or create `database {:?}", db_path))?;
+            .map_err(|err| anyhow!("ReDB: Failed to open or create `database {:?}: {err}", db_path))?;
 
         Ok(Self {
             redb,
@@ -84,11 +84,11 @@ impl AsyncReDb {
             .r_lock
             .acquire_many(self.max_readers)
             .await
-            .context("Failed to acquire all `redb` reader permits for compaction")?;
+            .map_err(|err| anyhow!("Failed to acquire all `redb` reader permits for compaction: {err}"))?;
 
         self.redb
             .compact()
-            .context("Failed to compact `redb` database")
+            .map_err(|err| anyhow!("Failed to compact `redb` database: {err}"))
             .map(|_success| ())
     }
 
@@ -97,7 +97,7 @@ impl AsyncReDb {
             .r_lock
             .acquire()
             .await
-            .context("Failed to acquire `redb` reader permit")?;
+            .map_err(|err| anyhow!("Failed to acquire `redb` reader permit: {err}"))?;
 
         let read_txn = self.redb.begin_read()?;
 
@@ -149,14 +149,12 @@ impl AsyncReDb {
         for<'r> <ValueType as redb::Value>::SelfType<'r>: From<&'r ValueType>,
     {
         let write_txn = self.begin_write().await
-            .with_context(|| format!("ReDb: beginning Stream ingestion into table '{table_definition}' -- couldn't create the write transaction"))?;
+            .map_err(|err| anyhow!("ReDb: beginning Stream ingestion into table '{table_definition}' -- couldn't create the write transaction: {err}"))?;
 
         let mut table = write_txn
             .inner()
             .open_table(table_definition)
-            .with_context(|| {
-                format!("ReDb: failed to open table '{table_definition}' for Stream ingestion")
-            })?;
+            .map_err(|err| anyhow!("ReDb: failed to open table '{table_definition}' for Stream ingestion: {err}"))?;
 
         let mut count = 0;
         let mut input_stream = pin!(input_stream);
@@ -164,7 +162,7 @@ impl AsyncReDb {
             let redb_value: <ValueType as redb::Value>::SelfType<'_> = (&value).into();
             table
                     .insert(&key, redb_value)
-                    .with_context(|| format!("ReDb: Couldn't insert/replace item #{count} during Stream ingestion into table '{table_definition}'"))?;
+                    .map_err(|err| anyhow!("ReDb: Couldn't insert/replace item #{count} during Stream ingestion into table '{table_definition}': {err}"))?;
             count += 1;
         }
 
@@ -172,7 +170,7 @@ impl AsyncReDb {
         write_txn
             .commit()
             .await
-            .with_context(|| format!("ReDb: Could not commit transaction after Stream ingestion into table '{table_definition}'"))?;
+            .map_err(|err| anyhow!("ReDb: Could not commit transaction after Stream ingestion into table '{table_definition}': {err}"))?;
 
         Ok(count)
     }
@@ -210,7 +208,7 @@ impl<'db> ReDbReadTransaction<'db> {
     ///
     /// This method is async only to preserve the wrapper's async API shape.
     pub async fn close(self) -> Result<()> {
-        self.inner.close().context("Failed to close `redb` reader")
+        self.inner.close().map_err(|err| anyhow!("Failed to close `redb` reader: {err}"))
     }
 }
 
@@ -261,7 +259,7 @@ impl<'db> ReDbWriteTransaction<'db> {
     pub async fn commit(self) -> Result<()> {
         self.inner
             .commit()
-            .context("Failed to commit `redb` transaction")
+            .map_err(|err| anyhow!("Failed to commit `redb` transaction: {err}"))
     }
 }
 

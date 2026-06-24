@@ -1,6 +1,6 @@
 //! Central point for instantiating sqlx & sqlite connections
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use futures::{Stream, StreamExt};
 use sqlx::{
     SqlitePool,
@@ -63,15 +63,13 @@ impl Sqlite {
             .max_connections(1)
             .connect_with(options)
             .await
-            .context("opening SQLite database")?;
+            .map_err(|err| anyhow!("opening SQLite database: {err}"))?;
 
         for (i, model_setup_sql) in model_setup_sqls.iter().enumerate() {
             sqlx::query(model_setup_sql)
                 .execute(&pool)
                 .await
-                .with_context(|| {
-                    format!("SQLite: applying the model setup SQL #{i}: {model_setup_sql:?}")
-                })?;
+                .map_err(|err| anyhow!("SQLite: applying the model setup SQL #{i}: {model_setup_sql:?}: {err}"))?;
         }
 
         Ok(Self { pool })
@@ -88,7 +86,7 @@ impl Sqlite {
         sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
             .execute(&self.pool)
             .await
-            .context("WAL checkpoint PASSIVE")?;
+            .map_err(|err| anyhow!("WAL checkpoint PASSIVE: {err}"))?;
         Ok(())
     }
 
@@ -103,7 +101,7 @@ impl Sqlite {
         sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&self.pool)
             .await
-            .context("WAL checkpoint TRUNCATE")?;
+            .map_err(|err| anyhow!("WAL checkpoint TRUNCATE: {err}"))?;
 
         Ok(())
     }
@@ -118,19 +116,19 @@ impl Sqlite {
         sqlx::query("VACUUM")
             .execute(&self.pool)
             .await
-            .context("VACUUM")?;
+            .map_err(|err| anyhow!("Error during VACUUM: {err}"))?;
 
         // this one might take some time, but doesn't lock
         sqlx::query("PRAGMA optimize")
             .execute(&self.pool)
             .await
-            .context("optimize")?;
+            .map_err(|err| anyhow!("Error during optimize: {err}"))?;
 
         // might not lock for too much time after all of the above
         sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&self.pool)
             .await
-            .context("Final WAL checkpoint TRUNCATE")?;
+            .map_err(|err| anyhow!("Final WAL checkpoint TRUNCATE: {err}"))?;
 
         // after this, the following can be run to re-compress the database without locking it
         // chattr -m sqlite.db; btrfs -v filesystem defragment -r -czstd sqlite.db
@@ -150,7 +148,7 @@ impl Sqlite {
         ) -> Query<'r, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'r>>,
     ) -> Result<usize> {
         let mut tx = self.pool.begin().await
-            .with_context(|| format!("SQLite: beginning Stream ingestion with sql '{insert_sql}' -- couldn't create the transaction"))?;
+            .map_err(|err| anyhow!("SQLite: beginning Stream ingestion with sql '{insert_sql}' -- couldn't create the transaction: {err}"))?;
 
         let mut count = 0;
         let mut input_stream = pin!(input_stream);
@@ -159,18 +157,12 @@ impl Sqlite {
                 .execute(&mut *tx)
                 .await
                 .map(|_sqlite_query_result| ())
-                .with_context(|| {
-                    format!(
-                        "SQLite: ingesting stream with sql '{insert_sql}' failed at element #{}",
-                        count
-                    )
-                })?;
+                .map_err(|err| anyhow!("SQLite: ingesting stream with sql '{insert_sql}' failed at element #{count}: {err}"))?;
             count += 1;
         }
 
-        tx.commit().await.with_context(|| {
-            format!("SQLite: ingesting stream with sql '{insert_sql}' failed @ the final commit")
-        })?;
+        tx.commit().await
+            .map_err(|err| anyhow!("SQLite: ingesting stream with sql '{insert_sql}' failed @ the final commit: {err}"))?;
 
         Ok(count)
     }

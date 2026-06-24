@@ -6,8 +6,9 @@ use crate::messaging::impls::telegram_gateway::{TelegramGateway, TelegramMo, mt,
 use crate::models::config::BotConfig;
 use crate::plot;
 use crate::resources::{FRAMES, RESULT};
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use futures::StreamExt;
+use log::info;
 use std::sync::Arc;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::{
@@ -52,7 +53,8 @@ enum Cmd {
 pub async fn run(config: BotConfig) -> Result<()> {
     let (telegram_gateway, mo_stream) = TelegramGateway::new(config);
     let bot = telegram_gateway.bot().clone();
-    let mo_stream = mo_stream.inspect(|mo| eprintln!("MO: {mo:?}"));
+    #[cfg(debug_assertions)]
+    let mo_stream = mo_stream.inspect(|mo| info!("MO: {mo:?}"));
     let mt_stream = mo_stream
         .map(move |telegram_mo| {
             let bot = bot.clone();
@@ -103,9 +105,12 @@ pub async fn run(config: BotConfig) -> Result<()> {
                     let callback_id = callback_query.id.clone();
                     mts(async move {
                         match callback_data.as_str() {
-                            "mm:run" => run_long_job(bot.clone(), chat_id).await.map(|_| ())?,
-                            "mm:render" => render_swap(bot.clone(), chat_id).await.map(|_| ())?,
-                            "mm:chatid" => bot.send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id)).await.map(|_| ())?,
+                            "mm:run" => run_long_job(bot.clone(), chat_id).await?,
+                            "mm:render" => render_swap(bot.clone(), chat_id).await?,
+                            "mm:chatid" => bot.send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id))
+                                .await
+                                .map(|_| ())
+                                .map_err(|err| anyhow!("`chat_id` failed: {err}"))?,
                             "mm:followasset" => follow_asset(bot.clone(), chat_id).await?,
                             "mm:sqlitebenchmark" => sqlite_benchmark(bot.clone(), chat_id).await?,
                             "mm:redbbenchmark" => redb_benchmark(bot.clone(), chat_id).await?,
@@ -113,7 +118,8 @@ pub async fn run(config: BotConfig) -> Result<()> {
                             "mm:close" => bot.edit_message_reply_markup(chat_id, msg_id).await.map(|_| ())?,    // remove the "main menu" buttons
                             _ => bot.send_message(chat_id, format!("BUG! Unknown callback query '{callback_data}'")).await.map(|_| ())?,
                         };
-                        bot.answer_callback_query(callback_id).await    // Answer the callback request so the client stops the “loading” spinner
+                        bot.answer_callback_query(callback_id).await
+                            .map_err(|err| anyhow!("Updating the callback's spinner failed: {err}"))    // Answer the callback request so the client stops the “loading” spinner
                     })
                 }
             }
@@ -149,7 +155,7 @@ fn main_menu() -> InlineKeyboardMarkup {
     ])
 }
 
-async fn run_long_job(bot: Bot, chat_id: ChatId) -> ResponseResult<Message> {
+async fn run_long_job(bot: Bot, chat_id: ChatId) -> Result<()> {
     let mut m = bot.send_message(chat_id, "Working… 0%").await?;
 
     for p in [5, 15, 35, 60, 85, 100] {
@@ -160,14 +166,16 @@ async fn run_long_job(bot: Bot, chat_id: ChatId) -> ResponseResult<Message> {
     }
 
     bot.edit_message_text(chat_id, m.id, "✅ Done. See the file bellow.")
-        .await;
+        .await?;
     // Final artifact
     bot.send_document(chat_id, InputFile::memory(RESULT).file_name("result.zip"))
         .caption("Here’s your result.")
         .await
+        .map(|_| ())
+        .map_err(|err| anyhow!("`run_long_job` failed: {err}"))
 }
 
-async fn render_swap(bot: Bot, chat_id: ChatId) -> ResponseResult<Message> {
+async fn render_swap(bot: Bot, chat_id: ChatId) -> Result<()> {
     let m = bot
         .send_photo(
             chat_id,
@@ -192,9 +200,11 @@ async fn render_swap(bot: Bot, chat_id: ChatId) -> ResponseResult<Message> {
     bot.edit_message_caption(chat_id, m.id)
         .caption("✅ Render complete.")
         .await
+        .map(|_| ())
+        .map_err(|err| anyhow!("`render_swap` failed: {err}"))
 }
 
-async fn sqlite_benchmark(bot: Bot, chat_id: ChatId) -> ResponseResult<()> {
+async fn sqlite_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
     let m = Arc::new(Mutex::new(
         bot.send_message(chat_id, "Starting SQLite Benchmark...")
             .await?,
@@ -205,10 +215,10 @@ async fn sqlite_benchmark(bot: Bot, chat_id: ChatId) -> ResponseResult<()> {
         Ok::<(), teloxide::RequestError>(())
     })
     .await
-    .map_err(|_err| teloxide::RequestError::MigrateToChatId(ChatId(42)))
+        .map_err(|err| anyhow!("`sqlitebenchmark` failed: {err}"))
 }
 
-async fn redb_benchmark(bot: Bot, chat_id: ChatId) -> ResponseResult<()> {
+async fn redb_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
     let m = Arc::new(Mutex::new(
         bot.send_message(chat_id, "Starting ReDB Benchmark...")
             .await?,
@@ -219,10 +229,10 @@ async fn redb_benchmark(bot: Bot, chat_id: ChatId) -> ResponseResult<()> {
         Ok::<(), teloxide::RequestError>(())
     })
     .await
-    .map_err(|_err| teloxide::RequestError::MigrateToChatId(ChatId(42)))
+        .map_err(|err| anyhow!("`redbbenchmark` failed: {err}"))
 }
 
-async fn heed_benchmark(bot: Bot, chat_id: ChatId) -> ResponseResult<()> {
+async fn heed_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
     let m = Arc::new(Mutex::new(
         bot.send_message(chat_id, "Starting Heed Benchmark...")
             .await?,
@@ -233,11 +243,11 @@ async fn heed_benchmark(bot: Bot, chat_id: ChatId) -> ResponseResult<()> {
         Ok::<(), teloxide::RequestError>(())
     })
     .await
-    .map_err(|_err| teloxide::RequestError::MigrateToChatId(ChatId(42)))
+        .map_err(|err| anyhow!("`heedbenchmark` failed: {err}"))
 }
 
-async fn follow_asset(bot: Bot, chat_id: ChatId) -> ResponseResult<()> {
+async fn follow_asset(bot: Bot, chat_id: ChatId) -> Result<()> {
     plot::demo::demo(&bot, chat_id)
         .await
-        .map_err(|_err| teloxide::RequestError::MigrateToChatId(ChatId(42)))
+        .map_err(|err| anyhow!("`follow-asset` demo failed: {err}"))
 }

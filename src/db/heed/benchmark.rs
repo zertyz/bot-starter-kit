@@ -53,7 +53,7 @@ pub async fn benchmark(
     };
 
     let db_path = "/tmp/telegram_heed_benchmark";
-    let expected_records = 1024 * 1024;
+    let expected_records = 16 * 1024 * 1024;
 
     let heed = AsyncHeed::open(db_path).await?;
     let events: Database<EventKey, EventValue> = heed.create_database(Some("events")).await?;

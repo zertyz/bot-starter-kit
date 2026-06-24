@@ -2,13 +2,14 @@
 
 use crate::messaging::contracts::messaging::{Dialog, DialogKind, Language, Messaging, Mo, Party};
 use crate::models::config::BotConfig;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use futures::{Stream, StreamExt};
 use log::{error, info};
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::{env, future};
+use std::future;
+use std::env;
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
 use teloxide::error_handlers::LoggingErrorHandler;
 use teloxide::prelude::{CallbackQuery, Message, Request, ResponseResult, Update};
@@ -266,24 +267,34 @@ where
     <TeloxideRequest::Payload as Payload>::Output: Send + Debug + 'static,
 {
     Box::pin(async move {
+        #[cfg(debug_assertions)]
+        let payload = format!("{:?}", request.payload_ref());
         request
             .send()
             .await
             .map_err(|err| {
-                anyhow!("Telegram Gateway: error sending MT '{{request.payload_ref()}}': {err}")
+                #[cfg(not(debug_assertions))]
+                let msg = format!("Telegram Gateway: error sending MT '{{payload}}': {err}");
+                #[cfg(debug_assertions)]
+                let msg = format!("Telegram Gateway: error sending MT '{payload}': {err}");
+                anyhow!("{msg}")
             })
+            .inspect_err(|err| eprintln!("### ERROR: {err}"))
+            .inspect_err(|err| log::error!("{err}"))
             .map(|output| format!("{output:?}"))
     })
 }
 
 /// Similar to [mt()], but meant to enqueue convoluted async processes or the sending of multiple messages
-pub fn mts<T: Debug>(
-    process: impl Future<Output = Result<T, RequestError>> + Send + 'static,
+pub fn mts<OkType: Debug, ErrorType: Into<anyhow::Error> + Display> (
+    process: impl Future<Output = Result<OkType, ErrorType>> + Send + 'static,
 ) -> TelegramBoxSendFuture {
     Box::pin(async move {
         process
             .await
             .map_err(|err| anyhow!("Telegram Gateway: error sending MTs: {err}"))
+            .inspect_err(|err| eprintln!("### ERROR: {err}"))
+            .inspect_err(|err| log::error!("{err}"))
             .map(|answer| format!("{answer:?}"))
     })
 }
