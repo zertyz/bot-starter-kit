@@ -56,6 +56,7 @@ impl TelegramGateway {
                     _ => instance_clone.run_polling(bot).await,
                 }
                 .inspect_err(|err| eprintln!("Telegram loop exited with error: {}", err));
+                instance_clone.mo_tx.close();
             }
         });
 

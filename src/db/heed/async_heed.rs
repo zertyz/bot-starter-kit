@@ -5,12 +5,10 @@ use std::path::Path;
 use std::pin::pin;
 use tokio::sync::{Mutex, MutexGuard, Semaphore, SemaphorePermit};
 
-/// Default map size for the starter-kit demos.
-///
-/// LMDB reserves virtual address space for this value; it does not allocate this much RAM up
-/// front. The 2 GiB default should give enough room for several operations before maintenance.
-pub const DEFAULT_MAP_SIZE_BYTES: usize = 2 * 1024 * 1024 * 1024;
-pub const DEFAULT_MAX_READERS: u32 = 64;
+/// Maximum map size for the mmapped database.
+/// DB operations will fail after this limit is reached.
+pub const MAX_MAP_SIZE_BYTES: usize = 30 * 1024 * 1024 * 1024;
+pub const DEFAULT_MAX_READERS: u32 = 16;
 pub const DEFAULT_MAX_DBS: u32 = 16;
 
 /// Async-friendly wrapper around `heed::Env`.
@@ -34,7 +32,7 @@ impl AsyncHeed {
     pub async fn open(env_path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_options(
             env_path,
-            DEFAULT_MAP_SIZE_BYTES,
+            MAX_MAP_SIZE_BYTES,
             DEFAULT_MAX_READERS,
             DEFAULT_MAX_DBS,
         )
@@ -43,7 +41,7 @@ impl AsyncHeed {
 
     pub async fn open_with_options(
         env_path: impl AsRef<Path>,
-        map_size_bytes: usize,
+        max_map_size_bytes: usize,
         max_readers: u32,
         max_dbs: u32,
     ) -> Result<Self> {
@@ -59,7 +57,7 @@ impl AsyncHeed {
 
         let mut options = EnvOpenOptions::new().read_txn_without_tls();
         options
-            .map_size(map_size_bytes)
+            .map_size(max_map_size_bytes)
             .max_readers(max_readers)
             .max_dbs(max_dbs);
 
@@ -170,10 +168,9 @@ impl AsyncHeed {
             count += 1;
         }
 
-        write_txn
-            .commit()
-            .await
-            .map_err(|err| anyhow!("Heed: Could not commit transaction after Stream ingestion: {err}"))?;
+        write_txn.commit().await.map_err(|err| {
+            anyhow!("Heed: Could not commit transaction after Stream ingestion: {err}")
+        })?;
 
         Ok(count)
     }
