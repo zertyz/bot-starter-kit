@@ -57,6 +57,7 @@ impl TelegramGateway {
                 }
                 .inspect_err(|err| eprintln!("Telegram loop exited with error: {}", err));
                 instance_clone.mo_tx.close();
+                eprintln!("Quitting -- possibly due to operator's request via CTRL-C or SIGTERM");
             }
         });
 

@@ -36,7 +36,11 @@ impl<'a, T> HeedPodRef<'a, T> {
         self.bytes
     }
 
+    /// You should use [Self::as_aligned_unchecked()] to read the data.
+    /// However, this method exists to ensure the mentioned function won't crash the program
+    /// -- and is meant for use in tests.
     #[inline(always)]
+    #[cfg(test)]
     pub fn try_as_aligned(&self) -> Result<&'a T, bytemuck::PodCastError>
     where
         T: bytemuck::Pod,
@@ -44,12 +48,29 @@ impl<'a, T> HeedPodRef<'a, T> {
         bytemuck::try_from_bytes(self.bytes)
     }
 
+    /// Use this less performant version of [Self::as_aligned_unchecked()] when the data
+    /// doesn't have the necessary alignment.
+    ///
+    /// For the best performance possible, ensure the struct is being padded, so it is always
+    /// aligned when stored in sequence.
     #[inline(always)]
     pub fn read_unaligned(&self) -> T
     where
         T: bytemuck::Pod,
     {
         bytemuck::pod_read_unaligned(self.bytes)
+    }
+
+    /// Returns a typed reference to the underlying bytes assuming they are aligned.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are properly aligned for `T`.
+    ///
+    /// Use [Self::read_unaligned()] instead.
+    #[inline(always)]
+    pub unsafe fn as_aligned_unchecked(&self) -> &'a T {
+        unsafe { &*(self.bytes.as_ptr() as *const T) }
     }
 }
 
@@ -73,13 +94,14 @@ where
 
     #[inline(always)]
     fn bytes_decode(bytes: &'a [u8]) -> Result<Self::DItem, BoxedError> {
-        let expected_len = size_of::<T>();
-        if bytes.len() != expected_len {
+        #[cfg(debug_assertions)]
+        if bytes.len() != size_of::<T>() {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "invalid POD value width: got {} bytes, expected {expected_len}",
-                    bytes.len()
+                    "invalid POD value width: got {} bytes, expected {}",
+                    bytes.len(),
+                    size_of::<T>()
                 ),
             )));
         }

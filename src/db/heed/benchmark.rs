@@ -53,7 +53,7 @@ pub async fn benchmark(
     };
 
     let db_path = "/tmp/telegram_heed_benchmark";
-    let expected_records = 16 * 1024 * 1024;
+    let expected_records = 64 * 1024 * 1024;
 
     let heed = AsyncHeed::open(db_path).await?;
     let events: Database<EventKey, EventValue> = heed.create_database(Some("events")).await?;
@@ -84,7 +84,7 @@ pub async fn benchmark(
 
     let elapsed = started.elapsed();
     let rows_per_sec = inserted as f64 / elapsed.as_secs_f64();
-    println(format!("✅ Ingestion completed -- rows/sec: {rows_per_sec:.0}. Now querying borrowed mmap bytes; field display uses one explicit unaligned value copy -- showing about 1 for every million records")).await?;
+    println(format!("✅ Ingestion completed -- rows/sec: {rows_per_sec:.0}. Now querying borrowed mmap bytes; field display uses one explicit unaligned value copy -- showing about 1 for every 100 million records")).await?;
 
     let query_started = Instant::now();
     let mut matched_rows = 0usize;
@@ -110,9 +110,9 @@ pub async fn benchmark(
                     )
                 })?;
 
-            let event = value.read_unaligned();
+            let event = unsafe { value.as_aligned_unchecked() };
             matched_rows += 1;
-            if matched_rows.is_multiple_of(10) {
+            if matched_rows.is_multiple_of(1000) {
                 println(format!("✅ Ingestion completed -- rows/sec: {rows_per_sec:.0}. Now Querying: matched_rows={matched_rows}; payload={}, seq={}, score={:?}, bytes={}",
                                 str::from_utf8(&event.payload).unwrap_or("<invalid-utf8>"),
                                 event.seq,
