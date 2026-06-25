@@ -11,10 +11,7 @@ pub trait UsersRepository {
     /// Ensures the given user exists in the database, creating it if necessary
     async fn ensure_user(&self, user: &User) -> Result<(), Error>;
 
-    async fn enumerate_users_by_realm(
-        &self,
-        realm: UserRealm,
-    ) -> impl Stream<Item = Result<Self::User, Error>>;
+    async fn enumerate_users_by_realm(&self, realm: UserRealm) -> impl Stream<Item = Result<Self::User, Error>>;
 
     /// Usually you'd never enumerate all users, as this will return
     /// old, inactive, ... all users.

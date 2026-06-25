@@ -14,21 +14,18 @@
 
 use std::time::Duration;
 
+use bot_starter_kit::db;
 use bot_starter_kit::db::{heed, redb, sqlite};
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-const RECORDS_PER_ITERATION: usize = 16 * 1024;
+const RECORDS_PER_ITERATION: u64 = 16 * 1024;
 
 async fn silent_report(_msg: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn expected_sample_count(records: usize, step: usize) -> usize {
-    if records == 0 {
-        0
-    } else {
-        ((records - 1) / step.max(1)) + 1
-    }
+fn expected_sample_count(records: u64, step: u64) -> u64 {
+    if records == 0 { 0 } else { ((records - 1) / step.max(1)) + 1 }
 }
 
 fn bench_database_ingest_and_point_query(criterion: &mut Criterion) {
@@ -45,16 +42,16 @@ fn bench_database_ingest_and_point_query(criterion: &mut Criterion) {
             runtime.block_on(async {
                 let temp_dir = tempfile::tempdir().expect("create SQLite benchmark temp dir");
                 let config = sqlite::benchmark::BenchmarkConfig {
-                    db_path: temp_dir.path().join("events.db"),
+                    db_path: temp_dir
+                        .path()
+                        .join("events.db"),
                     expected_records: RECORDS_PER_ITERATION,
-                    point_query_step: 1024,
                     progress_every: None,
                     benchmark_point_query: true,
                     benchmark_range_query: false,
                     run_wal_maintenance: false,
                 };
-                let expected_queries =
-                    expected_sample_count(config.expected_records, config.point_query_step);
+                let expected_queries = expected_sample_count(config.expected_records, db::sqlite::benchmark::Event::HIGH_SCORE_THRESHOLD);
 
                 let result = sqlite::benchmark::run_benchmark(config, silent_report)
                     .await
@@ -70,8 +67,10 @@ fn bench_database_ingest_and_point_query(criterion: &mut Criterion) {
                     expected_queries
                 );
                 assert!(
-                    result.index_query.is_none(),
-                    "SQLite indexed score query should stay disabled for Criterion"
+                    result
+                        .range_query
+                        .is_none(),
+                    "SQLite ranged score query should stay disabled for Criterion"
                 );
                 black_box(result);
             })
@@ -83,20 +82,26 @@ fn bench_database_ingest_and_point_query(criterion: &mut Criterion) {
             runtime.block_on(async {
                 let temp_dir = tempfile::tempdir().expect("create ReDB benchmark temp dir");
                 let config = redb::benchmark::BenchmarkConfig {
-                    db_path: temp_dir.path().join("events.redb"),
+                    db_path: temp_dir
+                        .path()
+                        .join("events.redb"),
                     expected_records: RECORDS_PER_ITERATION,
                     point_query_step: 1024,
                     progress_every: None,
                 };
-                let expected_queries =
-                    expected_sample_count(config.expected_records, config.point_query_step);
+                let expected_queries = expected_sample_count(config.expected_records, config.point_query_step);
 
                 let result = redb::benchmark::run_benchmark(config, silent_report)
                     .await
                     .expect("run ReDB benchmark");
 
                 assert_eq!(result.inserted, RECORDS_PER_ITERATION);
-                assert_eq!(result.point_query.matched_rows, expected_queries);
+                assert_eq!(
+                    result
+                        .point_query
+                        .matched_rows,
+                    expected_queries
+                );
                 black_box(result);
             })
         })
@@ -107,21 +112,27 @@ fn bench_database_ingest_and_point_query(criterion: &mut Criterion) {
             runtime.block_on(async {
                 let temp_dir = tempfile::tempdir().expect("create Heed benchmark temp dir");
                 let config = heed::benchmark::BenchmarkConfig {
-                    db_path: temp_dir.path().join("heed-env"),
+                    db_path: temp_dir
+                        .path()
+                        .join("heed-env"),
                     expected_records: RECORDS_PER_ITERATION,
                     point_query_step: 1024,
                     progress_every: None,
                     force_sync_after_queries: false,
                 };
-                let expected_queries =
-                    expected_sample_count(config.expected_records, config.point_query_step);
+                let expected_queries = expected_sample_count(config.expected_records, config.point_query_step);
 
                 let result = heed::benchmark::run_benchmark(config, silent_report)
                     .await
                     .expect("run Heed benchmark");
 
                 assert_eq!(result.inserted, RECORDS_PER_ITERATION);
-                assert_eq!(result.point_query.matched_rows, expected_queries);
+                assert_eq!(
+                    result
+                        .point_query
+                        .matched_rows,
+                    expected_queries
+                );
                 black_box(result);
             })
         })

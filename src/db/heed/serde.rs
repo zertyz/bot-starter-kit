@@ -70,7 +70,11 @@ impl<'a, T> HeedPodRef<'a, T> {
     /// Use [Self::read_unaligned()] instead.
     #[inline(always)]
     pub unsafe fn as_aligned_unchecked(&self) -> &'a T {
-        unsafe { &*(self.bytes.as_ptr() as *const T) }
+        unsafe {
+            &*(self
+                .bytes
+                .as_ptr() as *const T)
+        }
     }
 }
 
@@ -96,20 +100,10 @@ where
     fn bytes_decode(bytes: &'a [u8]) -> Result<Self::DItem, BoxedError> {
         #[cfg(debug_assertions)]
         if bytes.len() != size_of::<T>() {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "invalid POD value width: got {} bytes, expected {}",
-                    bytes.len(),
-                    size_of::<T>()
-                ),
-            )));
+            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid POD value width: got {} bytes, expected {}", bytes.len(), size_of::<T>()))));
         }
 
-        Ok(HeedPodRef {
-            bytes,
-            phantom: PhantomData,
-        })
+        Ok(HeedPodRef { bytes, phantom: PhantomData })
     }
 }
 
@@ -123,19 +117,13 @@ pub struct HeedRkyv<T>(PhantomData<T>);
 
 impl<'a, T> BytesEncode<'a> for HeedRkyv<T>
 where
-    T: Archive
-        + for<'r> rkyv::Serialize<HighSerializer<AlignedVec, ArenaHandle<'r>, rkyv::rancor::Error>>
-        + 'a,
+    T: Archive + for<'r> rkyv::Serialize<HighSerializer<AlignedVec, ArenaHandle<'r>, rkyv::rancor::Error>> + 'a,
 {
     type EItem = T;
 
     #[inline(always)]
     fn bytes_encode(item: &'a Self::EItem) -> Result<Cow<'a, [u8]>, BoxedError> {
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(item).map_err(|err| {
-            Box::new(std::io::Error::other(format!(
-                "rkyv serialization failed: {err:?}"
-            ))) as BoxedError
-        })?;
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(item).map_err(|err| Box::new(std::io::Error::other(format!("rkyv serialization failed: {err:?}"))) as BoxedError)?;
         Ok(Cow::Owned(bytes.into_vec()))
     }
 }

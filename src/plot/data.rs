@@ -33,7 +33,9 @@ pub fn fetch_bcb_usd_brl_quotes(last_n: usize) -> Result<Vec<Quote>> {
         bcb_date(end)
     );
 
-    let resp: BcbResponse = reqwest::blocking::get(url)?.error_for_status()?.json()?;
+    let resp: BcbResponse = reqwest::blocking::get(url)?
+        .error_for_status()?
+        .json()?;
 
     let mut by_day = BTreeMap::<NaiveDate, f64>::new();
     for q in resp.value {
@@ -64,16 +66,12 @@ fn bcb_date(d: NaiveDate) -> String {
 pub fn synthetic_quotes() -> Vec<Quote> {
     let start = NaiveDate::from_ymd_opt(2026, 5, 4).unwrap();
     let values = [
-        5.64, 5.66, 5.61, 5.73, 5.76, 5.74, 5.62, 5.60, 5.67, 5.70, 5.58, 5.56, 5.59, 5.71, 5.69,
-        5.65, 5.77, 5.80, 5.68, 5.66, 5.72, 5.84, 5.82, 5.79, 5.67, 5.69, 5.74, 5.63, 5.65, 5.78,
+        5.64, 5.66, 5.61, 5.73, 5.76, 5.74, 5.62, 5.60, 5.67, 5.70, 5.58, 5.56, 5.59, 5.71, 5.69, 5.65, 5.77, 5.80, 5.68, 5.66, 5.72, 5.84, 5.82, 5.79, 5.67, 5.69, 5.74, 5.63, 5.65, 5.78,
     ];
 
     values
         .iter()
         .enumerate()
-        .map(|(i, usd_brl)| Quote {
-            date: start + Duration::days(i as i64),
-            usd_brl: *usd_brl,
-        })
+        .map(|(i, usd_brl)| Quote { date: start + Duration::days(i as i64), usd_brl: *usd_brl })
         .collect()
 }

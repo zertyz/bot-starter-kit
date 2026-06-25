@@ -51,18 +51,17 @@ pub struct XTickLayout {
     pub label: PositionedText,
 }
 
-pub fn build_layout(
-    quotes: &[Quote],
-    moves: &[ImportantMove],
-    theme: &Theme,
-    metrics: &mut FontMetricsCache,
-) -> Result<ChartLayout> {
+pub fn build_layout(quotes: &[Quote], moves: &[ImportantMove], theme: &Theme, metrics: &mut FontMetricsCache) -> Result<ChartLayout> {
     if quotes.len() < 2 {
         return Err(anyhow!("need at least two quotes"));
     }
 
-    let width = theme.canvas.width;
-    let height = theme.canvas.height;
+    let width = theme
+        .canvas
+        .width;
+    let height = theme
+        .canvas
+        .height;
     let w = width as i32;
     let h = height as i32;
 
@@ -75,19 +74,30 @@ pub fn build_layout(
         .map(|q| q.usd_brl)
         .fold(f64::NEG_INFINITY, f64::max);
 
-    let y_min_cent = (min_price * 100.0).floor() as i32 - theme.scale.padding_cents;
-    let y_max_cent = (max_price * 100.0).ceil() as i32 + theme.scale.padding_cents;
+    let y_min_cent = (min_price * 100.0).floor() as i32
+        - theme
+            .scale
+            .padding_cents;
+    let y_max_cent = (max_price * 100.0).ceil() as i32
+        + theme
+            .scale
+            .padding_cents;
     let y_span_cents = (y_max_cent - y_min_cent).max(1);
 
     let y_tick_cents = build_y_tick_cents(y_min_cent, y_max_cent);
-    let y_tick_labels: Vec<String> = y_tick_cents.iter().map(|c| format_brl_cent(*c)).collect();
+    let y_tick_labels: Vec<String> = y_tick_cents
+        .iter()
+        .map(|c| format_brl_cent(*c))
+        .collect();
     let max_y_tick_label_width = y_tick_labels
         .iter()
         .map(|s| {
             metrics
                 .measure(
                     s,
-                    theme.typography.axis_tick_font_px,
+                    theme
+                        .typography
+                        .axis_tick_font_px,
                     TextRotation::None,
                     &theme.typography,
                 )
@@ -96,156 +106,230 @@ pub fn build_layout(
         .max()
         .unwrap_or(0);
 
-    let plot_left = theme.layout.outer_left_px
+    let plot_left = theme
+        .layout
+        .outer_left_px
         + max_y_tick_label_width
-        + theme.layout.y_tick_label_to_axis_gap_px;
-    let plot_right = w - theme.layout.outer_right_px;
+        + theme
+            .layout
+            .y_tick_label_to_axis_gap_px;
+    let plot_right = w - theme
+        .layout
+        .outer_right_px;
     let plot_width = plot_right - plot_left;
     if plot_width <= 0 {
-        return Err(anyhow!(
-            "not enough horizontal room after measured labels and margins"
-        ));
+        return Err(anyhow!("not enough horizontal room after measured labels and margins"));
     }
 
     let title = format!("USD/BRL - últimos {} pregões", quotes.len());
     let title_bbox = metrics.measure(
         &title,
-        theme.typography.title_font_px,
+        theme
+            .typography
+            .title_font_px,
         TextRotation::None,
         &theme.typography,
     );
     let title_pos = PositionedText {
         text: title,
         x: plot_left,
-        y: theme.layout.outer_top_px,
+        y: theme
+            .layout
+            .outer_top_px,
         bbox: title_bbox,
     };
 
     let subtitle_height = metrics
         .measure(
             "subtitle",
-            theme.typography.subtitle_font_px,
+            theme
+                .typography
+                .subtitle_font_px,
             TextRotation::None,
             &theme.typography,
         )
         .height;
-    let preliminary_subtitle_y =
-        title_pos.y + title_bbox.height + theme.layout.title_to_subtitle_gap_px;
-    let preliminary_plot_area_top =
-        preliminary_subtitle_y + subtitle_height + theme.layout.subtitle_to_plot_gap_px;
+    let preliminary_subtitle_y = title_pos.y
+        + title_bbox.height
+        + theme
+            .layout
+            .title_to_subtitle_gap_px;
+    let preliminary_plot_area_top = preliminary_subtitle_y
+        + subtitle_height
+        + theme
+            .layout
+            .subtitle_to_plot_gap_px;
 
     let x_indices = choose_evenly_spaced_indices(
         quotes.len(),
-        theme.layout.max_x_tick_labels,
+        theme
+            .layout
+            .max_x_tick_labels,
         plot_width,
-        theme.layout.min_x_tick_label_gap_px,
+        theme
+            .layout
+            .min_x_tick_label_gap_px,
     );
 
     let x_label_bboxes: Vec<TextBoxPx> = x_indices
         .iter()
         .map(|idx| {
-            let s = quotes[*idx].date.format("%d/%m").to_string();
+            let s = quotes[*idx]
+                .date
+                .format("%d/%m")
+                .to_string();
             metrics.measure(
                 &s,
-                theme.typography.axis_tick_font_px,
+                theme
+                    .typography
+                    .axis_tick_font_px,
                 TextRotation::Rotate270,
                 &theme.typography,
             )
         })
         .collect();
-    let max_x_label_height = x_label_bboxes.iter().map(|b| b.height).max().unwrap_or(0);
+    let max_x_label_height = x_label_bboxes
+        .iter()
+        .map(|b| b.height)
+        .max()
+        .unwrap_or(0);
 
-    let axis_label_font = theme.typography.axis_label_font_px;
+    let axis_label_font = theme
+        .typography
+        .axis_label_font_px;
     let x_axis_label_bbox = metrics.measure(
-        theme.axis.x_label,
+        theme
+            .axis
+            .x_label,
         axis_label_font,
         TextRotation::None,
         &theme.typography,
     );
     let y_axis_label_bbox = metrics.measure(
-        theme.axis.y_label,
+        theme
+            .axis
+            .y_label,
         axis_label_font,
         TextRotation::None,
         &theme.typography,
     );
-    let axis_label_height = if theme.axis.x_label.is_empty() && theme.axis.y_label.is_empty() {
+    let axis_label_height = if theme
+        .axis
+        .x_label
+        .is_empty()
+        && theme
+            .axis
+            .y_label
+            .is_empty()
+    {
         0
     } else {
-        x_axis_label_bbox.height.max(y_axis_label_bbox.height)
+        x_axis_label_bbox
+            .height
+            .max(y_axis_label_bbox.height)
     };
     let axis_label_gap = if axis_label_height == 0 {
         0
     } else {
-        theme.layout.x_labels_to_axis_labels_gap_px
+        theme
+            .layout
+            .x_labels_to_axis_labels_gap_px
     };
 
-    let bottom_reserved = theme.layout.outer_bottom_px
-        + theme.layout.axis_label_to_canvas_edge_gap_px
+    let bottom_reserved = theme
+        .layout
+        .outer_bottom_px
+        + theme
+            .layout
+            .axis_label_to_canvas_edge_gap_px
         + axis_label_height
         + axis_label_gap
         + max_x_label_height
-        + theme.layout.x_tick_to_label_gap_px
-        + theme.axis.x_tick_length_px;
+        + theme
+            .layout
+            .x_tick_to_label_gap_px
+        + theme
+            .axis
+            .x_tick_length_px;
 
     let plot_area_bottom = h - bottom_reserved;
     let available_h = plot_area_bottom - preliminary_plot_area_top;
     if available_h <= 0 {
-        return Err(anyhow!(
-            "not enough vertical room after measured labels and margins"
-        ));
+        return Err(anyhow!("not enough vertical room after measured labels and margins"));
     }
 
     let inner_available_h = available_h
-        - theme.layout.plot_min_inner_top_gap_px
-        - theme.layout.plot_min_inner_bottom_gap_px;
+        - theme
+            .layout
+            .plot_min_inner_top_gap_px
+        - theme
+            .layout
+            .plot_min_inner_bottom_gap_px;
     if inner_available_h <= 0 {
         return Err(anyhow!("not enough inner vertical room for plot"));
     }
 
-    let px_per_cent = match theme.scale.force_px_per_cent {
+    let px_per_cent = match theme
+        .scale
+        .force_px_per_cent
+    {
         Some(px) => px,
         None => (inner_available_h / y_span_cents)
-            .max(theme.scale.min_px_per_cent)
-            .min(theme.scale.max_px_per_cent),
+            .max(
+                theme
+                    .scale
+                    .min_px_per_cent,
+            )
+            .min(
+                theme
+                    .scale
+                    .max_px_per_cent,
+            ),
     };
 
     let plot_height = y_span_cents * px_per_cent;
     if plot_height > inner_available_h {
-        return Err(anyhow!(
-            "data range needs {plot_height}px, but only {inner_available_h}px are available; reduce force_px_per_cent or increase canvas height"
-        ));
+        return Err(anyhow!("data range needs {plot_height}px, but only {inner_available_h}px are available; reduce force_px_per_cent or increase canvas height"));
     }
 
     let plot_top = preliminary_plot_area_top
-        + theme.layout.plot_min_inner_top_gap_px
+        + theme
+            .layout
+            .plot_min_inner_top_gap_px
         + (inner_available_h - plot_height) / 2;
     let plot_bottom = plot_top + plot_height;
 
     let subtitle = format!(
         "escala vertical: {} px = R$ 0,01 • pernas importantes: ≥ {} • detectadas: {}",
         px_per_cent,
-        format_brl_cent(theme.movement.important_delta_cents),
+        format_brl_cent(
+            theme
+                .movement
+                .important_delta_cents
+        ),
         moves.len()
     );
     let subtitle_bbox = metrics.measure(
         &subtitle,
-        theme.typography.subtitle_font_px,
+        theme
+            .typography
+            .subtitle_font_px,
         TextRotation::None,
         &theme.typography,
     );
-    let subtitle_pos = PositionedText {
-        text: subtitle,
-        x: plot_left,
-        y: preliminary_subtitle_y,
-        bbox: subtitle_bbox,
-    };
+    let subtitle_pos = PositionedText { text: subtitle, x: plot_left, y: preliminary_subtitle_y, bbox: subtitle_bbox };
 
     let mut y_ticks = Vec::with_capacity(y_tick_cents.len());
-    for (cents, label) in y_tick_cents.into_iter().zip(y_tick_labels) {
+    for (cents, label) in y_tick_cents
+        .into_iter()
+        .zip(y_tick_labels)
+    {
         let y = y_of_cents(cents, y_min_cent, px_per_cent, plot_bottom);
         let bbox = metrics.measure(
             &label,
-            theme.typography.axis_tick_font_px,
+            theme
+                .typography
+                .axis_tick_font_px,
             TextRotation::None,
             &theme.typography,
         );
@@ -254,7 +338,11 @@ pub fn build_layout(
             y,
             label: PositionedText {
                 text: label,
-                x: plot_left - theme.layout.y_tick_label_to_axis_gap_px - bbox.width,
+                x: plot_left
+                    - theme
+                        .layout
+                        .y_tick_label_to_axis_gap_px
+                    - bbox.width,
                 y: y - bbox.height / 2,
                 bbox,
             },
@@ -264,10 +352,15 @@ pub fn build_layout(
     let mut x_ticks = Vec::with_capacity(x_indices.len());
     for idx in x_indices {
         let x = x_of_index(idx, quotes.len(), plot_left, plot_width);
-        let label = quotes[idx].date.format("%d/%m").to_string();
+        let label = quotes[idx]
+            .date
+            .format("%d/%m")
+            .to_string();
         let bbox = metrics.measure(
             &label,
-            theme.typography.axis_tick_font_px,
+            theme
+                .typography
+                .axis_tick_font_px,
             TextRotation::Rotate270,
             &theme.typography,
         );
@@ -278,8 +371,12 @@ pub fn build_layout(
                 text: label,
                 x: x - bbox.width / 2,
                 y: plot_bottom
-                    + theme.axis.x_tick_length_px
-                    + theme.layout.x_tick_to_label_gap_px
+                    + theme
+                        .axis
+                        .x_tick_length_px
+                    + theme
+                        .layout
+                        .x_tick_to_label_gap_px
                     + bbox.height,
                 bbox,
             },
@@ -287,21 +384,41 @@ pub fn build_layout(
     }
 
     let axis_label_y = h
-        - theme.layout.outer_bottom_px
-        - theme.layout.axis_label_to_canvas_edge_gap_px
+        - theme
+            .layout
+            .outer_bottom_px
+        - theme
+            .layout
+            .axis_label_to_canvas_edge_gap_px
         - axis_label_height;
     let mut axis_labels = Vec::new();
-    if !theme.axis.y_label.is_empty() {
+    if !theme
+        .axis
+        .y_label
+        .is_empty()
+    {
         axis_labels.push(PositionedText {
-            text: theme.axis.y_label.to_string(),
-            x: theme.layout.outer_left_px,
+            text: theme
+                .axis
+                .y_label
+                .to_string(),
+            x: theme
+                .layout
+                .outer_left_px,
             y: axis_label_y,
             bbox: y_axis_label_bbox,
         });
     }
-    if !theme.axis.x_label.is_empty() {
+    if !theme
+        .axis
+        .x_label
+        .is_empty()
+    {
         axis_labels.push(PositionedText {
-            text: theme.axis.x_label.to_string(),
+            text: theme
+                .axis
+                .x_label
+                .to_string(),
             x: plot_right - x_axis_label_bbox.width,
             y: axis_label_y,
             bbox: x_axis_label_bbox,
@@ -355,12 +472,7 @@ fn build_y_tick_cents(y_min_cent: i32, y_max_cent: i32) -> Vec<i32> {
     out
 }
 
-fn choose_evenly_spaced_indices(
-    n: usize,
-    max_labels: usize,
-    plot_width: i32,
-    min_gap_px: i32,
-) -> Vec<usize> {
+fn choose_evenly_spaced_indices(n: usize, max_labels: usize, plot_width: i32, min_gap_px: i32) -> Vec<usize> {
     if n == 0 {
         return Vec::new();
     }
@@ -369,7 +481,10 @@ fn choose_evenly_spaced_indices(
     }
 
     let by_gap = ((plot_width / min_gap_px.max(1)) + 1).max(2) as usize;
-    let target = max_labels.max(2).min(by_gap).min(n);
+    let target = max_labels
+        .max(2)
+        .min(by_gap)
+        .min(n);
     if target == 2 {
         return vec![0, n - 1];
     }
@@ -377,14 +492,26 @@ fn choose_evenly_spaced_indices(
     let mut out = Vec::with_capacity(target);
     for k in 0..target {
         let idx = ((k as f64 * (n - 1) as f64) / (target - 1) as f64).round() as usize;
-        if out.last().copied() != Some(idx) {
+        if out
+            .last()
+            .copied()
+            != Some(idx)
+        {
             out.push(idx);
         }
     }
-    if out.first().copied() != Some(0) {
+    if out
+        .first()
+        .copied()
+        != Some(0)
+    {
         out.insert(0, 0);
     }
-    if out.last().copied() != Some(n - 1) {
+    if out
+        .last()
+        .copied()
+        != Some(n - 1)
+    {
         out.push(n - 1);
     }
     out

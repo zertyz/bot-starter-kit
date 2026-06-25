@@ -26,47 +26,41 @@ pub struct FontMetricsCache {
 }
 
 impl FontMetricsCache {
-    pub fn measure(
-        &mut self,
-        text: &str,
-        font_px: u32,
-        rotation: TextRotation,
-        typography: &TypographyTheme,
-    ) -> TextBoxPx {
-        let key = TextKey {
-            text: text.to_string(),
-            font_px,
-            rotation,
-        };
+    pub fn measure(&mut self, text: &str, font_px: u32, rotation: TextRotation, typography: &TypographyTheme) -> TextBoxPx {
+        let key = TextKey { text: text.to_string(), font_px, rotation };
 
-        if let Some(v) = self.cache.get(&key) {
+        if let Some(v) = self
+            .cache
+            .get(&key)
+        {
             return *v;
         }
 
-        let raw_width = (text.chars().count() as f64 * font_px as f64 * typography.avg_advance_em)
+        let raw_width = (text
+            .chars()
+            .count() as f64
+            * font_px as f64
+            * typography.avg_advance_em)
             .ceil() as i32;
         let raw_height = (font_px as f64 * typography.line_height_em).ceil() as i32;
 
         let value = match rotation {
-            TextRotation::None => TextBoxPx {
-                width: raw_width,
-                height: raw_height,
-            },
-            TextRotation::Rotate270 => TextBoxPx {
-                width: raw_height,
-                height: raw_width,
-            },
+            TextRotation::None => TextBoxPx { width: raw_width, height: raw_height },
+            TextRotation::Rotate270 => TextBoxPx { width: raw_height, height: raw_width },
         };
 
-        self.cache.insert(key, value);
+        self.cache
+            .insert(key, value);
         value
     }
 
     pub fn len(&self) -> usize {
-        self.cache.len()
+        self.cache
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
+        self.cache
+            .is_empty()
     }
 }

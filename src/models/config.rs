@@ -24,12 +24,8 @@ pub struct TelegramConfig {
 impl Default for BotConfig {
     fn default() -> Self {
         Self {
-            repository_config: RepositoryConfig {
-                users_repository_db_file: "./users_repository.redb".to_string(),
-            },
-            telegram_config: TelegramConfig {
-                teloxide_token: "".to_string(),
-            },
+            repository_config: RepositoryConfig { users_repository_db_file: "./users_repository.redb".to_string() },
+            telegram_config: TelegramConfig { teloxide_token: "".to_string() },
         }
     }
 }

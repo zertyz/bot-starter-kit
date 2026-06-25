@@ -62,26 +62,12 @@ pub fn detect_important_moves(quotes: &[Quote], threshold_cents: i32) -> Vec<Imp
         }
     }
 
-    maybe_push_move(
-        &mut out,
-        run_start,
-        quotes.len() - 1,
-        run_delta,
-        threshold,
-        eps,
-    );
+    maybe_push_move(&mut out, run_start, quotes.len() - 1, run_delta, threshold, eps);
 
     out
 }
 
-fn maybe_push_move(
-    out: &mut Vec<ImportantMove>,
-    start_idx: usize,
-    end_idx: usize,
-    delta: f64,
-    threshold: f64,
-    eps: f64,
-) {
+fn maybe_push_move(out: &mut Vec<ImportantMove>, start_idx: usize, end_idx: usize, delta: f64, threshold: f64, eps: f64) {
     if end_idx <= start_idx || delta.abs() + eps < threshold {
         return;
     }
@@ -90,10 +76,6 @@ fn maybe_push_move(
         start_idx,
         end_idx,
         delta,
-        kind: if delta >= 0.0 {
-            MoveKind::Rise
-        } else {
-            MoveKind::Fall
-        },
+        kind: if delta >= 0.0 { MoveKind::Rise } else { MoveKind::Fall },
     });
 }

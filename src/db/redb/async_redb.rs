@@ -47,18 +47,10 @@ impl AsyncReDb {
         Self::open_with_max_readers(db_path, DEFAULT_MAX_READERS).await
     }
 
-    pub async fn open_with_max_readers(
-        db_path: impl AsRef<Path>,
-        max_readers: u32,
-    ) -> Result<Self> {
+    pub async fn open_with_max_readers(db_path: impl AsRef<Path>, max_readers: u32) -> Result<Self> {
         let db_path = db_path.as_ref();
 
-        let redb = redb::Database::create(db_path).map_err(|err| {
-            anyhow!(
-                "ReDB: Failed to open or create `database {:?}: {err}",
-                db_path
-            )
-        })?;
+        let redb = redb::Database::create(db_path).map_err(|err| anyhow!("ReDB: Failed to open or create `database {:?}: {err}", db_path))?;
 
         Ok(Self {
             redb,
@@ -88,15 +80,16 @@ impl AsyncReDb {
     /// The actual `redb` compaction is synchronous and may block the Tokio task while filesystem
     /// work is performed.
     pub async fn compact(&mut self) -> Result<()> {
-        let _write_permit = self.w_lock.lock().await;
+        let _write_permit = self
+            .w_lock
+            .lock()
+            .await;
 
         let _read_permits = self
             .r_lock
             .acquire_many(self.max_readers)
             .await
-            .map_err(|err| {
-                anyhow!("Failed to acquire all `redb` reader permits for compaction: {err}")
-            })?;
+            .map_err(|err| anyhow!("Failed to acquire all `redb` reader permits for compaction: {err}"))?;
 
         self.redb
             .compact()
@@ -111,32 +104,23 @@ impl AsyncReDb {
             .await
             .map_err(|err| anyhow!("Failed to acquire `redb` reader permit: {err}"))?;
 
-        let read_txn = self.redb.begin_read()?;
+        let read_txn = self
+            .redb
+            .begin_read()?;
 
         Ok(ReDbReadTransaction::new(read_txn, read_permit))
     }
 
     pub fn redb_iter_to_stream<KeyType, ValueType>(
-        redb_iter_result: std::result::Result<
-            redb::Range<'_, KeyType, ValueType>,
-            redb::StorageError,
-        >,
-    ) -> Result<
-        impl Stream<
-            Item = Result<(
-                redb::AccessGuard<'_, KeyType>,
-                redb::AccessGuard<'_, ValueType>,
-            )>,
-        >,
-    >
+        redb_iter_result: std::result::Result<redb::Range<'_, KeyType, ValueType>, redb::StorageError>,
+    ) -> Result<impl Stream<Item = Result<(redb::AccessGuard<'_, KeyType>, redb::AccessGuard<'_, ValueType>)>>>
     where
         KeyType: redb::Key,
         ValueType: redb::Value,
     {
         match redb_iter_result {
             Ok(redb_iter) => {
-                let stream = stream::iter(redb_iter)
-                    .map(|std_result| std_result.map_err(anyhow::Error::new));
+                let stream = stream::iter(redb_iter).map(|std_result| std_result.map_err(anyhow::Error::new));
 
                 Ok(stream)
             }
@@ -145,8 +129,13 @@ impl AsyncReDb {
     }
 
     pub async fn begin_write(&self) -> Result<ReDbWriteTransaction<'_>> {
-        let write_guard = self.w_lock.lock().await;
-        let write_txn = self.redb.begin_write()?;
+        let write_guard = self
+            .w_lock
+            .lock()
+            .await;
+        let write_txn = self
+            .redb
+            .begin_write()?;
 
         Ok(ReDbWriteTransaction::new(write_txn, write_guard))
     }
@@ -155,30 +144,31 @@ impl AsyncReDb {
         &self,
         table_definition: TableDefinition<'_, KeyType, ValueType>,
         input_stream: impl Stream<Item = (KeyType, ValueType)>,
-    ) -> Result<usize>
+    ) -> Result<u64>
     where
         for<'r> &'r KeyType: std::borrow::Borrow<<KeyType as redb::Value>::SelfType<'r>>,
         for<'r> <ValueType as redb::Value>::SelfType<'r>: From<&'r ValueType>,
     {
-        let write_txn = self.begin_write().await
+        let write_txn = self
+            .begin_write()
+            .await
             .map_err(|err| anyhow!("ReDb: beginning Stream ingestion into table '{table_definition}' -- couldn't create the write transaction: {err}"))?;
 
         let mut table = write_txn
             .inner()
             .open_table(table_definition)
-            .map_err(|err| {
-                anyhow!(
-                    "ReDb: failed to open table '{table_definition}' for Stream ingestion: {err}"
-                )
-            })?;
+            .map_err(|err| anyhow!("ReDb: failed to open table '{table_definition}' for Stream ingestion: {err}"))?;
 
         let mut count = 0;
         let mut input_stream = pin!(input_stream);
-        while let Some((key, value)) = input_stream.next().await {
+        while let Some((key, value)) = input_stream
+            .next()
+            .await
+        {
             let redb_value: <ValueType as redb::Value>::SelfType<'_> = (&value).into();
             table
-                    .insert(&key, redb_value)
-                    .map_err(|err| anyhow!("ReDb: Couldn't insert/replace item #{count} during Stream ingestion into table '{table_definition}': {err}"))?;
+                .insert(&key, redb_value)
+                .map_err(|err| anyhow!("ReDb: Couldn't insert/replace item #{count} during Stream ingestion into table '{table_definition}': {err}"))?;
             count += 1;
         }
 
@@ -207,10 +197,7 @@ pub struct ReDbReadTransaction<'db> {
 
 impl<'db> ReDbReadTransaction<'db> {
     fn new(read_txn: ReadTransaction, read_permit: SemaphorePermit<'db>) -> Self {
-        Self {
-            inner: read_txn,
-            _read_permit: read_permit,
-        }
+        Self { inner: read_txn, _read_permit: read_permit }
     }
 
     /// Access the underlying `redb::ReadTransaction`.
@@ -249,10 +236,7 @@ pub struct ReDbWriteTransaction<'db> {
 
 impl<'db> ReDbWriteTransaction<'db> {
     fn new(write_txn: WriteTransaction, write_guard: MutexGuard<'db, ()>) -> Self {
-        Self {
-            inner: write_txn,
-            _write_guard: write_guard,
-        }
+        Self { inner: write_txn, _write_guard: write_guard }
     }
 
     /// Access the underlying `redb::WriteTransaction`.
@@ -291,12 +275,7 @@ mod tests {
     async fn hello_api() {
         const TABLE: TableDefinition<&str, TestModel> = TableDefinition::new("redb_wrapper_data");
 
-        let expected_data_iter = || {
-            (0..128).map(|i| TestModel {
-                count: 127 - i,
-                whatever: i,
-            })
-        };
+        let expected_data_iter = || (0..128).map(|i| TestModel { count: 127 - i, whatever: i });
 
         let key = |i| format!("my_key{i:05}");
 
@@ -338,36 +317,33 @@ mod tests {
             .open_table(TABLE)
             .expect("Could not open table");
 
-        let mut observed_stream = AsyncReDb::redb_iter_to_stream(
-            table.range::<&str>(key(0).as_str()..key(expected_data_iter().count()).as_str()),
-        )
-        .expect("Could not get the Stream");
+        let mut observed_stream = AsyncReDb::redb_iter_to_stream(table.range::<&str>(key(0).as_str()..key(expected_data_iter().count()).as_str())).expect("Could not get the Stream");
 
         let mut expected_stream = stream::iter(expected_data_iter())
             .enumerate()
             .map(|(k, v)| anyhow::Result::<(String, TestModel), anyhow::Error>::Ok((key(k), v)));
 
-        while let Some(Ok((expected_k, expected_v))) = expected_stream.next().await {
-            if let Some(Ok((observed_k, observed_v))) = observed_stream.next().await {
-                assert_eq!(
-                    observed_k.value(),
-                    expected_k,
-                    "Stream query failed: row #{expected_k} yielded the value of row#{}",
-                    observed_k.value()
-                );
+        while let Some(Ok((expected_k, expected_v))) = expected_stream
+            .next()
+            .await
+        {
+            if let Some(Ok((observed_k, observed_v))) = observed_stream
+                .next()
+                .await
+            {
+                assert_eq!(observed_k.value(), expected_k, "Stream query failed: row #{expected_k} yielded the value of row#{}", observed_k.value());
 
-                assert_eq!(
-                    observed_v.value(),
-                    &expected_v,
-                    "Stream query failed @ row #{expected_k}"
-                );
+                assert_eq!(observed_v.value(), &expected_v, "Stream query failed @ row #{expected_k}");
             } else {
                 panic!("Stream query failed: row #{expected_k} is not present in the Stream");
             }
         }
 
         assert!(
-            observed_stream.next().await.is_none(),
+            observed_stream
+                .next()
+                .await
+                .is_none(),
             "Stream query failed: more elements than expected were produced"
         );
 
@@ -379,8 +355,12 @@ mod tests {
             .await
             .expect("Could not close read transaction");
 
-        db.compact().await.expect("Could not compact database");
+        db.compact()
+            .await
+            .expect("Could not compact database");
 
-        db.close().await.expect("Could not close database");
+        db.close()
+            .await
+            .expect("Could not close database");
     }
 }

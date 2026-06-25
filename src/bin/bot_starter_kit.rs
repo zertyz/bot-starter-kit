@@ -12,8 +12,7 @@ pub async fn parse_cmdline_and_merge_with_loaded_configs() -> BotConfig {
 
     let cli_options: models::cli::CliOptions = parse_cmdline_args();
     let config_file_path = get_config_file_path::<models::cli::CliOptions, BotConfig>();
-    let loaded_config_result =
-        ogre_config_meld::load_from_file::<BotConfig>(&config_file_path).await;
+    let loaded_config_result = ogre_config_meld::load_from_file::<BotConfig>(&config_file_path).await;
     let config = match loaded_config_result {
         Ok(loaded_config) => {
             if let Some(loaded_config) = loaded_config {
@@ -30,9 +29,7 @@ pub async fn parse_cmdline_and_merge_with_loaded_configs() -> BotConfig {
                     }
                 } else {
                     eprintln!("Couldn't find the configuration file {config_file_path:?}.");
-                    eprintln!(
-                        "Please, re-run and specify the -t option or the TELOXIDE_TOKEN env var; also specify -w to create an encrypted config file allowing you to drop the token."
-                    );
+                    eprintln!("Please, re-run and specify the -t option or the TELOXIDE_TOKEN env var; also specify -w to create an encrypted config file allowing you to drop the token.");
                     std::process::exit(1);
                 }
                 BotConfig::default()
@@ -53,9 +50,7 @@ pub async fn parse_cmdline_and_merge_with_loaded_configs() -> BotConfig {
         ogre_config_meld::save_to_file(&config, "", &config_file_path)
             .await
             .expect("Couldn't save the config file");
-        eprintln!(
-            "Configuration file saved successfully to {config_file_path:?}. Exiting. Re-run the program without -w, -t, and without the `TELOXIDE_TOKEN` env var."
-        );
+        eprintln!("Configuration file saved successfully to {config_file_path:?}. Exiting. Re-run the program without -w, -t, and without the `TELOXIDE_TOKEN` env var.");
         std::process::exit(0);
     }
     config

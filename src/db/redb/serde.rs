@@ -59,8 +59,13 @@ macro_rules! redb_mmap_value {
                 Self: 'a,
             {
                 // unsafe { &*(data.as_ptr() as *const $t) }
-                let ptr: *const $t = data.as_ptr().cast();
-                unsafe { ptr.as_ref().unwrap_unchecked() }
+                let ptr: *const $t = data
+                    .as_ptr()
+                    .cast();
+                unsafe {
+                    ptr.as_ref()
+                        .unwrap_unchecked()
+                }
             }
 
             #[inline(always)]
@@ -161,29 +166,20 @@ pub struct RedbRkyvWrapper<'a, T: Archive> {
 impl<'a, T: Archive> RedbRkyvWrapper<'a, T> {
     #[inline(always)]
     pub fn from_bytes_ref(bytes: &'a [u8]) -> Self {
-        RedbRkyvWrapper {
-            bytes: RkyvCow::Borrowed(bytes),
-            phantom: PhantomData,
-        }
+        RedbRkyvWrapper { bytes: RkyvCow::Borrowed(bytes), phantom: PhantomData }
     }
 
     #[inline(always)]
     pub fn from_bytes_owned(bytes: AlignedVec) -> Self {
-        Self {
-            bytes: RkyvCow::Owned(bytes),
-            phantom: PhantomData,
-        }
+        Self { bytes: RkyvCow::Owned(bytes), phantom: PhantomData }
     }
 
     #[inline(always)]
     pub fn from_value(value: &T) -> Self
     where
-        T: for<'r> rkyv::Serialize<
-                HighSerializer<AlignedVec, ArenaHandle<'r>, rkyv::rancor::Error>,
-            >,
+        T: for<'r> rkyv::Serialize<HighSerializer<AlignedVec, ArenaHandle<'r>, rkyv::rancor::Error>>,
     {
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(value)
-            .expect("rkyv serialization should not fail");
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(value).expect("rkyv serialization should not fail");
         Self::from_bytes_owned(bytes)
     }
 }
@@ -219,7 +215,9 @@ where
     where
         Self: 'b,
     {
-        value.bytes.as_ref()
+        value
+            .bytes
+            .as_ref()
     }
 
     #[inline(always)]
@@ -237,7 +235,12 @@ impl<'a, T: Archive> Deref for RedbRkyvWrapper<'a, T> {
     type Target = Archived<T>;
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        unsafe { rkyv::access_unchecked::<Archived<T>>(self.bytes.as_ref()) }
+        unsafe {
+            rkyv::access_unchecked::<Archived<T>>(
+                self.bytes
+                    .as_ref(),
+            )
+        }
     }
 }
 impl<T: Archive + Debug> Debug for RedbRkyvWrapper<'_, T>
@@ -288,18 +291,15 @@ mod tests {
     fn test_mmap() {
         const TABLE: TableDefinition<&str, TestModel> = TableDefinition::new("test_mmap_data");
 
-        let expected_data_iter = || {
-            (0..128).map(|i| TestModel {
-                count: 127 - i,
-                whatever: i,
-            })
-        };
+        let expected_data_iter = || (0..128).map(|i| TestModel { count: 127 - i, whatever: i });
 
         let key = |i| format!("my_key{i}");
 
         let file_path = "/tmp/test_mmap.redb";
         let db = Database::create(file_path).expect("Could not create database");
-        let write_txn = db.begin_write().expect("Could not begin write transaction");
+        let write_txn = db
+            .begin_write()
+            .expect("Could not begin write transaction");
         {
             let mut table = write_txn
                 .open_table(TABLE)
@@ -310,10 +310,16 @@ mod tests {
                     .expect("Could not insert/replace #{i}");
             }
         }
-        write_txn.commit().expect("Could not commit transaction");
+        write_txn
+            .commit()
+            .expect("Could not commit transaction");
 
-        let read_txn = db.begin_read().expect("Could not begin read transaction");
-        let table = read_txn.open_table(TABLE).expect("Could not open table");
+        let read_txn = db
+            .begin_read()
+            .expect("Could not begin read transaction");
+        let table = read_txn
+            .open_table(TABLE)
+            .expect("Could not open table");
         for (i, expected_value) in expected_data_iter().enumerate() {
             let observed_value = table
                 .get(key(i).as_str())
@@ -325,21 +331,17 @@ mod tests {
 
     #[test]
     fn test_rkyv() {
-        const TABLE: TableDefinition<&str, RedbRkyvWrapper<TestModel>> =
-            TableDefinition::new("test_rkyv_data");
+        const TABLE: TableDefinition<&str, RedbRkyvWrapper<TestModel>> = TableDefinition::new("test_rkyv_data");
 
-        let expected_data_iter = || {
-            (0..128).map(|i| TestModel {
-                count: 127 - i,
-                whatever: i,
-            })
-        };
+        let expected_data_iter = || (0..128).map(|i| TestModel { count: 127 - i, whatever: i });
 
         let key = |i| format!("my_key{i}");
 
         let file_path = "/tmp/test_rkyv.redb";
         let db = Database::create(file_path).expect("Could not create database");
-        let write_txn = db.begin_write().expect("Could not begin write transaction");
+        let write_txn = db
+            .begin_write()
+            .expect("Could not begin write transaction");
         {
             let mut table = write_txn
                 .open_table(TABLE)
@@ -350,10 +352,16 @@ mod tests {
                     .expect("Could not insert/replace #{i}");
             }
         }
-        write_txn.commit().expect("Could not commit transaction");
+        write_txn
+            .commit()
+            .expect("Could not commit transaction");
 
-        let read_txn = db.begin_read().expect("Could not begin read transaction");
-        let table = read_txn.open_table(TABLE).expect("Could not open table");
+        let read_txn = db
+            .begin_read()
+            .expect("Could not begin read transaction");
+        let table = read_txn
+            .open_table(TABLE)
+            .expect("Could not open table");
         for (i, expected_value) in expected_data_iter().enumerate() {
             let observed_value = table
                 .get(key(i).as_str())

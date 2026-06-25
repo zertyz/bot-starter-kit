@@ -22,13 +22,7 @@ struct Cli {
     png_mode: Option<PngEncodeMode>,
 }
 
-async fn plot(
-    bot: &Bot,
-    chat_id: ChatId,
-    engine: &mut RenderEngine,
-    message: &mut Option<Message>,
-    quotes: &[Quote],
-) -> Result<()> {
+async fn plot(bot: &Bot, chat_id: ChatId, engine: &mut RenderEngine, message: &mut Option<Message>, quotes: &[Quote]) -> Result<()> {
     let generated_png = "/tmp/brl2usd.png";
     let mut timings = Timings::default();
     let theme = Theme::default();
@@ -36,7 +30,9 @@ async fn plot(
     let moves = timings.measure("detect moves", || {
         Ok(detect_important_moves(
             quotes,
-            theme.movement.important_delta_cents,
+            theme
+                .movement
+                .important_delta_cents,
         ))
     })?;
 
@@ -66,10 +62,9 @@ async fn plot(
         }
         Some(m) => {
             // continuation -- edit the first message
-            let media = InputMedia::Photo(
-                InputMediaPhoto::new(InputFile::file(generated_png)).caption(caption.to_string()),
-            );
-            bot.edit_message_media(chat_id, m.id, media).await?;
+            let media = InputMedia::Photo(InputMediaPhoto::new(InputFile::file(generated_png)).caption(caption.to_string()));
+            bot.edit_message_media(chat_id, m.id, media)
+                .await?;
         }
     }
 
@@ -83,10 +78,14 @@ pub async fn demo(bot: &Bot, chat_id: ChatId) -> Result<()> {
 
     let mut theme = Theme::default();
     if let Some(threshold) = cli.threshold_cents {
-        theme.movement.important_delta_cents = threshold;
+        theme
+            .movement
+            .important_delta_cents = threshold;
     }
     if let Some(mode) = cli.png_mode {
-        theme.png.mode = mode;
+        theme
+            .png
+            .mode = mode;
     }
 
     let quotes = timings.measure("load data", || {
@@ -103,7 +102,9 @@ pub async fn demo(bot: &Bot, chat_id: ChatId) -> Result<()> {
     let moves = timings.measure("detect moves", || {
         Ok(detect_important_moves(
             &quotes,
-            theme.movement.important_delta_cents,
+            theme
+                .movement
+                .important_delta_cents,
         ))
     })?;
     let mut engine = RenderEngine::new(theme);
@@ -173,15 +174,11 @@ fn parse_png_mode(value: &str) -> Result<PngEncodeMode> {
             } else if let Some(v) = value.strip_prefix("oxipng-raw:") {
                 let preset: u8 = v.parse()?;
                 if preset > 6 {
-                    return Err(anyhow!(
-                        "--png-mode=oxipng-raw:N requires N between 0 and 6"
-                    ));
+                    return Err(anyhow!("--png-mode=oxipng-raw:N requires N between 0 and 6"));
                 }
                 Ok(PngEncodeMode::OxipngRaw { preset })
             } else {
-                Err(anyhow!(
-                    "--png-mode must be fast, balanced, uncompressed, level:N, or oxipng-raw:N"
-                ))
+                Err(anyhow!("--png-mode must be fast, balanced, uncompressed, level:N, or oxipng-raw:N"))
             }
         }
     }

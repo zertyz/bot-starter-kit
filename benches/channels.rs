@@ -38,9 +38,7 @@ use std::{
     thread,
 };
 
-use criterion::{
-    BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
-};
+use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime};
 
 #[derive(Debug)]
 struct Message {
@@ -93,35 +91,66 @@ fn bench_same_thread_latency(criterion: &mut Criterion) {
 
     let (async_sender, async_receiver) = async_channel::bounded::<Message>(BUFFER_SIZE);
     let (tokio_sender, mut tokio_receiver) = tokio::sync::mpsc::channel::<Message>(BUFFER_SIZE);
-    let (mut futures_sender, mut futures_receiver) =
-        futures::channel::mpsc::channel::<Message>(BUFFER_SIZE);
+    let (mut futures_sender, mut futures_receiver) = futures::channel::mpsc::channel::<Message>(BUFFER_SIZE);
     let (std_sender, std_receiver) = std::sync::mpsc::sync_channel::<Message>(BUFFER_SIZE);
 
     group.bench_function(ASYNC_CHANNEL_BOUNDED, |bencher| {
         bencher.iter(|| {
-            spin_until_success(|| async_sender.try_send(Message::default()).is_ok());
-            spin_until_success(|| async_receiver.try_recv().is_ok());
+            spin_until_success(|| {
+                async_sender
+                    .try_send(Message::default())
+                    .is_ok()
+            });
+            spin_until_success(|| {
+                async_receiver
+                    .try_recv()
+                    .is_ok()
+            });
         })
     });
 
     group.bench_function(TOKIO_MPSC, |bencher| {
         bencher.iter(|| {
-            spin_until_success(|| tokio_sender.try_send(Message::default()).is_ok());
-            spin_until_success(|| tokio_receiver.try_recv().is_ok());
+            spin_until_success(|| {
+                tokio_sender
+                    .try_send(Message::default())
+                    .is_ok()
+            });
+            spin_until_success(|| {
+                tokio_receiver
+                    .try_recv()
+                    .is_ok()
+            });
         })
     });
 
     group.bench_function(FUTURES_MPSC, |bencher| {
         bencher.iter(|| {
-            spin_until_success(|| futures_sender.try_send(Message::default()).is_ok());
-            spin_until_success(|| futures_receiver.try_recv().is_ok());
+            spin_until_success(|| {
+                futures_sender
+                    .try_send(Message::default())
+                    .is_ok()
+            });
+            spin_until_success(|| {
+                futures_receiver
+                    .try_recv()
+                    .is_ok()
+            });
         })
     });
 
     group.bench_function(STD_SYNC_CHANNEL_BASELINE, |bencher| {
         bencher.iter(|| {
-            spin_until_success(|| std_sender.try_send(Message::default()).is_ok());
-            spin_until_success(|| std_receiver.try_recv().is_ok());
+            spin_until_success(|| {
+                std_sender
+                    .try_send(Message::default())
+                    .is_ok()
+            });
+            spin_until_success(|| {
+                std_receiver
+                    .try_recv()
+                    .is_ok()
+            });
         })
     });
 
@@ -140,17 +169,24 @@ fn bench_same_thread_throughput(criterion: &mut Criterion) {
 
     let (async_sender, async_receiver) = async_channel::bounded::<Message>(BUFFER_SIZE);
     let (tokio_sender, mut tokio_receiver) = tokio::sync::mpsc::channel::<Message>(BUFFER_SIZE);
-    let (mut futures_sender, mut futures_receiver) =
-        futures::channel::mpsc::channel::<Message>(BUFFER_SIZE);
+    let (mut futures_sender, mut futures_receiver) = futures::channel::mpsc::channel::<Message>(BUFFER_SIZE);
     let (std_sender, std_receiver) = std::sync::mpsc::sync_channel::<Message>(BUFFER_SIZE);
 
     group.bench_function(ASYNC_CHANNEL_BOUNDED, |bencher| {
         bencher.iter(|| {
             for _ in 0..BUFFER_SIZE {
-                spin_until_success(|| async_sender.try_send(Message::default()).is_ok());
+                spin_until_success(|| {
+                    async_sender
+                        .try_send(Message::default())
+                        .is_ok()
+                });
             }
             for _ in 0..BUFFER_SIZE {
-                spin_until_success(|| async_receiver.try_recv().is_ok());
+                spin_until_success(|| {
+                    async_receiver
+                        .try_recv()
+                        .is_ok()
+                });
             }
         })
     });
@@ -158,10 +194,18 @@ fn bench_same_thread_throughput(criterion: &mut Criterion) {
     group.bench_function(TOKIO_MPSC, |bencher| {
         bencher.iter(|| {
             for _ in 0..BUFFER_SIZE {
-                spin_until_success(|| tokio_sender.try_send(Message::default()).is_ok());
+                spin_until_success(|| {
+                    tokio_sender
+                        .try_send(Message::default())
+                        .is_ok()
+                });
             }
             for _ in 0..BUFFER_SIZE {
-                spin_until_success(|| tokio_receiver.try_recv().is_ok());
+                spin_until_success(|| {
+                    tokio_receiver
+                        .try_recv()
+                        .is_ok()
+                });
             }
         })
     });
@@ -169,10 +213,18 @@ fn bench_same_thread_throughput(criterion: &mut Criterion) {
     group.bench_function(FUTURES_MPSC, |bencher| {
         bencher.iter(|| {
             for _ in 0..BUFFER_SIZE {
-                spin_until_success(|| futures_sender.try_send(Message::default()).is_ok());
+                spin_until_success(|| {
+                    futures_sender
+                        .try_send(Message::default())
+                        .is_ok()
+                });
             }
             for _ in 0..BUFFER_SIZE {
-                spin_until_success(|| futures_receiver.try_recv().is_ok());
+                spin_until_success(|| {
+                    futures_receiver
+                        .try_recv()
+                        .is_ok()
+                });
             }
         })
     });
@@ -180,10 +232,18 @@ fn bench_same_thread_throughput(criterion: &mut Criterion) {
     group.bench_function(STD_SYNC_CHANNEL_BASELINE, |bencher| {
         bencher.iter(|| {
             for _ in 0..BUFFER_SIZE {
-                spin_until_success(|| std_sender.try_send(Message::default()).is_ok());
+                spin_until_success(|| {
+                    std_sender
+                        .try_send(Message::default())
+                        .is_ok()
+                });
             }
             for _ in 0..BUFFER_SIZE {
-                spin_until_success(|| std_receiver.try_recv().is_ok());
+                spin_until_success(|| {
+                    std_receiver
+                        .try_recv()
+                        .is_ok()
+                });
             }
         })
     });
@@ -232,12 +292,7 @@ fn bench_inter_thread_baseline(group: &mut BenchmarkGroup<WallTime>) {
 /// flag and sends exactly one message, and the benchmark thread receives it.
 /// The result includes cross-thread signaling overhead; compare each channel to
 /// `THREAD_SIGNAL_BASELINE` to estimate the extra cost of the channel itself.
-fn bench_inter_thread_latency_case(
-    group: &mut BenchmarkGroup<WallTime>,
-    bench_id: &'static str,
-    mut send_fn: impl FnMut() + Send,
-    mut receive_fn: impl FnMut(),
-) {
+fn bench_inter_thread_latency_case(group: &mut BenchmarkGroup<WallTime>, bench_id: &'static str, mut send_fn: impl FnMut() + Send, mut receive_fn: impl FnMut()) {
     thread::scope(|scope| {
         let keep_running = Arc::new(AtomicBool::new(true));
         let keep_running_ref = Arc::clone(&keep_running);
@@ -278,34 +333,81 @@ fn bench_inter_thread_latency(criterion: &mut Criterion) {
 
     let (async_sender, async_receiver) = async_channel::bounded::<Message>(BUFFER_SIZE);
     let (tokio_sender, mut tokio_receiver) = tokio::sync::mpsc::channel::<Message>(BUFFER_SIZE);
-    let (mut futures_sender, mut futures_receiver) =
-        futures::channel::mpsc::channel::<Message>(BUFFER_SIZE);
+    let (mut futures_sender, mut futures_receiver) = futures::channel::mpsc::channel::<Message>(BUFFER_SIZE);
     let (std_sender, std_receiver) = std::sync::mpsc::sync_channel::<Message>(BUFFER_SIZE);
 
     bench_inter_thread_baseline(&mut group);
     bench_inter_thread_latency_case(
         &mut group,
         ASYNC_CHANNEL_BOUNDED,
-        || spin_until_success(|| async_sender.try_send(Message::default()).is_ok()),
-        || spin_until_success(|| async_receiver.try_recv().is_ok()),
+        || {
+            spin_until_success(|| {
+                async_sender
+                    .try_send(Message::default())
+                    .is_ok()
+            })
+        },
+        || {
+            spin_until_success(|| {
+                async_receiver
+                    .try_recv()
+                    .is_ok()
+            })
+        },
     );
     bench_inter_thread_latency_case(
         &mut group,
         TOKIO_MPSC,
-        || spin_until_success(|| tokio_sender.try_send(Message::default()).is_ok()),
-        || spin_until_success(|| tokio_receiver.try_recv().is_ok()),
+        || {
+            spin_until_success(|| {
+                tokio_sender
+                    .try_send(Message::default())
+                    .is_ok()
+            })
+        },
+        || {
+            spin_until_success(|| {
+                tokio_receiver
+                    .try_recv()
+                    .is_ok()
+            })
+        },
     );
     bench_inter_thread_latency_case(
         &mut group,
         FUTURES_MPSC,
-        || spin_until_success(|| futures_sender.try_send(Message::default()).is_ok()),
-        || spin_until_success(|| futures_receiver.try_recv().is_ok()),
+        || {
+            spin_until_success(|| {
+                futures_sender
+                    .try_send(Message::default())
+                    .is_ok()
+            })
+        },
+        || {
+            spin_until_success(|| {
+                futures_receiver
+                    .try_recv()
+                    .is_ok()
+            })
+        },
     );
     bench_inter_thread_latency_case(
         &mut group,
         STD_SYNC_CHANNEL_BASELINE,
-        || spin_until_success(|| std_sender.try_send(Message::default()).is_ok()),
-        || spin_until_success(|| std_receiver.try_recv().is_ok()),
+        || {
+            spin_until_success(|| {
+                std_sender
+                    .try_send(Message::default())
+                    .is_ok()
+            })
+        },
+        || {
+            spin_until_success(|| {
+                std_receiver
+                    .try_recv()
+                    .is_ok()
+            })
+        },
     );
 
     group.finish();
@@ -317,12 +419,7 @@ fn bench_inter_thread_latency(criterion: &mut Criterion) {
 /// benchmark thread drains a fixed receive batch. This approximates sustained
 /// publishing into a channel-backed stream under load, without including the
 /// cost of `StreamExt::next()` or project message mapping.
-fn bench_inter_thread_throughput_case(
-    group: &mut BenchmarkGroup<WallTime>,
-    bench_id: &'static str,
-    mut send_batch_fn: impl FnMut() + Send,
-    mut receive_batch_fn: impl FnMut(),
-) {
+fn bench_inter_thread_throughput_case(group: &mut BenchmarkGroup<WallTime>, bench_id: &'static str, mut send_batch_fn: impl FnMut() + Send, mut receive_batch_fn: impl FnMut()) {
     thread::scope(|scope| {
         let keep_running = Arc::new(AtomicBool::new(true));
         let keep_running_ref = Arc::clone(&keep_running);
@@ -355,8 +452,7 @@ fn bench_inter_thread_throughput(criterion: &mut Criterion) {
 
     let (async_sender, async_receiver) = async_channel::bounded::<Message>(BUFFER_SIZE);
     let (tokio_sender, mut tokio_receiver) = tokio::sync::mpsc::channel::<Message>(BUFFER_SIZE);
-    let (mut futures_sender, mut futures_receiver) =
-        futures::channel::mpsc::channel::<Message>(BUFFER_SIZE);
+    let (mut futures_sender, mut futures_receiver) = futures::channel::mpsc::channel::<Message>(BUFFER_SIZE);
     let (std_sender, std_receiver) = std::sync::mpsc::sync_channel::<Message>(BUFFER_SIZE);
 
     bench_inter_thread_throughput_case(
@@ -364,14 +460,21 @@ fn bench_inter_thread_throughput(criterion: &mut Criterion) {
         ASYNC_CHANNEL_BOUNDED,
         || {
             for _ in 0..BUFFER_SIZE {
-                if async_sender.try_send(Message::default()).is_err() {
+                if async_sender
+                    .try_send(Message::default())
+                    .is_err()
+                {
                     pause_after_full_channel();
                 }
             }
         },
         || {
             for _ in 0..THROUGHPUT_RECEIVE_BATCH {
-                spin_until_success(|| async_receiver.try_recv().is_ok());
+                spin_until_success(|| {
+                    async_receiver
+                        .try_recv()
+                        .is_ok()
+                });
             }
         },
     );
@@ -380,14 +483,21 @@ fn bench_inter_thread_throughput(criterion: &mut Criterion) {
         TOKIO_MPSC,
         || {
             for _ in 0..BUFFER_SIZE {
-                if tokio_sender.try_send(Message::default()).is_err() {
+                if tokio_sender
+                    .try_send(Message::default())
+                    .is_err()
+                {
                     pause_after_full_channel();
                 }
             }
         },
         || {
             for _ in 0..THROUGHPUT_RECEIVE_BATCH {
-                spin_until_success(|| tokio_receiver.try_recv().is_ok());
+                spin_until_success(|| {
+                    tokio_receiver
+                        .try_recv()
+                        .is_ok()
+                });
             }
         },
     );
@@ -396,14 +506,21 @@ fn bench_inter_thread_throughput(criterion: &mut Criterion) {
         FUTURES_MPSC,
         || {
             for _ in 0..BUFFER_SIZE {
-                if futures_sender.try_send(Message::default()).is_err() {
+                if futures_sender
+                    .try_send(Message::default())
+                    .is_err()
+                {
                     pause_after_full_channel();
                 }
             }
         },
         || {
             for _ in 0..THROUGHPUT_RECEIVE_BATCH {
-                spin_until_success(|| futures_receiver.try_recv().is_ok());
+                spin_until_success(|| {
+                    futures_receiver
+                        .try_recv()
+                        .is_ok()
+                });
             }
         },
     );
@@ -412,14 +529,21 @@ fn bench_inter_thread_throughput(criterion: &mut Criterion) {
         STD_SYNC_CHANNEL_BASELINE,
         || {
             for _ in 0..BUFFER_SIZE {
-                if std_sender.try_send(Message::default()).is_err() {
+                if std_sender
+                    .try_send(Message::default())
+                    .is_err()
+                {
                     pause_after_full_channel();
                 }
             }
         },
         || {
             for _ in 0..THROUGHPUT_RECEIVE_BATCH {
-                spin_until_success(|| std_receiver.try_recv().is_ok());
+                spin_until_success(|| {
+                    std_receiver
+                        .try_recv()
+                        .is_ok()
+                });
             }
         },
     );

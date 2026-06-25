@@ -7,17 +7,11 @@ use std::num::NonZeroU64;
 pub trait Messaging<PartyType, MoPayloadType, MtPayloadType> {
     /// Returns the `Stream` of "Mobile Originated" (MO) messages for the backend logic to use as "inputs".
     /// NOTE: This method can be called just once. It will return `None` in any subsequent calls.
-    fn get_mo_stream(
-        mo_rx: async_channel::Receiver<MoPayloadType>,
-    ) -> impl Stream<Item = Mo<PartyType, MoPayloadType>>;
+    fn get_mo_stream(mo_rx: async_channel::Receiver<MoPayloadType>) -> impl Stream<Item = Mo<PartyType, MoPayloadType>>;
 
     /// Takes in a `Stream` of "Mobile Terminated" (MT) messages -- produced by the backend logic and targeted at users.
     /// This method should return immediately, returning a Join Handle to the spawned tokio task that will process the Stream to completion.
-    fn consume_mt_stream(
-        &self,
-        concurrency: usize,
-        stream: impl Stream<Item = MtPayloadType> + Send + 'static,
-    ) -> tokio::task::JoinHandle<()>;
+    fn consume_mt_stream(&self, concurrency: usize, stream: impl Stream<Item = MtPayloadType> + Send + 'static) -> tokio::task::JoinHandle<()>;
 }
 
 /// Model for "Mobile Originated" messages for a given "account" within the message platform
@@ -35,19 +29,18 @@ pub struct Mo<PartyType, PayloadType> {
 }
 impl<PartyType, PayloadType> Mo<PartyType, PayloadType> {
     pub fn new(id: u64, sender: Party<PartyType>, dialog: Dialog, payload: PayloadType) -> Self {
-        Mo {
-            id: NonZeroU64::new(id),
-            sender,
-            dialog,
-            payload,
-        }
+        Mo { id: NonZeroU64::new(id), sender, dialog, payload }
     }
 
     pub fn id(&self) -> u64 {
-        self.id.map(NonZeroU64::get).unwrap_or_default()
+        self.id
+            .map(NonZeroU64::get)
+            .unwrap_or_default()
     }
     pub fn sender(&self) -> &PartyType {
-        &self.sender.inner
+        &self
+            .sender
+            .inner
     }
 
     pub fn dialog(&self) -> &Dialog {
@@ -112,15 +105,13 @@ pub struct Dialog {
 
 impl Dialog {
     pub fn new(id: u64, kind: DialogKind, language: Language) -> Self {
-        Self {
-            id: NonZeroU64::new(id),
-            kind,
-            language,
-        }
+        Self { id: NonZeroU64::new(id), kind, language }
     }
 
     pub fn id(&self) -> u64 {
-        self.id.map(NonZeroU64::get).unwrap_or_default()
+        self.id
+            .map(NonZeroU64::get)
+            .unwrap_or_default()
     }
 
     pub fn kind(&self) -> &DialogKind {
@@ -149,14 +140,18 @@ pub enum Language {
 
 pub enum Payload {
     /// Plain text, possibly with simple markups if the messaging platform supports it
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Reply {
         reference_text: String,
         new_text: String,
     },
 
     /// If supported by the messaging platform, notifies the user-side UI to set / change the "title" for the dialog
-    Pin { text: String },
+    Pin {
+        text: String,
+    },
     // /// When supported, present the user a visually appealing menu of options to pick.
     // /// A vector inside a vector is used to give some layout hints: the inner vector contains columns, wheras the
     // /// outter vector specifies lines.
@@ -164,9 +159,15 @@ pub enum Payload {
     // /// a generalized version may be introduced
     // Options { options: Vec<Vec<InlineKeyboardButton>>},
     /// Photo URL -- either remote or a local file. The messaging platform might show a thumbnail and might reduce the size & quality as well
-    Photo { url: Url, caption: String },
+    Photo {
+        url: Url,
+        caption: String,
+    },
     /// Whatever file -- the messaging platform won't change the contents
-    Document { url: Url, caption: String },
+    Document {
+        url: Url,
+        caption: String,
+    },
 }
 
 pub type Url = String;

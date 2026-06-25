@@ -35,28 +35,38 @@ impl TelegramGateway {
         unsafe {
             std::env::set_var(
                 "TELOXIDE_TOKEN",
-                config.telegram_config.teloxide_token.clone(),
+                config
+                    .telegram_config
+                    .teloxide_token
+                    .clone(),
             );
         }
         let bot = Bot::from_env(); // expects TELOXIDE_TOKEN. How to not involve the environment to pass in this information?
         let mode = env::var("MODE").unwrap_or_else(|_| "polling".into());
 
         let (mo_tx, mo_rx) = async_channel::bounded(64);
-        let instance = Arc::new(Self {
-            mo_tx,
-            bot: bot.clone(),
-        });
+        let instance = Arc::new(Self { mo_tx, bot: bot.clone() });
 
         // spawn the Teloxide gateway
         tokio::spawn({
             let instance_clone = instance.clone();
             async move {
                 _ = match mode.as_str() {
-                    "webhook" => instance_clone.run_webhook(bot).await,
-                    _ => instance_clone.run_polling(bot).await,
+                    "webhook" => {
+                        instance_clone
+                            .run_webhook(bot)
+                            .await
+                    }
+                    _ => {
+                        instance_clone
+                            .run_polling(bot)
+                            .await
+                    }
                 }
                 .inspect_err(|err| eprintln!("Telegram loop exited with error: {}", err));
-                instance_clone.mo_tx.close();
+                instance_clone
+                    .mo_tx
+                    .close();
                 eprintln!("Quitting -- possibly due to operator's request via CTRL-C or SIGTERM");
             }
         });
@@ -70,7 +80,11 @@ impl TelegramGateway {
             let self_clone = self.clone();
             move |bot: Bot, msg: Message| {
                 let self_clone = self_clone.clone();
-                async move { self_clone.handler(bot, msg).await }
+                async move {
+                    self_clone
+                        .handler(bot, msg)
+                        .await
+                }
             }
         };
 
@@ -78,7 +92,11 @@ impl TelegramGateway {
             let self_clone = self.clone();
             move |bot: Bot, q: CallbackQuery| {
                 let self_clone = self_clone.clone();
-                async move { self_clone.on_callback(bot, q).await }
+                async move {
+                    self_clone
+                        .on_callback(bot, q)
+                        .await
+                }
             }
         };
 
@@ -108,13 +126,9 @@ impl TelegramGateway {
         let secret = env::var("WEBHOOK_SECRET").unwrap_or_else(|_| "changeme-42".into());
 
         // teloxide spins up an Axum server & calls setWebhook for you:
-        let listener = teloxide::update_listeners::webhooks::axum(
-            bot.clone(),
-            teloxide::update_listeners::webhooks::Options::new(addr, url.parse()?)
-                .secret_token(secret.clone()),
-        )
-        .await
-        .expect("webhook setup failed");
+        let listener = teloxide::update_listeners::webhooks::axum(bot.clone(), teloxide::update_listeners::webhooks::Options::new(addr, url.parse()?).secret_token(secret.clone()))
+            .await
+            .expect("webhook setup failed");
 
         info!("Webhook listening; press Ctrl+C to stop");
 
@@ -123,14 +137,22 @@ impl TelegramGateway {
                 let self_clone = self.clone();
                 move |bot: Bot, msg: Message| {
                     let self_clone = self_clone.clone();
-                    async move { self_clone.handler(bot, msg).await }
+                    async move {
+                        self_clone
+                            .handler(bot, msg)
+                            .await
+                    }
                 }
             }))
             .branch(Update::filter_callback_query().endpoint({
                 let self_clone = self.clone();
                 move |bot: Bot, callback_query: CallbackQuery| {
                     let self_clone = self_clone.clone();
-                    async move { self_clone.on_callback(bot, callback_query).await }
+                    async move {
+                        self_clone
+                            .on_callback(bot, callback_query)
+                            .await
+                    }
                 }
             }));
         Dispatcher::builder(bot, handlers)
@@ -150,11 +172,7 @@ impl TelegramGateway {
             .map_err(|_err| RequestError::RetryAfter(Seconds::from_seconds(15)))
     }
 
-    async fn on_callback(
-        self: &Arc<Self>,
-        _bot: Bot,
-        callback_query: CallbackQuery,
-    ) -> ResponseResult<()> {
+    async fn on_callback(self: &Arc<Self>, _bot: Bot, callback_query: CallbackQuery) -> ResponseResult<()> {
         self.mo_tx
             .send(TelegramMo::CallbackQuery(Box::new(callback_query)))
             .await
@@ -167,9 +185,7 @@ impl TelegramGateway {
 }
 
 impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
-    fn get_mo_stream(
-        mo_rx: async_channel::Receiver<TelegramMo>,
-    ) -> impl Stream<Item = Mo<User, TelegramMo>> {
+    fn get_mo_stream(mo_rx: async_channel::Receiver<TelegramMo>) -> impl Stream<Item = Mo<User, TelegramMo>> {
         fn kind_mapper(teloxide_kind: &ChatKind) -> DialogKind {
             match teloxide_kind {
                 ChatKind::Public(_) => DialogKind::Group,
@@ -191,17 +207,31 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
         fn map_mo(telegram_mo: TelegramMo) -> Option<Mo<User, TelegramMo>> {
             match &telegram_mo {
                 TelegramMo::Message(message) => {
-                    let from = message.from.as_ref()?;
-                    let id = message.id.0 as u64;
+                    let from = message
+                        .from
+                        .as_ref()?;
+                    let id = message
+                        .id
+                        .0 as u64;
                     let sender = Party::new(from.clone());
                     let dialog = Dialog::new(
-                        message.chat.id.0 as u64,
-                        kind_mapper(&message.chat.kind),
+                        message
+                            .chat
+                            .id
+                            .0 as u64,
+                        kind_mapper(
+                            &message
+                                .chat
+                                .kind,
+                        ),
                         language_mapper(
                             message
                                 .from
                                 .as_ref()
-                                .and_then(|from| from.language_code.as_ref()),
+                                .and_then(|from| {
+                                    from.language_code
+                                        .as_ref()
+                                }),
                         ),
                     );
                     Some(Mo::new(id, sender, dialog, telegram_mo))
@@ -211,16 +241,32 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
                         .message
                         .as_ref()
                         .and_then(|message| message.regular_message())?;
-                    let id = message.id.0 as u64;
-                    let sender = Party::new(callback_query.from.clone());
+                    let id = message
+                        .id
+                        .0 as u64;
+                    let sender = Party::new(
+                        callback_query
+                            .from
+                            .clone(),
+                    );
                     let dialog = Dialog::new(
-                        message.chat.id.0 as u64,
-                        kind_mapper(&message.chat.kind),
+                        message
+                            .chat
+                            .id
+                            .0 as u64,
+                        kind_mapper(
+                            &message
+                                .chat
+                                .kind,
+                        ),
                         language_mapper(
                             message
                                 .from
                                 .as_ref()
-                                .and_then(|from| from.language_code.as_ref()),
+                                .and_then(|from| {
+                                    from.language_code
+                                        .as_ref()
+                                }),
                         ),
                     );
                     Some(Mo::new(id, sender, dialog, telegram_mo))
@@ -231,25 +277,17 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
         mo_rx.filter_map(|telegram_mo| future::ready(map_mo(telegram_mo)))
     }
 
-    fn consume_mt_stream(
-        &self,
-        concurrency: usize,
-        stream: impl Stream<Item = TelegramBoxSendFuture> + Send + 'static,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(
-            stream.for_each_concurrent(concurrency, |mt_future_result| async {
-                _ = mt_future_result
-                    .await
-                    .inspect_err(|err| {
-                        eprintln!("!!!GOT YOU!!!");
-                        eprintln!(
-                            "TELEGRAM: error processing or sending message #{{mt.id()}}: {err}"
-                        );
-                        error!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}")
-                    })
-                    .inspect(|response| println!("WE HAVE A RESPONSE! {response}"));
-            }),
-        )
+    fn consume_mt_stream(&self, concurrency: usize, stream: impl Stream<Item = TelegramBoxSendFuture> + Send + 'static) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(stream.for_each_concurrent(concurrency, |mt_future_result| async {
+            _ = mt_future_result
+                .await
+                .inspect_err(|err| {
+                    eprintln!("!!!GOT YOU!!!");
+                    eprintln!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}");
+                    error!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}")
+                })
+                .inspect(|response| println!("WE HAVE A RESPONSE! {response}"));
+        }))
     }
 }
 
@@ -288,9 +326,7 @@ where
 }
 
 /// Similar to [mt()], but meant to enqueue convoluted async processes or the sending of multiple messages
-pub fn mts<OkType: Debug, ErrorType: Into<anyhow::Error> + Display>(
-    process: impl Future<Output = Result<OkType, ErrorType>> + Send + 'static,
-) -> TelegramBoxSendFuture {
+pub fn mts<OkType: Debug, ErrorType: Into<anyhow::Error> + Display>(process: impl Future<Output = Result<OkType, ErrorType>> + Send + 'static) -> TelegramBoxSendFuture {
     Box::pin(async move {
         process
             .await

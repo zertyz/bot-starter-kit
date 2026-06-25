@@ -2,18 +2,9 @@ use std::fmt::{Debug, Display, Formatter};
 
 #[derive(Debug)]
 pub enum Error {
-    ReDbTable {
-        message: String,
-        cause: redb::TableError,
-    },
-    ReDbStorage {
-        message: String,
-        cause: redb::StorageError,
-    },
-    ReDbCommit {
-        message: String,
-        cause: redb::CommitError,
-    },
+    ReDbTable { message: String, cause: redb::TableError },
+    ReDbStorage { message: String, cause: redb::StorageError },
+    ReDbCommit { message: String, cause: redb::CommitError },
 }
 
 impl Display for Error {

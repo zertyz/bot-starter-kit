@@ -24,14 +24,8 @@ pub enum TelegramUserChat {
 #[rkyv(compare(PartialEq))]
 #[derive(Debug, PartialEq)]
 pub enum TelegramMessage<'a> {
-    MO {
-        chat_id: u64,
-        message: TelegramContent<'a>,
-    },
-    MT {
-        chat_id: u64,
-        message: TelegramContent<'a>,
-    },
+    MO { chat_id: u64, message: TelegramContent<'a> },
+    MT { chat_id: u64, message: TelegramContent<'a> },
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -83,26 +77,15 @@ mod tests {
     fn hello_world() {
         let (user, _telegram_user) = new_telegram_user("test_user", "John", "Tester", "en");
         let user_chat = new_private_chat(&user);
-        let _user_message = new_mo_message(
-            &user_chat,
-            "Hi, there! I've sent this message from my mobile!",
-        );
-        let _server_message = new_mo_message(
-            &user_chat,
-            "Hi, folk! I am the server and I've received your message",
-        );
+        let _user_message = new_mo_message(&user_chat, "Hi, there! I've sent this message from my mobile!");
+        let _server_message = new_mo_message(&user_chat, "Hi, folk! I am the server and I've received your message");
     }
 
     // helper functions
     ////////////////////
     // these are the precursor of the repository operations
 
-    fn new_telegram_user<'a>(
-        user_name: &'a str,
-        first_name: &'a str,
-        last_name: &'a str,
-        language_code: &'a str,
-    ) -> (User, TelegramUser<'a>) {
+    fn new_telegram_user<'a>(user_name: &'a str, first_name: &'a str, last_name: &'a str, language_code: &'a str) -> (User, TelegramUser<'a>) {
         static USER_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         let user_id = USER_ID_COUNTER.fetch_add(1, Relaxed);
         let user = User::TelegramUserId(user_id);
@@ -121,26 +104,17 @@ mod tests {
     fn new_private_chat(user: &User) -> TelegramUserChat {
         static CHAT_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         let chat_id = CHAT_ID_COUNTER.fetch_add(1, Relaxed);
-        TelegramUserChat::PrivateChat {
-            user_id: user.user_id(),
-            chat_id,
-        }
+        TelegramUserChat::PrivateChat { user_id: user.user_id(), chat_id }
     }
 
-    fn new_mo_message<'a>(
-        user_chat: &TelegramUserChat,
-        plain_text: &'a str,
-    ) -> TelegramMessage<'a> {
+    fn new_mo_message<'a>(user_chat: &TelegramUserChat, plain_text: &'a str) -> TelegramMessage<'a> {
         TelegramMessage::MO {
             chat_id: user_chat.chat_id(),
             message: TelegramContent::PlainText(Cow::Borrowed(plain_text)),
         }
     }
 
-    fn _new_mt_message<'a>(
-        user_chat: &TelegramUserChat,
-        plain_text: &'a str,
-    ) -> TelegramMessage<'a> {
+    fn _new_mt_message<'a>(user_chat: &TelegramUserChat, plain_text: &'a str) -> TelegramMessage<'a> {
         TelegramMessage::MT {
             chat_id: user_chat.chat_id(),
             message: TelegramContent::PlainText(Cow::Borrowed(plain_text)),

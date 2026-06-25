@@ -30,30 +30,15 @@ pub struct AsyncHeed {
 
 impl AsyncHeed {
     pub async fn open(env_path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_with_options(
-            env_path,
-            MAX_MAP_SIZE_BYTES,
-            DEFAULT_MAX_READERS,
-            DEFAULT_MAX_DBS,
-        )
-        .await
+        Self::open_with_options(env_path, MAX_MAP_SIZE_BYTES, DEFAULT_MAX_READERS, DEFAULT_MAX_DBS).await
     }
 
-    pub async fn open_with_options(
-        env_path: impl AsRef<Path>,
-        max_map_size_bytes: usize,
-        max_readers: u32,
-        max_dbs: u32,
-    ) -> Result<Self> {
-        ensure!(
-            max_readers > 0,
-            "`heed` max_readers must be greater than zero"
-        );
+    pub async fn open_with_options(env_path: impl AsRef<Path>, max_map_size_bytes: usize, max_readers: u32, max_dbs: u32) -> Result<Self> {
+        ensure!(max_readers > 0, "`heed` max_readers must be greater than zero");
         ensure!(max_dbs > 0, "`heed` max_dbs must be greater than zero");
 
         let env_path = env_path.as_ref();
-        std::fs::create_dir_all(env_path)
-            .map_err(|err| anyhow!("Heed: failed to create env directory {env_path:?}: {err}"))?;
+        std::fs::create_dir_all(env_path).map_err(|err| anyhow!("Heed: failed to create env directory {env_path:?}: {err}"))?;
 
         let mut options = EnvOpenOptions::new().read_txn_without_tls();
         options
@@ -66,8 +51,7 @@ impl AsyncHeed {
         // - The environment directory is created and then managed by LMDB.
         // - Concurrent access goes through LMDB's locks plus the async writer/read gates here.
         // Callers must still avoid external mutation of the LMDB files and remote filesystems.
-        let env = unsafe { options.open(env_path) }
-            .map_err(|err| anyhow!("Heed: failed to open env at {env_path:?}: {err}"))?;
+        let env = unsafe { options.open(env_path) }.map_err(|err| anyhow!("Heed: failed to open env at {env_path:?}: {err}"))?;
 
         env.clear_stale_readers()
             .map_err(|err| anyhow!("Heed: failed to clear stale reader slots: {err}"))?;
@@ -100,7 +84,10 @@ impl AsyncHeed {
     }
 
     pub async fn begin_write(&self) -> Result<HeedWriteTransaction<'_>> {
-        let write_guard = self.w_lock.lock().await;
+        let write_guard = self
+            .w_lock
+            .lock()
+            .await;
         let write_txn = self
             .env
             .write_txn()
@@ -114,63 +101,63 @@ impl AsyncHeed {
         KC: 'static,
         DC: 'static,
     {
-        let mut write_txn = self.begin_write().await?;
+        let mut write_txn = self
+            .begin_write()
+            .await?;
         let db = self
             .env
             .create_database(write_txn.inner_mut(), name)
             .map_err(|err| anyhow!("Heed: failed to create/open database {name:?}: {err}"))?;
-        write_txn.commit().await?;
+        write_txn
+            .commit()
+            .await?;
         Ok(db)
     }
 
-    pub async fn open_database<KC, DC>(
-        &self,
-        name: Option<&str>,
-    ) -> Result<Option<Database<KC, DC>>>
+    pub async fn open_database<KC, DC>(&self, name: Option<&str>) -> Result<Option<Database<KC, DC>>>
     where
         KC: 'static,
         DC: 'static,
     {
-        let read_txn = self.begin_read().await?;
+        let read_txn = self
+            .begin_read()
+            .await?;
         let db = self
             .env
             .open_database(read_txn.inner(), name)
             .map_err(|err| anyhow!("Heed: failed to open database {name:?}: {err}"))?;
-        read_txn.close().await?;
+        read_txn
+            .close()
+            .await?;
         Ok(db)
     }
 
-    pub async fn ingest_stream<KC, DC, KeyType, ValueType>(
-        &self,
-        database: &Database<KC, DC>,
-        input_stream: impl Stream<Item = (KeyType, ValueType)>,
-    ) -> Result<usize>
+    pub async fn ingest_stream<KC, DC, KeyType, ValueType>(&self, database: &Database<KC, DC>, input_stream: impl Stream<Item = (KeyType, ValueType)>) -> Result<u64>
     where
         for<'item> KC: heed::BytesEncode<'item, EItem = KeyType>,
         for<'item> DC: heed::BytesEncode<'item, EItem = ValueType>,
     {
-        let mut write_txn = self.begin_write().await.map_err(|err| {
-            anyhow!(
-                "Heed: beginning Stream ingestion -- couldn't create the write transaction: {err}"
-            )
-        })?;
+        let mut write_txn = self
+            .begin_write()
+            .await
+            .map_err(|err| anyhow!("Heed: beginning Stream ingestion -- couldn't create the write transaction: {err}"))?;
 
         let mut count = 0;
         let mut input_stream = pin!(input_stream);
-        while let Some((key, value)) = input_stream.next().await {
+        while let Some((key, value)) = input_stream
+            .next()
+            .await
+        {
             database
                 .put(write_txn.inner_mut(), &key, &value)
-                .map_err(|err| {
-                    anyhow!(
-                        "Heed: Couldn't insert/replace item #{count} during Stream ingestion: {err}"
-                    )
-                })?;
+                .map_err(|err| anyhow!("Heed: Couldn't insert/replace item #{count} during Stream ingestion: {err}"))?;
             count += 1;
         }
 
-        write_txn.commit().await.map_err(|err| {
-            anyhow!("Heed: Could not commit transaction after Stream ingestion: {err}")
-        })?;
+        write_txn
+            .commit()
+            .await
+            .map_err(|err| anyhow!("Heed: Could not commit transaction after Stream ingestion: {err}"))?;
 
         Ok(count)
     }
@@ -180,18 +167,22 @@ impl AsyncHeed {
     /// LMDB requires no active transaction while resizing. The async gates make that true for
     /// transactions created through this wrapper.
     pub async fn resize(&self, new_map_size_bytes: usize) -> Result<()> {
-        let _write_guard = self.w_lock.lock().await;
+        let _write_guard = self
+            .w_lock
+            .lock()
+            .await;
         let _read_permits = self
             .r_lock
             .acquire_many(self.max_readers)
             .await
-            .map_err(|err| {
-                anyhow!("Failed to acquire all `heed` reader permits for resize: {err}")
-            })?;
+            .map_err(|err| anyhow!("Failed to acquire all `heed` reader permits for resize: {err}"))?;
 
         // SAFETY: all wrapper-created read and write transactions are excluded above.
-        unsafe { self.env.resize(new_map_size_bytes) }
-            .map_err(|err| anyhow!("Failed to resize `heed` map: {err}"))
+        unsafe {
+            self.env
+                .resize(new_map_size_bytes)
+        }
+        .map_err(|err| anyhow!("Failed to resize `heed` map: {err}"))
     }
 
     /// Force dirty mmap pages to disk.
@@ -204,7 +195,9 @@ impl AsyncHeed {
     }
 
     pub async fn close(self) -> Result<()> {
-        self.env.prepare_for_closing().wait();
+        self.env
+            .prepare_for_closing()
+            .wait();
         Ok(())
     }
 }
@@ -220,10 +213,7 @@ pub struct HeedReadTransaction<'env> {
 
 impl<'env> HeedReadTransaction<'env> {
     fn new(read_txn: RoTxn<'env, WithoutTls>, read_permit: SemaphorePermit<'env>) -> Self {
-        Self {
-            inner: read_txn,
-            _read_permit: read_permit,
-        }
+        Self { inner: read_txn, _read_permit: read_permit }
     }
 
     pub fn inner(&self) -> &RoTxn<'env, WithoutTls> {
@@ -248,10 +238,7 @@ pub struct HeedWriteTransaction<'env> {
 
 impl<'env> HeedWriteTransaction<'env> {
     fn new(write_txn: RwTxn<'env>, write_guard: MutexGuard<'env, ()>) -> Self {
-        Self {
-            inner: write_txn,
-            _write_guard: write_guard,
-        }
+        Self { inner: write_txn, _write_guard: write_guard }
     }
 
     pub fn inner(&self) -> &RwTxn<'env> {
@@ -269,7 +256,8 @@ impl<'env> HeedWriteTransaction<'env> {
     }
 
     pub async fn abort(self) {
-        self.inner.abort();
+        self.inner
+            .abort();
     }
 }
 
@@ -293,10 +281,7 @@ mod tests {
     }
 
     fn expected_data_iter() -> impl Iterator<Item = TestModel> {
-        (0..128).map(|i| TestModel {
-            count: 127 - i,
-            whatever: i,
-        })
+        (0..128).map(|i| TestModel { count: 127 - i, whatever: i })
     }
 
     fn key(i: usize) -> u64 {
@@ -308,11 +293,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock is before Unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "test_heed_wrapper_{}_{}",
-            std::process::id(),
-            run_id
-        ))
+        std::env::temp_dir().join(format!("test_heed_wrapper_{}_{}", std::process::id(), run_id))
     }
 
     #[tokio::test]
@@ -329,7 +310,7 @@ mod tests {
             .await
             .expect("Could not open/create database");
 
-        let expected_count = expected_data_iter().count();
+        let expected_count = expected_data_iter().count() as u64;
         let input_stream = stream::iter(
             expected_data_iter()
                 .enumerate()
@@ -359,11 +340,7 @@ mod tests {
                 .expect("Could not read test record")
                 .unwrap_or_else(|| panic!("Test record #{i} is not present"));
 
-            assert_eq!(
-                observed_value.read_unaligned(),
-                expected_value,
-                "Point query failed @ row #{i}"
-            );
+            assert_eq!(observed_value.read_unaligned(), expected_value, "Point query failed @ row #{i}");
         }
 
         let mut observed_iter = reopened_database
@@ -377,16 +354,8 @@ mod tests {
                 .expect("Could not read next iterator item")
                 .unwrap_or_else(|| panic!("Stream query failed: row #{i} is not present"));
 
-            assert_eq!(
-                observed_key,
-                key(i),
-                "Stream query failed: row #{i} yielded key {observed_key}"
-            );
-            assert_eq!(
-                observed_value.read_unaligned(),
-                expected_value,
-                "Stream query failed @ row #{i}"
-            );
+            assert_eq!(observed_key, key(i), "Stream query failed: row #{i} yielded key {observed_key}");
+            assert_eq!(observed_value.read_unaligned(), expected_value, "Stream query failed @ row #{i}");
         }
 
         assert!(
@@ -407,7 +376,9 @@ mod tests {
         heed.force_sync()
             .await
             .expect("Could not force-sync database");
-        heed.close().await.expect("Could not close database");
+        heed.close()
+            .await
+            .expect("Could not close database");
         let _ = std::fs::remove_dir_all(&env_path);
 
         Ok(())

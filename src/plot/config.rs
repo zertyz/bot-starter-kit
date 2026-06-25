@@ -151,10 +151,7 @@ pub struct PngTheme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            canvas: CanvasTheme {
-                width: 1280,
-                height: 720,
-            },
+            canvas: CanvasTheme { width: 1280, height: 720 },
             typography: TypographyTheme {
                 font_family: "sans-serif",
                 title_font_px: 32,
@@ -225,9 +222,7 @@ impl Default for Theme {
                 label_bg_padding_x_px: 8,
                 label_bg_padding_y_px: 5,
             },
-            png: PngTheme {
-                mode: PngEncodeMode::Fast,
-            },
+            png: PngTheme { mode: PngEncodeMode::Fast },
         }
     }
 }
