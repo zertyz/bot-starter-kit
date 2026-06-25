@@ -1,5 +1,6 @@
 # Rust's bot-starter-kit
-**NOT YET** Production-ready seed & template application for Rust Bots to chat with Telegram, WhatsApp, Slack, Teams, Discord, SMS, ...
+**NOT YET** Production-ready template application for Rust Bots
+to chat with Telegram, WhatsApp, Slack, Teams, Discord, SMS, ...
 
 [![Rust](https://github.com/zertyz/bot-starter-kit/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/zertyz/bot-starter-kit/actions/workflows/rust.yml)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://zertyz.github.io/bot-starter-kit/doc/bot_starter_kit/)

@@ -1,5 +1,9 @@
-//! `redb`-specific helpers & wrappers for async & stream operation using full zero-copy mmap
+//! `redb`-specific helpers & wrappers for async & stream operation using the zero-copy mmap
 //! and read zero-copy rkyv serializers.
+//!
+//! NOTE: As of May, 2026, `redb` falsely claims "zero-copy". It is not mmap based. It loads data
+//!       into its own buffers, hence: it is not zero-copy; it requires more RAM than a real zero-copy
+//!       solution. Look at [crate::db::heed] for superior performance.
 
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt, stream};
