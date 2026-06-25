@@ -8,7 +8,6 @@ use crate::plot;
 use crate::resources::{FRAMES, RESULT};
 use anyhow::{Result, anyhow};
 use futures::StreamExt;
-use log::info;
 use std::sync::Arc;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::{
@@ -56,7 +55,7 @@ pub async fn run(config: BotConfig) -> Result<()> {
         .bot()
         .clone();
     #[cfg(debug_assertions)]
-    let mo_stream = mo_stream.inspect(|mo| info!("MO: {mo:?}"));
+    let mo_stream = mo_stream.inspect(|mo| log::info!("MO: {mo:?}"));
     let mt_stream = mo_stream.map(move |telegram_mo| {
         let bot = bot.clone();
         let chat_id = ChatId(

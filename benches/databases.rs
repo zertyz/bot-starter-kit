@@ -55,10 +55,12 @@ fn bench_database_ingest_and_point_query(criterion: &mut Criterion) {
                     .expect("run SQLite benchmark");
 
                 assert_eq!(result.inserted, RECORDS_PER_ITERATION);
-                assert!(result
+                assert!(
+                    result
                         .point_query
                         .is_some(),
-                        "SQLite point query is enabled for Criterion");
+                    "SQLite point query is enabled for Criterion"
+                );
                 assert!(
                     result
                         .range_query

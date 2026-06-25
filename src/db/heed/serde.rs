@@ -6,7 +6,6 @@
 
 use std::borrow::Cow;
 use std::marker::PhantomData;
-use std::mem::size_of;
 
 use ::heed::{BoxedError, BytesDecode, BytesEncode};
 use rkyv::api::high::HighSerializer;
@@ -99,8 +98,11 @@ where
     #[inline(always)]
     fn bytes_decode(bytes: &'a [u8]) -> Result<Self::DItem, BoxedError> {
         #[cfg(debug_assertions)]
-        if bytes.len() != size_of::<T>() {
-            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid POD value width: got {} bytes, expected {}", bytes.len(), size_of::<T>()))));
+        if bytes.len() != std::mem::size_of::<T>() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid POD value width: got {} bytes, expected {}", bytes.len(), std::mem::size_of::<T>()),
+            )));
         }
 
         Ok(HeedPodRef { bytes, phantom: PhantomData })
