@@ -1,4 +1,9 @@
-//! Highly optimized serde options to enable zero-copy with `redb`
+//! Highly optimized serde options that would enable zero-copy with `redb`
+//! if `redb` was zero-copy.
+//!
+//! NOTE: the false May, 2026 `redb` claims of being "zero-copy" cauch this author. I was only when I
+//!       started running the first tests with the code here that the truth came. Nevermind, I kept on
+//!       searching and found [super::super::heed] to be what I was looking for ==> superior performance.
 
 /// IMPORTANT: Only use this macro -- supporting the super optimized mmap SerDe strategy --
 ///            if you want to squeeze the last bit of performance possible.

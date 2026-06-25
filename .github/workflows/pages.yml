@@ -9,7 +9,10 @@ env:
   CARGO_TERM_COLOR: always
   # Branch coverage uses unstable nightly rustc flags. rustup pins nightlies by
   # date because semver labels such as 1.98.0-nightly are not unique installable
-  # channels. This pin is rustc 1.98.0-nightly (f28ac764c 2026-06-23).
+  # channels. Keeping this pinned makes coverage deterministic; switch to the
+  # moving `nightly` channel only if we explicitly accept coverage breakage from
+  # upstream nightly changes.
+  # This pin is rustc 1.98.0-nightly (f28ac764c 2026-06-23).
   # To refresh: check the current nightly with
   # `rustup toolchain install nightly --profile minimal --component llvm-tools-preview`
   # or https://static.rust-lang.org/dist/channel-rust-nightly.toml, then verify
@@ -41,6 +44,8 @@ jobs:
       uses: taiki-e/install-action@cargo-llvm-cov
     - name: Build Rust documentation
       run: cargo doc --workspace --all-features --no-deps
+    - name: Run benchmarks
+      run: cargo bench --benches
     - name: Generate coverage reports
       run: |
         mkdir -p public/coverage
@@ -51,8 +56,9 @@ jobs:
         cargo +"$COVERAGE_TOOLCHAIN" llvm-cov report --summary-only --json --output-path target/llvm-cov/summary.json
     - name: Prepare Pages site
       run: |
-        mkdir -p public/doc
+        mkdir -p public/doc public/benchmarks
         cp -r target/doc/. public/doc/
+        cp -r target/criterion/. public/benchmarks/
         node <<'NODE'
         const fs = require("fs");
         const report = JSON.parse(fs.readFileSync("target/llvm-cov/summary.json", "utf8"));
@@ -84,6 +90,7 @@ jobs:
           <ul>
             <li><a href="./doc/bot_starter_kit/">Rust documentation</a></li>
             <li><a href="./coverage/html/">Coverage report</a></li>
+            <li><a href="./benchmarks/report/">Benchmark report</a></li>
           </ul>
         </body>
         </html>

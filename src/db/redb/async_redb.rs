@@ -1,9 +1,11 @@
 //! `redb`-specific helpers & wrappers for async & stream operation using the zero-copy mmap
-//! and read zero-copy rkyv serializers.
+//! and read zero-copy rkyv serializers from the [super::serde] submodule.
 //!
-//! NOTE: As of May, 2026, `redb` falsely claims "zero-copy". It is not mmap based. It loads data
-//!       into its own buffers, hence: it is not zero-copy; it requires more RAM than a real zero-copy
-//!       solution. Look at [crate::db::heed] for superior performance.
+//! NOTE: As of May, 2026, `redb` falsely claims "zero-copy". It is not mmap based nor uses async IO.
+//!       It requires loading data into its own buffers, hence:
+//!       1) it is not zero-copy;
+//!       2) it requires more RAM than a real zero-copy solution.
+//!       Look at [crate::db::heed] for superior performance.
 
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt, stream};

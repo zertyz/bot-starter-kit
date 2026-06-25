@@ -5,6 +5,7 @@ to chat with Telegram, WhatsApp, Slack, Teams, Discord, SMS, ...
 [![Rust](https://github.com/zertyz/bot-starter-kit/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/zertyz/bot-starter-kit/actions/workflows/rust.yml)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://zertyz.github.io/bot-starter-kit/doc/bot_starter_kit/)
 [![Coverage report](https://img.shields.io/badge/coverage-report-blue)](https://zertyz.github.io/bot-starter-kit/coverage/html/)
+[![Benchmark report](https://img.shields.io/badge/benchmarks-report-blue)](https://zertyz.github.io/bot-starter-kit/benchmarks/report/)
 
 This repository presents good patterns and all the needed boilerplate for creating backend Rust Bots suitable for high performance and attending to huge audiences.
 
