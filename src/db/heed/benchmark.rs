@@ -1,4 +1,8 @@
-use std::time::Instant;
+use std::{
+    fmt::Display,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use ::heed::Database;
 use ::heed::byteorder::BigEndian;
@@ -18,6 +22,30 @@ struct Event {
     score: i64,
     payload: [u8; 53],
     _pad: [u8; 3],
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkConfig {
+    pub db_path: PathBuf,
+    pub expected_records: usize,
+    pub point_query_step: usize,
+    pub progress_every: Option<usize>,
+    pub force_sync_after_queries: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkResult {
+    pub inserted: usize,
+    pub ingest_elapsed: Duration,
+    pub point_query: QueryResult,
+    pub sync_elapsed: Option<Duration>,
+    pub close_elapsed: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryResult {
+    pub matched_rows: usize,
+    pub elapsed: Duration,
 }
 
 fn to_byte_array<const N: usize>(text: String) -> [u8; N] {
@@ -44,50 +72,161 @@ fn make_event_stream(run_id: u128, records_per_task: usize) -> impl Stream<Item 
     })
 }
 
+fn record_key(run_id: u128, seq: usize) -> u64 {
+    ((run_id << 32) as u64).wrapping_add(seq as u64)
+}
+
+async fn report_progress<Report, ReportError>(report: &Report, msg: String) -> Result<()>
+where
+    Report: AsyncFn(String) -> std::result::Result<(), ReportError> + ?Sized,
+    ReportError: Display + Send + Sync + 'static,
+{
+    println!("{msg}");
+    report(msg).await.map_err(|err| anyhow!("{err}"))
+}
+
 pub async fn benchmark(
-    report: impl AsyncFn(String) -> Result<(), teloxide::errors::RequestError> + Send + 'static,
+    report: impl AsyncFn(String) -> Result<(), teloxide::errors::RequestError> + Send + Sync + 'static,
 ) -> Result<()> {
-    let println = |msg: String| {
-        println!("{msg}");
-        report(msg)
-    };
+    run_benchmark(
+        BenchmarkConfig {
+            db_path: PathBuf::from("/tmp/telegram_heed_benchmark"),
+            expected_records: 64 * 1024 * 1024,
+            point_query_step: 100_000,
+            progress_every: Some(100_000),
+            force_sync_after_queries: true,
+        },
+        report,
+    )
+    .await
+    .map(|_result| ())
+}
 
-    let db_path = "/tmp/telegram_heed_benchmark";
-    let expected_records = 64 * 1024 * 1024;
-
-    let heed = AsyncHeed::open(db_path).await?;
+pub async fn run_benchmark<Report, ReportError>(
+    config: BenchmarkConfig,
+    report: Report,
+) -> Result<BenchmarkResult>
+where
+    Report: AsyncFn(String) -> std::result::Result<(), ReportError> + Send + Sync + 'static,
+    ReportError: Display + Send + Sync + 'static,
+{
+    let heed = AsyncHeed::open(&config.db_path).await?;
     let events: Database<EventKey, EventValue> = heed.create_database(Some("events")).await?;
 
     let run_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|err| anyhow!("system clock is before Unix epoch: {err}"))?
         .as_nanos();
-    let key = |i| (run_id << 32) as u64 + i as u64;
 
-    println("STARTING Heed BENCHMARK".to_string()).await?;
-    println(format!(
-        "starting ingestion: {expected_records} total records"
-    ))
+    report_progress(&report, "STARTING Heed BENCHMARK".to_string()).await?;
+    report_progress(
+        &report,
+        format!(
+            "starting ingestion: {} total records",
+            config.expected_records
+        ),
+    )
     .await?;
 
     let started = Instant::now();
+    let expected_records = config.expected_records;
+    let progress_every = config.progress_every;
 
     let input_stream = make_event_stream(run_id, expected_records)
         .enumerate()
-        .then(|(i, event)| async move {
-            if i % 100000 == 0 {
-                _ = println(format!("Inserted records: {i} / {expected_records}...")).await;
+        .then(|(i, event)| {
+            let report = &report;
+            async move {
+                if progress_every.is_some_and(|progress_every| {
+                    progress_every > 0 && i.is_multiple_of(progress_every)
+                }) {
+                    _ = report_progress(
+                        report,
+                        format!("Inserted records: {i} / {expected_records}..."),
+                    )
+                    .await;
+                }
+                (record_key(run_id, i), event)
             }
-            (key(i), event)
         });
     let inserted = heed.ingest_stream(&events, input_stream).await?;
 
-    let elapsed = started.elapsed();
-    let rows_per_sec = inserted as f64 / elapsed.as_secs_f64();
-    println(format!("✅ Ingestion completed -- rows/sec: {rows_per_sec:.0}. Now querying borrowed mmap bytes; field display uses one explicit unaligned value copy -- showing about 1 for every 100 million records")).await?;
+    let ingest_elapsed = started.elapsed();
+    let inserted_rows_per_sec = inserted as f64 / ingest_elapsed.as_secs_f64();
+    report_progress(
+        &report,
+        format!(
+            "✅ Ingestion completed -- rows/sec: {inserted_rows_per_sec:.0}. Starting sampled borrowed mmap point lookups."
+        ),
+    )
+    .await?;
 
+    let point_query = benchmark_point_query(
+        &heed,
+        &events,
+        run_id,
+        config.expected_records,
+        config.point_query_step,
+        &report,
+        inserted_rows_per_sec,
+    )
+    .await?;
+
+    report_progress(
+        &report,
+        format!("✅ Ingestion completed -- rows/sec: {inserted_rows_per_sec:.0}; ✅ Querying matched {} rows in {:?}. Closing the Database...", point_query.matched_rows, point_query.elapsed),
+    )
+        .await?;
+
+    let sync_elapsed = if config.force_sync_after_queries {
+        report_progress(&report, "Force-syncing the mmap...".to_string()).await?;
+        let start = Instant::now();
+        heed.force_sync().await?;
+        let sync_elapsed = start.elapsed();
+        report_progress(
+            &report,
+            format!("✅ Ingestion completed -- rows/sec: {inserted_rows_per_sec:.0}; ✅ Querying matched {} rows in {:?}. ✅ Force-sync completed in {sync_elapsed:?}. Closing the Database...", point_query.matched_rows, point_query.elapsed),
+        )
+        .await?;
+        Some(sync_elapsed)
+    } else {
+        None
+    };
+
+    let start = Instant::now();
+    heed.close().await?;
+    let close_elapsed = start.elapsed();
+    report_progress(
+        &report,
+        format!("🏁 Ingestion completed -- rows/sec: {inserted_rows_per_sec:.0}; 🏁 Querying matched {} rows in {:?}; Database closed in {close_elapsed:?}.", point_query.matched_rows, point_query.elapsed),
+    )
+    .await?;
+
+    Ok(BenchmarkResult {
+        inserted,
+        ingest_elapsed,
+        point_query,
+        sync_elapsed,
+        close_elapsed,
+    })
+}
+
+async fn benchmark_point_query<Report, ReportError>(
+    heed: &AsyncHeed,
+    events: &Database<EventKey, EventValue>,
+    run_id: u128,
+    expected_records: usize,
+    point_query_step: usize,
+    report: &Report,
+    inserted_rows_per_sec: f64,
+) -> Result<QueryResult>
+where
+    Report: AsyncFn(String) -> std::result::Result<(), ReportError> + ?Sized,
+    ReportError: Display + Send + Sync + 'static,
+{
     let query_started = Instant::now();
     let mut matched_rows = 0usize;
+    let point_query_step = point_query_step.max(1);
 
     {
         let read_txn = heed
@@ -95,8 +234,8 @@ pub async fn benchmark(
             .await
             .map_err(|err| anyhow!("Failed creating the read txn for the Heed query: {err}"))?;
 
-        for i in (0..expected_records).step_by(100000) {
-            let record_key = key(i);
+        for i in (0..expected_records).step_by(point_query_step) {
+            let record_key = record_key(run_id, i);
             let value = events
                 .get(read_txn.inner(), &record_key)
                 .map_err(|err| {
@@ -113,26 +252,29 @@ pub async fn benchmark(
             let event = unsafe { value.as_aligned_unchecked() };
             matched_rows += 1;
             if matched_rows.is_multiple_of(1000) {
-                println(format!("✅ Ingestion completed -- rows/sec: {rows_per_sec:.0}. Now Querying: matched_rows={matched_rows}; payload={}, seq={}, score={:?}, bytes={}",
-                                str::from_utf8(&event.payload).unwrap_or("<invalid-utf8>"),
-                                event.seq,
-                                event.score,
-                                value.as_bytes().len())).await?;
+                report_progress(
+                    report,
+                    format!(
+                        "✅ Ingestion completed -- rows/sec: {inserted_rows_per_sec:.0}. Heed point querying: matched_rows={matched_rows}; payload={}, seq={}, score={:?}, bytes={}",
+                        str::from_utf8(&event.payload).unwrap_or("<invalid-utf8>"),
+                        event.seq,
+                        event.score,
+                        value.as_bytes().len()
+                    ),
+                )
+                .await?;
             }
         }
     }
-    let query_elapsed = query_started.elapsed();
+    let elapsed = query_started.elapsed();
+    report_progress(
+        report,
+        format!("✅ Heed point querying completed -- matched_rows={matched_rows}, elapsed: {elapsed:.3?}."),
+    )
+    .await?;
 
-    println(format!("✅ Ingestion completed -- rows/sec: {rows_per_sec:.0}. ✅ Querying completed in {query_elapsed:.3?}. Force-syncing the mmap...")).await?;
-    let start = Instant::now();
-    heed.force_sync().await?;
-    let sync_elapsed = start.elapsed();
-    println(format!("✅ Ingestion completed -- rows/sec: {rows_per_sec:.0}. ✅ Querying completed in {query_elapsed:.3?}. ✅ Force-sync completed in {sync_elapsed:?}. Closing the Database...")).await?;
-
-    let start = Instant::now();
-    heed.close().await?;
-    let close_elapsed = start.elapsed();
-    println(format!("🏁 Ingestion completed -- rows/sec: {rows_per_sec:.0}. 🏁 Querying completed in {query_elapsed:.3?}. 🏁 Force-sync completed in {sync_elapsed:?}. 🏁 Database Closed in {close_elapsed:?}...")).await?;
-
-    Ok(())
+    Ok(QueryResult {
+        matched_rows,
+        elapsed,
+    })
 }

@@ -1,6 +1,6 @@
 //! Channel microbenchmarks for the project message-passing boundary.
 //!
-//! The Telegram gateway currently publishes incoming messages into an
+//! The Messaging gateway currently publishes incoming messages into an
 //! `async_channel::Receiver`, and the messaging contract exposes that receiver
 //! as a `futures::Stream`. These benchmarks start one level below the full
 //! `Stream` pipeline: they isolate channel send/receive handoff cost using the
@@ -21,7 +21,7 @@
 //! - downstream MT stream consumption with `for_each_concurrent`.
 //!
 //! Those should be added as separate end-to-end Stream benchmarks when we want
-//! to compare candidate channel crates against the actual MO/MT pipeline shape.
+//! to compare candidate channel crates against the actual MO/MT pipeline.
 //! `Std sync_channel (baseline)` is a familiar standard-library comparison
 //! point, not a theoretical lower bound; faster third-party channels are
 //! entirely possible.

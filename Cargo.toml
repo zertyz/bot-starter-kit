@@ -55,9 +55,14 @@ axum = {  version = "0.8", features = ["tokio", "macros", "http2"]  }
 [dev-dependencies]
 
 criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
 
 [[bench]]
 name = "channels"
+harness = false
+
+[[bench]]
+name = "databases"
 harness = false
 
 # bingen optimizations -- compile with RUSTFLAGS="-C target-cpu=native" CFLAGS="-O3 -march=native -mtune=native" cargo build --release

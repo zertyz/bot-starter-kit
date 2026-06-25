@@ -209,7 +209,7 @@ async fn sqlite_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
         bot.send_message(chat_id, "Starting SQLite Benchmark...")
             .await?,
     ));
-    sqlite::benchmark::benchmark(async move |mt| {
+    sqlite::benchmark::ui_benchmark(async move |mt| {
         let mut m = m.lock().await;
         *m = bot.edit_message_text(chat_id, m.id, mt).await?;
         Ok::<(), teloxide::RequestError>(())
@@ -223,7 +223,7 @@ async fn redb_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
         bot.send_message(chat_id, "Starting ReDB Benchmark...")
             .await?,
     ));
-    redb::benchmark::benchmark(async move |mt| {
+    redb::benchmark::ui_benchmark(async move |mt| {
         let mut m = m.lock().await;
         *m = bot.edit_message_text(chat_id, m.id, mt).await?;
         Ok::<(), teloxide::RequestError>(())
