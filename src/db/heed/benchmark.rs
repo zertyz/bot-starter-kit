@@ -3,7 +3,7 @@ use std::time::Instant;
 use ::heed::Database;
 use ::heed::byteorder::BigEndian;
 use ::heed::types::U64;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt, stream};
 
 use crate::db::heed::{AsyncHeed, HeedPod};
@@ -60,7 +60,7 @@ pub async fn benchmark(
 
     let run_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .context("system clock is before Unix epoch")?
+        .map_err(|err| anyhow!("system clock is before Unix epoch: {err}"))?
         .as_nanos();
     let key = |i| (run_id << 32) as u64 + i as u64;
 
@@ -93,15 +93,15 @@ pub async fn benchmark(
         let read_txn = heed
             .begin_read()
             .await
-            .context("Failed creating the read txn for the Heed query")?;
+            .map_err(|err| anyhow!("Failed creating the read txn for the Heed query: {err}"))?;
 
         for i in (0..expected_records).step_by(100000) {
             let record_key = key(i);
             let value = events
                 .get(read_txn.inner(), &record_key)
-                .with_context(|| {
-                    format!(
-                        "Error retrieving record for key {record_key}, derived from i={i} and run_id={run_id}"
+                .map_err(|err| {
+                    anyhow!(
+                        "Error retrieving record for key {record_key}, derived from i={i} and run_id={run_id}: {err}"
                     )
                 })?
                 .ok_or_else(|| {

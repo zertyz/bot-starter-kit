@@ -49,7 +49,6 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
                 repository_config: config.repository_config,
                 telegram_config: TelegramConfig {
                     teloxide_token: teloxide_token.to_string(),
-                    ..config.telegram_config
                 },
             }
         } else {

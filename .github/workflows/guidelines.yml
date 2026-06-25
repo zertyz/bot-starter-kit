@@ -1,0 +1,22 @@
+name: Code Guidelines
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  guidelines:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check denied constructs
+      run: |
+        if git grep -nE 'anyhow::Context|\.with_context\s*\(|\.context\s*\(' -- '*.rs'
+        then
+          echo "::error::CODE_GUIDELINES.md forbids anyhow::Context, .context(), and .with_context()."
+          exit 1
+        fi

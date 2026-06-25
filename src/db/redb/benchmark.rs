@@ -1,6 +1,6 @@
 use crate::db::redb::AsyncReDb;
 use crate::redb_mmap_value;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt, stream};
 use redb::TableDefinition;
 use sqlx::FromRow;
@@ -57,7 +57,7 @@ pub async fn benchmark(
     let redb = AsyncReDb::open(db_path).await?;
     let run_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .context("system clock is before Unix epoch")?
+        .map_err(|err| anyhow!("system clock is before Unix epoch: {err}"))?
         .as_nanos();
     let key = |i| (run_id << 32) as u64 + i as u64;
 
@@ -93,18 +93,18 @@ pub async fn benchmark(
         let read_txn = redb
             .begin_read()
             .await
-            .context("Failed creating the read txt for the query")?;
+            .map_err(|err| anyhow!("Failed creating the read txt for the query: {err}"))?;
 
         let table = read_txn
             .inner()
             .open_table(EVENTS_TABLE)
-            .context("Could not open table for the query")?;
+            .map_err(|err| anyhow!("Could not open table for the query: {err}"))?;
 
         // by-value search -- uses the index effectively
         for i in (0..expected_records).step_by(100000) {
             let key = key(i);
             let value = table.get(key)
-                .with_context(|| format!("Error retrieving record for key {key}, derived from i={i} and run_id={run_id}"))?
+                .map_err(|err| anyhow!("Error retrieving record for key {key}, derived from i={i} and run_id={run_id}: {err}"))?
                 .ok_or_else(|| anyhow!("Record for key {key}, derived from i={i} and run_id={run_id} was not present"))?;
             let event = value.value();
             matched_rows += 1;
@@ -118,10 +118,10 @@ pub async fn benchmark(
 
         // by-range search on field without an index -- not effective in this `redb` model, as we are not indexing by score
         /*let mut result_stream = AsyncReDb::redb_iter_to_stream(table.range::<u64>(..))
-            .context("Failed creating the Stream")?
+            .map_err(|err| anyhow!("Failed creating the Stream: {err}"))?
             .try_filter(|(key, value)| future::ready(value.value().score >= 99999));
 
-        while let Some((_key, value)) = result_stream.try_next().await.context("fetch query row")? {
+        while let Some((_key, value)) = result_stream.try_next().await.map_err(|err| anyhow!("fetch query row: {err}"))? {
             let event = value.value();
             matched_rows += 1;
             if matched_rows % 10 == 0 {

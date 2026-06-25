@@ -1,5 +1,5 @@
 use crate::db::sqlite::sqlite_wrapper::Sqlite;
-use anyhow::{Context, Result};
+use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt, TryStreamExt, stream};
 use sqlx::FromRow;
 use std::time::Instant;
@@ -92,7 +92,7 @@ pub async fn benchmark(
     .await?;
     let run_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .context("system clock is before Unix epoch")?
+        .map_err(|err| anyhow!("system clock is before Unix epoch: {err}"))?
         .as_nanos();
 
     println("STARTING SQLITE BENCHMARK".to_string()).await?;
@@ -135,7 +135,11 @@ pub async fn benchmark(
 
     let mut matched_rows = 0usize;
 
-    while let Some(row) = result_stream.try_next().await.context("fetch query row")? {
+    while let Some(row) = result_stream
+        .try_next()
+        .await
+        .map_err(|err| anyhow!("fetch query row: {err}"))?
+    {
         matched_rows += 1;
 
         if matched_rows.is_multiple_of(100) {

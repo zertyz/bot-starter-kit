@@ -269,10 +269,9 @@ impl<'db> ReDbWriteTransaction<'db> {
     /// The actual `redb` commit is synchronous and may block the Tokio task while filesystem work
     /// is performed.
     pub async fn commit(self) -> Result<()> {
-        self.inner.commit().map_err(|err| {
-            let msg = format!("Failed to commit `redb` transaction: {err}");
-            anyhow::Error::new(err).context(msg)
-        })
+        self.inner
+            .commit()
+            .map_err(|err| anyhow!("Failed to commit `redb` transaction: {err}"))
     }
 }
 

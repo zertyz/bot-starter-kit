@@ -20,9 +20,9 @@ use teloxide::{Bot, RequestError, dptree};
 #[derive(Debug)]
 pub enum TelegramMo {
     /// Usual text messages sent by the user
-    Message(Message),
+    Message(Box<Message>),
     /// Clicks on [teloxide::types::InlineKeyboardMarkup] buttons
-    CallbackQuery(CallbackQuery),
+    CallbackQuery(Box<CallbackQuery>),
 }
 
 pub struct TelegramGateway {
@@ -145,7 +145,7 @@ impl TelegramGateway {
     /// On error -- meaning the channel is full -- we instruct Telegram to try again after some seconds.
     async fn handler(self: &Arc<Self>, _bot: Bot, msg: Message) -> ResponseResult<()> {
         self.mo_tx
-            .send(TelegramMo::Message(msg))
+            .send(TelegramMo::Message(Box::new(msg)))
             .await
             .map_err(|_err| RequestError::RetryAfter(Seconds::from_seconds(15)))
     }
@@ -156,7 +156,7 @@ impl TelegramGateway {
         callback_query: CallbackQuery,
     ) -> ResponseResult<()> {
         self.mo_tx
-            .send(TelegramMo::CallbackQuery(callback_query))
+            .send(TelegramMo::CallbackQuery(Box::new(callback_query)))
             .await
             .map_err(|_err| RequestError::RetryAfter(Seconds::from_seconds(15)))
     }
