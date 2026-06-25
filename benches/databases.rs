@@ -35,7 +35,7 @@ fn bench_database_ingest_and_point_query(criterion: &mut Criterion) {
         .expect("create Tokio runtime for database benchmarks");
 
     let mut group = criterion.benchmark_group("Database ingest + sampled point query");
-    group.throughput(Throughput::Elements(RECORDS_PER_ITERATION as u64));
+    group.throughput(Throughput::Elements(RECORDS_PER_ITERATION));
 
     group.bench_function("SQLite fresh DB", |bencher| {
         bencher.iter(|| {
