@@ -1,4 +1,5 @@
-# **NOT YET** Production-ready seed & template application for Rust Bots to chat with Telegram, WhatsApp, Slack, Teams, Discord, SMS, ...
+# Rust's bot-starter-kit
+**NOT YET** Production-ready seed & template application for Rust Bots to chat with Telegram, WhatsApp, Slack, Teams, Discord, SMS, ...
 
 [![Rust](https://github.com/zertyz/bot-starter-kit/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/zertyz/bot-starter-kit/actions/workflows/rust.yml)
 [![Rustfmt](https://github.com/zertyz/bot-starter-kit/actions/workflows/rustfmt.yml/badge.svg?branch=main)](https://github.com/zertyz/bot-starter-kit/actions/workflows/rustfmt.yml)
