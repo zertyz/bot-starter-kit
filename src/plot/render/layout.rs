@@ -241,7 +241,7 @@ pub fn build_layout(
     };
 
     let mut y_ticks = Vec::with_capacity(y_tick_cents.len());
-    for (cents, label) in y_tick_cents.into_iter().zip(y_tick_labels.into_iter()) {
+    for (cents, label) in y_tick_cents.into_iter().zip(y_tick_labels) {
         let y = y_of_cents(cents, y_min_cent, px_per_cent, plot_bottom);
         let bbox = metrics.measure(
             &label,

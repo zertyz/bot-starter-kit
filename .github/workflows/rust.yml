@@ -11,8 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
-
+  check:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,7 +20,18 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install --no-install-recommends -y pkg-config libfontconfig1-dev
-    - name: Build
-      run: cargo build --verbose
+    - name: Install Rust components
+      run: rustup component add rustfmt clippy
+    - name: Check code guidelines
+      run: |
+        if git grep -nE 'anyhow::Context|\.with_context\s*\(|\.context\s*\(' -- '*.rs'
+        then
+          echo "::error::CODE_GUIDELINES.md forbids anyhow::Context, .context(), and .with_context()."
+          exit 1
+        fi
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+    - name: Check lints
+      run: cargo clippy --all-targets --all-features -- -D warnings
     - name: Run tests
       run: cargo test --verbose

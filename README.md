@@ -2,11 +2,9 @@
 **NOT YET** Production-ready seed & template application for Rust Bots to chat with Telegram, WhatsApp, Slack, Teams, Discord, SMS, ...
 
 [![Rust](https://github.com/zertyz/bot-starter-kit/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/zertyz/bot-starter-kit/actions/workflows/rust.yml)
-[![Rustfmt](https://github.com/zertyz/bot-starter-kit/actions/workflows/rustfmt.yml/badge.svg?branch=main)](https://github.com/zertyz/bot-starter-kit/actions/workflows/rustfmt.yml)
-[![Clippy](https://github.com/zertyz/bot-starter-kit/actions/workflows/clippy.yml/badge.svg?branch=main)](https://github.com/zertyz/bot-starter-kit/actions/workflows/clippy.yml)
-[![Code Guidelines](https://github.com/zertyz/bot-starter-kit/actions/workflows/guidelines.yml/badge.svg?branch=main)](https://github.com/zertyz/bot-starter-kit/actions/workflows/guidelines.yml)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://zertyz.github.io/bot-starter-kit/doc/bot_starter_kit/)
 [![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fzertyz.github.io%2Fbot-starter-kit%2Fcoverage-badge.json)](https://zertyz.github.io/bot-starter-kit/coverage/html/)
+[![Coverage report](https://img.shields.io/badge/coverage-report-blue)](https://zertyz.github.io/bot-starter-kit/coverage/html/)
 
 This repository presents good patterns and all the needed boilerplate for creating backend Rust Bots suitable for high performance and attending to huge audiences.
 
