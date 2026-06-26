@@ -1,4 +1,4 @@
-//! Setup for telegram
+//! Telegram/`teloxide` setup & integration for message trafficking
 
 use crate::messaging::contracts::messaging::{Dialog, DialogKind, Language, Messaging, Mo, Party};
 use crate::models::config::BotConfig;
@@ -186,14 +186,14 @@ impl TelegramGateway {
 
 impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
     fn get_mo_stream(mo_rx: async_channel::Receiver<TelegramMo>) -> impl Stream<Item = Mo<User, TelegramMo>> {
-        fn kind_mapper(teloxide_kind: &ChatKind) -> DialogKind {
+        fn map_kind(teloxide_kind: &ChatKind) -> DialogKind {
             match teloxide_kind {
                 ChatKind::Public(_) => DialogKind::Group,
                 ChatKind::Private(_) => DialogKind::Private,
             }
         }
 
-        fn language_mapper(teloxide_language: Option<&String>) -> Language {
+        fn map_language(teloxide_language: Option<&String>) -> Language {
             teloxide_language
                 .map(|teloxide_language| match teloxide_language.as_str() {
                     "en" => Language::English,
@@ -214,26 +214,21 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
                         .id
                         .0 as u64;
                     let sender = Party::new(from.clone());
-                    let dialog = Dialog::new(
-                        message
+                    let kind = map_kind(
+                        &message
                             .chat
-                            .id
-                            .0 as u64,
-                        kind_mapper(
-                            &message
-                                .chat
-                                .kind,
-                        ),
-                        language_mapper(
-                            message
-                                .from
-                                .as_ref()
-                                .and_then(|from| {
-                                    from.language_code
-                                        .as_ref()
-                                }),
-                        ),
+                            .kind,
                     );
+                    let language = map_language(
+                        message
+                            .from
+                            .as_ref()
+                            .and_then(|from| {
+                                from.language_code
+                                    .as_ref()
+                            }),
+                    );
+                    let dialog = Dialog::new(id, kind, language);
                     Some(Mo::new(id, sender, dialog, telegram_mo))
                 }
                 TelegramMo::CallbackQuery(callback_query) => {
@@ -244,30 +239,25 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
                     let id = message
                         .id
                         .0 as u64;
+                    let kind = map_kind(
+                        &message
+                            .chat
+                            .kind,
+                    );
+                    let language = map_language(
+                        message
+                            .from
+                            .as_ref()
+                            .and_then(|from| {
+                                from.language_code
+                                    .as_ref()
+                            }),
+                    );
+                    let dialog = Dialog::new(id, kind, language);
                     let sender = Party::new(
                         callback_query
                             .from
                             .clone(),
-                    );
-                    let dialog = Dialog::new(
-                        message
-                            .chat
-                            .id
-                            .0 as u64,
-                        kind_mapper(
-                            &message
-                                .chat
-                                .kind,
-                        ),
-                        language_mapper(
-                            message
-                                .from
-                                .as_ref()
-                                .and_then(|from| {
-                                    from.language_code
-                                        .as_ref()
-                                }),
-                        ),
                     );
                     Some(Mo::new(id, sender, dialog, telegram_mo))
                 }

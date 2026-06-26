@@ -1,1 +1,1 @@
-pub mod demoscene;
+pub mod telegram_demoscene;

@@ -1,6 +1,6 @@
 mod models;
 
-use bot_starter_kit::{logic::demoscene::run, models::config::*};
+use bot_starter_kit::{logic::telegram_demoscene::run, models::config::*};
 use ogre_config_meld::encryptable_tokio_fs::fs;
 use ogre_config_meld::{CmdLineAndConfigIntegration, get_config_file_path, parse_cmdline_args};
 
