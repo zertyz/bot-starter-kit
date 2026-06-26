@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 #![doc = r#"
 # Bot Starter Kit
 

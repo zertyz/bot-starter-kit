@@ -1,9 +1,9 @@
-//! Resting place of [Messaging]
+//! Resting place of [Messaging] & related models.
 
 use futures::Stream;
 use std::num::NonZeroU64;
 
-/// Abstraction to send messages to every supported [DeliveryChannel]
+/// Abstraction to send messages to every supported [super::messaging_platform::MessagingPlatform].
 pub trait Messaging<PartyType, MoPayloadType, MtPayloadType> {
     /// Returns the `Stream` of "Mobile Originated" (MO) messages for the backend logic to use as "inputs".
     /// NOTE: This method can be called just once. It will return `None` in any subsequent calls.
@@ -11,7 +11,7 @@ pub trait Messaging<PartyType, MoPayloadType, MtPayloadType> {
 
     /// Takes in a `Stream` of "Mobile Terminated" (MT) messages -- produced by the backend logic and targeted at users.
     /// This method should return immediately, returning a Join Handle to the spawned tokio task that will process the Stream to completion.
-    fn consume_mt_stream(&self, concurrency: usize, stream: impl Stream<Item = MtPayloadType> + Send + 'static) -> tokio::task::JoinHandle<()>;
+    fn consume_mt_stream(&self, concurrency: usize, all_users_mt_stream: impl Stream<Item = MtPayloadType> + Send + 'static) -> tokio::task::JoinHandle<()>;
 }
 
 /// Model for "Mobile Originated" messages for a given "account" within the message platform

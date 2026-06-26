@@ -1,15 +1,15 @@
 //! This is a Telegram-exclusive logic
 
 use crate::db::{heed, redb, sqlite};
-use crate::messaging::contracts::messaging::Messaging;
-use crate::messaging::impls::telegram_gateway::{TelegramGateway, TelegramMo, mt, mts};
+use crate::messaging::contracts::messaging::Mo;
+use crate::messaging::impls::telegram_gateway::{TelegramBoxSendFuture, TelegramGateway, TelegramMo, UserMoProcessor, mt, mts};
 use crate::models::config::BotConfig;
 use crate::plot;
 use crate::resources::{FRAMES, RESULT};
 use anyhow::{Result, anyhow};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use std::sync::Arc;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, User};
 use teloxide::{
     prelude::*,
     types::{InputFile, InputMedia, InputMediaPhoto},
@@ -17,8 +17,6 @@ use teloxide::{
 };
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
-
-const MT_CONCURRENCY: usize = 4;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Available commands:")]
@@ -49,105 +47,108 @@ enum Cmd {
     FollowAsset,
 }
 
-pub async fn run(config: BotConfig) -> Result<()> {
-    let (telegram_gateway, mo_stream) = TelegramGateway::new(config);
-    let bot = telegram_gateway
-        .bot()
-        .clone();
-    #[cfg(debug_assertions)]
-    let mo_stream = mo_stream.inspect(|mo| log::info!("MO: {mo:?}"));
-    let mt_stream = mo_stream.map(move |telegram_mo| {
-        let bot = bot.clone();
-        let chat_id = ChatId(
-            telegram_mo
-                .dialog()
-                .id() as i64,
-        );
-        let payload = telegram_mo.payload();
-        match payload {
-            TelegramMo::Message(msg) => {
-                if let Some(text) = msg.text() {
-                    if let Ok(cmd) = Cmd::parse(text, "tg_demoscene_bot") {
-                        match cmd {
-                            Cmd::Start => mt(bot.send_message(chat_id, format!("Welcome to the <b>OgreRobot's Telegram Demoscene</b>!\nPick an option:\n{}", Cmd::descriptions()))),
-                            Cmd::Help => mt(bot.send_message(chat_id, Cmd::descriptions().to_string())),
-                            Cmd::ChatId => {
-                                mt(bot.send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id)))
-                            }
-                            Cmd::Run => mts(run_long_job(bot.clone(), chat_id)),
-                            Cmd::Render => mts(render_swap(bot.clone(), chat_id)),
-                            Cmd::Graphical | Cmd::Menu => mt(bot
-                                .send_message(chat_id, "Choose:")
-                                .reply_markup(main_menu())),
-                            Cmd::Pin => {
-                                if let Some(reply) = msg.reply_to_message() {
-                                    mt(bot.pin_chat_message(chat_id, reply.id))
-                                } else {
-                                    mt(bot
-                                        .send_message(chat_id, "Reply to a textual message, then type `/pin`")
-                                        .reply_markup(main_menu()))
+struct ProcessUserMo;
+
+impl UserMoProcessor for ProcessUserMo {
+    async fn process<MoStream: Stream<Item = Mo<User, TelegramMo>> + Send>(&self, bot: Bot, _user: User, user_mo_stream: MoStream) -> impl Stream<Item = TelegramBoxSendFuture> + Send {
+        #[cfg(debug_assertions)]
+        let user_mo_stream = user_mo_stream.inspect(move |mo| log::info!("User '{}' MO: {mo:?}", _user.first_name));
+        user_mo_stream.map(move |mo| {
+            let chat_id = ChatId(
+                mo.sender()
+                    .id
+                    .0 as i64,
+            );
+            let payload = mo.payload();
+            match payload {
+                TelegramMo::Message(msg) => {
+                    if let Some(text) = msg.text() {
+                        if let Ok(cmd) = Cmd::parse(text, "telegram_demoscene") {
+                            match cmd {
+                                Cmd::Start => mt(bot.send_message(chat_id, format!("Welcome to the <b>OgreRobot's Telegram Demoscene</b>!\nPick an option:\n{}", Cmd::descriptions()))),
+                                Cmd::Help => mt(bot.send_message(chat_id, Cmd::descriptions().to_string())),
+                                Cmd::ChatId => {
+                                    mt(bot.send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id)))
                                 }
+                                Cmd::Run => mts(run_long_job(bot.clone(), chat_id)),
+                                Cmd::Render => mts(render_swap(bot.clone(), chat_id)),
+                                Cmd::Graphical | Cmd::Menu => mt(bot
+                                    .send_message(chat_id, "Choose:")
+                                    .reply_markup(main_menu())),
+                                Cmd::Pin => {
+                                    if let Some(reply) = msg.reply_to_message() {
+                                        mt(bot.pin_chat_message(chat_id, reply.id))
+                                    } else {
+                                        mt(bot
+                                            .send_message(chat_id, "Reply to a textual message, then type `/pin`")
+                                            .reply_markup(main_menu()))
+                                    }
+                                }
+                                Cmd::SqliteBenchmark => mts(sqlite_benchmark(bot.clone(), chat_id)),
+                                Cmd::RedbBenchmark => mts(redb_benchmark(bot.clone(), chat_id)),
+                                Cmd::HeedBenchmark => mts(heed_benchmark(bot.clone(), chat_id)),
+                                Cmd::FollowAsset => mts(follow_asset(bot.clone(), chat_id)),
                             }
-                            Cmd::SqliteBenchmark => mts(sqlite_benchmark(bot.clone(), chat_id)),
-                            Cmd::RedbBenchmark => mts(redb_benchmark(bot.clone(), chat_id)),
-                            Cmd::HeedBenchmark => mts(heed_benchmark(bot.clone(), chat_id)),
-                            Cmd::FollowAsset => mts(follow_asset(bot.clone(), chat_id)),
+                        } else {
+                            mt(bot.send_message(chat_id, "Unknown command. Try /help"))
                         }
                     } else {
-                        mt(bot.send_message(chat_id, "Unknown command. Try /help"))
+                        mt(bot.send_message(chat_id, "Try sending the text /help"))
                     }
-                } else {
-                    mt(bot.send_message(chat_id, "Try sending the text /help"))
+                }
+                TelegramMo::CallbackQuery(callback_query) => {
+                    let callback_data = callback_query
+                        .data
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_string();
+                    let msg_id = callback_query
+                        .message
+                        .as_ref()
+                        .and_then(|message| message.regular_message())
+                        .map(|a| a.id)
+                        .unwrap_or_default();
+                    let callback_id = callback_query
+                        .id
+                        .clone();
+                    let bot = bot.clone();
+                    mts(async move {
+                        match callback_data.as_str() {
+                            "mm:run" => run_long_job(bot.clone(), chat_id).await?,
+                            "mm:render" => render_swap(bot.clone(), chat_id).await?,
+                            "mm:chatid" => bot
+                                .send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id))
+                                .await
+                                .map(|_| ())
+                                .map_err(|err| anyhow!("`chat_id` failed: {err}"))?,
+                            "mm:followasset" => follow_asset(bot.clone(), chat_id).await?,
+                            "mm:sqlitebenchmark" => sqlite_benchmark(bot.clone(), chat_id).await?,
+                            "mm:redbbenchmark" => redb_benchmark(bot.clone(), chat_id).await?,
+                            "mm:heedbenchmark" => heed_benchmark(bot.clone(), chat_id).await?,
+                            "mm:close" => bot
+                                .edit_message_reply_markup(chat_id, msg_id)
+                                .await
+                                .map(|_| ())?, // remove the "main menu" buttons
+                            _ => bot
+                                .send_message(chat_id, format!("BUG! Unknown callback query '{callback_data}'"))
+                                .await
+                                .map(|_| ())?,
+                        };
+                        bot.answer_callback_query(callback_id)
+                            .await
+                            .map_err(|err| anyhow!("Updating the callback's spinner failed: {err}")) // Answer the callback request so the client stops the “loading” spinner
+                    })
                 }
             }
-            TelegramMo::CallbackQuery(callback_query) => {
-                let callback_data = callback_query
-                    .data
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_string();
-                let msg_id = callback_query
-                    .message
-                    .as_ref()
-                    .and_then(|message| message.regular_message())
-                    .map(|a| a.id)
-                    .unwrap_or_default();
-                let callback_id = callback_query
-                    .id
-                    .clone();
-                mts(async move {
-                    match callback_data.as_str() {
-                        "mm:run" => run_long_job(bot.clone(), chat_id).await?,
-                        "mm:render" => render_swap(bot.clone(), chat_id).await?,
-                        "mm:chatid" => bot
-                            .send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id))
-                            .await
-                            .map(|_| ())
-                            .map_err(|err| anyhow!("`chat_id` failed: {err}"))?,
-                        "mm:followasset" => follow_asset(bot.clone(), chat_id).await?,
-                        "mm:sqlitebenchmark" => sqlite_benchmark(bot.clone(), chat_id).await?,
-                        "mm:redbbenchmark" => redb_benchmark(bot.clone(), chat_id).await?,
-                        "mm:heedbenchmark" => heed_benchmark(bot.clone(), chat_id).await?,
-                        "mm:close" => bot
-                            .edit_message_reply_markup(chat_id, msg_id)
-                            .await
-                            .map(|_| ())?, // remove the "main menu" buttons
-                        _ => bot
-                            .send_message(chat_id, format!("BUG! Unknown callback query '{callback_data}'"))
-                            .await
-                            .map(|_| ())?,
-                    };
-                    bot.answer_callback_query(callback_id)
-                        .await
-                        .map_err(|err| anyhow!("Updating the callback's spinner failed: {err}")) // Answer the callback request so the client stops the “loading” spinner
-                })
-            }
-        }
-    });
-    let join_handle = telegram_gateway.consume_mt_stream(MT_CONCURRENCY, mt_stream);
-    join_handle
+        })
+    }
+}
+
+pub async fn run(config: BotConfig) -> Result<()> {
+    let (_telegram_gateway, task_join_handle) = TelegramGateway::new(config, ProcessUserMo);
+    task_join_handle
         .await
-        .map_err(|err| anyhow!("MT task failed: {err}"))
+        .map_err(|err| anyhow!("TelegramGateway ended: {err}"))
 }
 
 fn main_menu() -> InlineKeyboardMarkup {

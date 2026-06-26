@@ -5,6 +5,7 @@ use crate::models::config::BotConfig;
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
 use log::{error, info};
+use std::collections::HashMap;
 use std::env;
 use std::fmt::{Debug, Display};
 use std::future;
@@ -16,6 +17,7 @@ use teloxide::prelude::{CallbackQuery, Message, Request, ResponseResult, Update}
 use teloxide::requests::Payload;
 use teloxide::types::{ChatKind, Seconds, User};
 use teloxide::{Bot, RequestError, dptree};
+use tokio::sync::RwLock;
 
 #[derive(Debug)]
 pub enum TelegramMo {
@@ -26,12 +28,13 @@ pub enum TelegramMo {
 }
 
 pub struct TelegramGateway {
-    mo_tx: async_channel::Sender<TelegramMo>,
+    all_users_mo_tx: async_channel::Sender<TelegramMo>,
+    per_user_mo_tx: Arc<RwLock<HashMap<u64, async_channel::Sender<Mo<User, TelegramMo>>>>>,
     bot: Bot,
 }
 
 impl TelegramGateway {
-    pub fn new(config: BotConfig) -> (Arc<Self>, impl Stream<Item = Mo<User, TelegramMo>>) {
+    pub fn new<ProcessorType: UserMoProcessor + Send + Sync + 'static>(config: BotConfig, user_mo_processor: ProcessorType) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
         unsafe {
             std::env::set_var(
                 "TELOXIDE_TOKEN",
@@ -44,11 +47,17 @@ impl TelegramGateway {
         let bot = Bot::from_env(); // expects TELOXIDE_TOKEN. How to not involve the environment to pass in this information?
         let mode = env::var("MODE").unwrap_or_else(|_| "polling".into());
 
-        let (mo_tx, mo_rx) = async_channel::bounded(64);
-        let instance = Arc::new(Self { mo_tx, bot: bot.clone() });
+        let (all_users_mo_tx, all_users_mo_rx) = async_channel::bounded(64);
+        let instance = Arc::new(Self {
+            all_users_mo_tx,
+            per_user_mo_tx: Arc::new(RwLock::new(HashMap::new())),
+            bot: bot.clone(),
+        });
 
         // spawn the Teloxide gateway
         tokio::spawn({
+            #[cfg(debug_assertions)]
+            eprintln!("Telegram: Starting the Teloxide task");
             let instance_clone = instance.clone();
             async move {
                 _ = match mode.as_str() {
@@ -65,14 +74,117 @@ impl TelegramGateway {
                 }
                 .inspect_err(|err| eprintln!("Telegram loop exited with error: {}", err));
                 instance_clone
-                    .mo_tx
+                    .all_users_mo_tx
                     .close();
-                eprintln!("Quitting -- possibly due to operator's request via CTRL-C or SIGTERM");
+                instance_clone
+                    .per_user_mo_tx
+                    .read()
+                    .await
+                    .values()
+                    .for_each(|user_mo_tx| {
+                        user_mo_tx.close();
+                    });
+                eprintln!("Shutting Down Telegram -- possibly due to operator's request via CTRL-C or SIGTERM");
             }
         });
 
-        let mo_stream = Self::get_mo_stream(mo_rx);
-        (instance, mo_stream)
+        let all_users_mo_stream = Self::get_mo_stream(all_users_mo_rx);
+
+        // process the stream to completion with the given concurrency
+        let mo_routing_task_concurrency = 4;
+        let user_mo_processor = Arc::new(user_mo_processor);
+        let bot = instance
+            .bot
+            .clone();
+        let all_users_mo_tx = instance
+            .all_users_mo_tx
+            .clone();
+        let (all_users_mt_tx, all_users_mt_rx) = async_channel::bounded(64);
+        let cloned_all_users_mt_rx = all_users_mt_rx.clone();
+        let per_user_mo_tx = instance
+            .per_user_mo_tx
+            .clone();
+        // spawn the MO routing task
+        tokio::spawn(async move {
+            #[cfg(debug_assertions)]
+            eprintln!("Telegram: Starting the all-users-to-each-user MO routing task");
+            all_users_mo_stream
+                .for_each_concurrent(mo_routing_task_concurrency, move |mo| {
+                    #[cfg(debug_assertions)]
+                    eprintln!("Telegram: ALL-USERS-MO-TASK: {mo:?}");
+                    let bot = bot.clone();
+                    let user_mo_processor = user_mo_processor.clone();
+                    let per_user_mo_tx = per_user_mo_tx.clone();
+                    let all_users_mo_tx = all_users_mo_tx.clone();
+                    let all_users_mt_tx = all_users_mt_tx.clone();
+                    async move {
+                        let user = mo
+                            .sender()
+                            .clone();
+                        let user_id = user
+                            .id
+                            .0;
+                        let route_mo = async |mo, user_mo_tx: &async_channel::Sender<Mo<User, TelegramMo>>| {
+                            #[cfg(debug_assertions)]
+                            eprintln!("Telegram: ALL-USERS-MO-TASK: routing MO");
+                            let route_result = user_mo_tx
+                                .send(mo)
+                                .await;
+                            if let Err(err) = route_result {
+                                eprintln!("Telegram: Bailing out of User's Dialog Processor task: Error routing MO message to user_id #{user_id}'s channel: {err}");
+                                user_mo_tx.close();
+                            }
+                        };
+                        let locked_per_user_mo_tx = per_user_mo_tx
+                            .read()
+                            .await;
+                        match locked_per_user_mo_tx.get(&user_id) {
+                            Some(user_mo_tx) => {
+                                // A channel already exist for the user. Route the message.
+                                route_mo(mo, user_mo_tx).await;
+                            }
+                            None => {
+                                // No channel exists yet for the user. Create, Store & spawn the Dialog Processor task... and also send the message as above
+                                let (user_mo_tx, user_mo_rx) = async_channel::unbounded();
+                                route_mo(mo, &user_mo_tx).await;
+                                drop(locked_per_user_mo_tx);
+                                per_user_mo_tx
+                                    .write()
+                                    .await
+                                    .insert(user_id, user_mo_tx);
+                                let user_mo_processor = user_mo_processor.clone();
+                                tokio::spawn(async move {
+                                    #[cfg(debug_assertions)]
+                                    eprintln!("Telegram: Starting Dialog Processor (and user-to-all-users-mt) tasks for user #{user_id}");
+                                    let user_mt_stream = user_mo_processor
+                                        .process(bot, user, user_mo_rx)
+                                        .await;
+                                    // process 1 message at a time (per user)
+                                    user_mt_stream
+                                        .for_each(|user_mt| async {
+                                            let route_result = all_users_mt_tx
+                                                .send(user_mt)
+                                                .await;
+                                            if let Err(err) = route_result {
+                                                eprintln!("Telegram: Bailing out of User's Dialog Processor task: Error routing user_id #{user_id}'s MT message to the all-users mt channel: {err}");
+                                                all_users_mo_tx.close();
+                                            }
+                                        })
+                                        .await;
+                                });
+                            }
+                        }
+                    }
+                })
+                .await;
+            eprintln!("Telegram: MO routing task ended -- `all_users_mo_stream` must have finished.");
+            cloned_all_users_mt_rx.close();
+        });
+        // spawn the MT sending task
+        let all_users_mt_concurrency = 4;
+        let task_join_handle = instance.consume_mt_stream(all_users_mt_concurrency, all_users_mt_rx);
+
+        (instance, task_join_handle)
     }
 
     async fn run_polling(self: &Arc<Self>, bot: Bot) -> anyhow::Result<()> {
@@ -166,14 +278,14 @@ impl TelegramGateway {
     /// Telegram messages will be delivered by calling this function.
     /// On error -- meaning the channel is full -- we instruct Telegram to try again after some seconds.
     async fn handler(self: &Arc<Self>, _bot: Bot, msg: Message) -> ResponseResult<()> {
-        self.mo_tx
+        self.all_users_mo_tx
             .send(TelegramMo::Message(Box::new(msg)))
             .await
             .map_err(|_err| RequestError::RetryAfter(Seconds::from_seconds(15)))
     }
 
     async fn on_callback(self: &Arc<Self>, _bot: Bot, callback_query: CallbackQuery) -> ResponseResult<()> {
-        self.mo_tx
+        self.all_users_mo_tx
             .send(TelegramMo::CallbackQuery(Box::new(callback_query)))
             .await
             .map_err(|_err| RequestError::RetryAfter(Seconds::from_seconds(15)))
@@ -182,6 +294,16 @@ impl TelegramGateway {
     pub fn bot(self: &Arc<Self>) -> &Bot {
         &self.bot
     }
+}
+
+pub trait UserMoProcessor {
+    /// per user Stream processor
+    fn process<MoStream: Stream<Item = Mo<User, TelegramMo>> + Send>(
+        &self,
+        bot: Bot,
+        user: User,
+        user_mo_stream: MoStream,
+    ) -> impl Future<Output = impl Stream<Item = TelegramBoxSendFuture> + Send> + Send;
 }
 
 impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
@@ -267,17 +389,23 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
         mo_rx.filter_map(|telegram_mo| future::ready(map_mo(telegram_mo)))
     }
 
-    fn consume_mt_stream(&self, concurrency: usize, stream: impl Stream<Item = TelegramBoxSendFuture> + Send + 'static) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(stream.for_each_concurrent(concurrency, |mt_future_result| async {
-            _ = mt_future_result
-                .await
-                .inspect_err(|err| {
-                    eprintln!("!!!GOT YOU!!!");
-                    eprintln!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}");
-                    error!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}")
+    fn consume_mt_stream(&self, concurrency: usize, all_users_mt_stream: impl Stream<Item = TelegramBoxSendFuture> + Send + 'static) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            eprintln!("TELEGRAM: Starting all-users-mt sending task");
+            all_users_mt_stream
+                .for_each_concurrent(concurrency, |mt_future_result| async {
+                    _ = mt_future_result
+                        .await
+                        .inspect_err(|err| {
+                            eprintln!("!!!GOT YOU!!!");
+                            eprintln!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}");
+                            error!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}")
+                        })
+                        .inspect(|response| println!("WE HAVE A RESPONSE! {response}"));
                 })
-                .inspect(|response| println!("WE HAVE A RESPONSE! {response}"));
-        }))
+                .await;
+            eprintln!("Telegram: MT sending task ended -- `all_users_mt_stream` must have finished.");
+        })
     }
 }
 
