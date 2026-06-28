@@ -7,3 +7,4 @@
 
 ## Knowledge Base
 1. File `CODE_GUIDELINES.md` contains code compliance definitions.
+2. File `CODE_PATTERNS.md` contains project-specific implementation patterns agents should honor before changing code.

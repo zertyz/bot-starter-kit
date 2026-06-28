@@ -23,12 +23,7 @@ jobs:
     - name: Install Rust components
       run: rustup component add rustfmt clippy
     - name: Check code guidelines
-      run: |
-        if git grep -nE 'anyhow::Context|\.with_context\s*\(|\.context\s*\(' -- '*.rs'
-        then
-          echo "::error::CODE_GUIDELINES.md forbids anyhow::Context, .context(), and .with_context()."
-          exit 1
-        fi
+      run: scripts/enforce_code_guidelines
     - name: Check formatting
       run: cargo fmt --all -- --check
     - name: Check lints

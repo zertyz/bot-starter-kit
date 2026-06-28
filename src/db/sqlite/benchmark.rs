@@ -191,7 +191,7 @@ where
     let query = range_query
         .as_ref()
         .or(point_query.as_ref())
-        .expect("No Query was selected!");
+        .ok_or_else(|| anyhow!("No Query was selected!"))?;
     report_progress(
         &report,
         format!(

@@ -81,7 +81,7 @@ where
     Report: AsyncFn(String) -> std::result::Result<(), ReportError> + ?Sized,
     ReportError: Display + Send + Sync + 'static,
 {
-    println!("{msg}");
+    log::info!("{msg}");
     report(msg)
         .await
         .map_err(|err| anyhow!("{err}"))

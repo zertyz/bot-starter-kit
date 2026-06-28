@@ -93,7 +93,7 @@ pub async fn demo(bot: &Bot, chat_id: ChatId) -> Result<()> {
             Ok(synthetic_quotes())
         } else {
             Ok(fetch_bcb_usd_brl_quotes(90).unwrap_or_else(|err| {
-                eprintln!("BCB API failed; using synthetic data instead: {err}");
+                log::warn!("BCB API failed; using synthetic data instead: {err}");
                 synthetic_quotes()
             }))
         }

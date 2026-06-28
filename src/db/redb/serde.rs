@@ -175,12 +175,12 @@ impl<'a, T: Archive> RedbRkyvWrapper<'a, T> {
     }
 
     #[inline(always)]
-    pub fn from_value(value: &T) -> Self
+    pub fn from_value(value: &T) -> Result<Self, rkyv::rancor::Error>
     where
         T: for<'r> rkyv::Serialize<HighSerializer<AlignedVec, ArenaHandle<'r>, rkyv::rancor::Error>>,
     {
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(value).expect("rkyv serialization should not fail");
-        Self::from_bytes_owned(bytes)
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(value)?;
+        Ok(Self::from_bytes_owned(bytes))
     }
 }
 
@@ -250,17 +250,6 @@ where
     #[inline(always)]
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         <T::Archived as Debug>::fmt(self, f)
-    }
-}
-
-impl<T: Archive + Debug> From<T> for RedbRkyvWrapper<'_, T>
-where
-    <T as Archive>::Archived: Debug,
-    T: for<'r> rkyv::Serialize<HighSerializer<AlignedVec, ArenaHandle<'r>, rkyv::rancor::Error>>,
-{
-    #[inline(always)]
-    fn from(value: T) -> Self {
-        RedbRkyvWrapper::from_value(&value)
     }
 }
 
@@ -347,8 +336,9 @@ mod tests {
                 .open_table(TABLE)
                 .expect("Could not open/create table");
             for (i, value) in expected_data_iter().enumerate() {
+                let value = RedbRkyvWrapper::from_value(&value).expect("rkyv serialization should not fail");
                 table
-                    .insert(key(i).as_str(), RedbRkyvWrapper::from(value))
+                    .insert(key(i).as_str(), value)
                     .expect("Could not insert/replace #{i}");
             }
         }

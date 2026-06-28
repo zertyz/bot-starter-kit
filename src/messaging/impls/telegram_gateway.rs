@@ -4,7 +4,7 @@ use crate::messaging::contracts::messaging::{Dialog, DialogKind, Language, Messa
 use crate::models::config::BotConfig;
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
-use log::{error, info};
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::env;
 use std::fmt::{Debug, Display};
@@ -57,7 +57,7 @@ impl TelegramGateway {
         // spawn the Teloxide gateway
         tokio::spawn({
             #[cfg(debug_assertions)]
-            eprintln!("Telegram: Starting the Teloxide task");
+            debug!("Telegram: Starting the Teloxide task");
             let instance_clone = instance.clone();
             async move {
                 _ = match mode.as_str() {
@@ -72,7 +72,7 @@ impl TelegramGateway {
                             .await
                     }
                 }
-                .inspect_err(|err| eprintln!("Telegram loop exited with error: {}", err));
+                .inspect_err(|err| error!("Telegram loop exited with error: {}", err));
                 instance_clone
                     .all_users_mo_tx
                     .close();
@@ -84,7 +84,7 @@ impl TelegramGateway {
                     .for_each(|user_mo_tx| {
                         user_mo_tx.close();
                     });
-                eprintln!("Shutting Down Telegram -- possibly due to operator's request via CTRL-C or SIGTERM");
+                info!("Shutting Down Telegram -- possibly due to operator's request via CTRL-C or SIGTERM");
             }
         });
 
@@ -107,11 +107,11 @@ impl TelegramGateway {
         // spawn the MO routing task
         tokio::spawn(async move {
             #[cfg(debug_assertions)]
-            eprintln!("Telegram: Starting the all-users-to-each-user MO routing task");
+            debug!("Telegram: Starting the all-users-to-each-user MO routing task");
             all_users_mo_stream
                 .for_each_concurrent(mo_routing_task_concurrency, move |mo| {
                     #[cfg(debug_assertions)]
-                    eprintln!("Telegram: ALL-USERS-MO-TASK: {mo:?}");
+                    debug!("Telegram: ALL-USERS-MO-TASK: {mo:?}");
                     let bot = bot.clone();
                     let user_mo_processor = user_mo_processor.clone();
                     let per_user_mo_tx = per_user_mo_tx.clone();
@@ -126,12 +126,12 @@ impl TelegramGateway {
                             .0;
                         let route_mo = async |mo, user_mo_tx: &async_channel::Sender<Mo<User, TelegramMo>>| {
                             #[cfg(debug_assertions)]
-                            eprintln!("Telegram: ALL-USERS-MO-TASK: routing MO");
+                            debug!("Telegram: ALL-USERS-MO-TASK: routing MO");
                             let route_result = user_mo_tx
                                 .send(mo)
                                 .await;
                             if let Err(err) = route_result {
-                                eprintln!("Telegram: Bailing out of User's Dialog Processor task: Error routing MO message to user_id #{user_id}'s channel: {err}");
+                                error!("Telegram: Bailing out of User's Dialog Processor task: Error routing MO message to user_id #{user_id}'s channel: {err}");
                                 user_mo_tx.close();
                             }
                         };
@@ -155,7 +155,7 @@ impl TelegramGateway {
                                 let user_mo_processor = user_mo_processor.clone();
                                 tokio::spawn(async move {
                                     #[cfg(debug_assertions)]
-                                    eprintln!("Telegram: Starting Dialog Processor (and user-to-all-users-mt) tasks for user #{user_id}");
+                                    debug!("Telegram: Starting Dialog Processor (and user-to-all-users-mt) tasks for user #{user_id}");
                                     let user_mt_stream = user_mo_processor
                                         .process(bot, user, user_mo_rx)
                                         .await;
@@ -166,7 +166,7 @@ impl TelegramGateway {
                                                 .send(user_mt)
                                                 .await;
                                             if let Err(err) = route_result {
-                                                eprintln!("Telegram: Bailing out of User's Dialog Processor task: Error routing user_id #{user_id}'s MT message to the all-users mt channel: {err}");
+                                                error!("Telegram: Bailing out of User's Dialog Processor task: Error routing user_id #{user_id}'s MT message to the all-users mt channel: {err}");
                                                 all_users_mo_tx.close();
                                             }
                                         })
@@ -177,7 +177,7 @@ impl TelegramGateway {
                     }
                 })
                 .await;
-            eprintln!("Telegram: MO routing task ended -- `all_users_mo_stream` must have finished.");
+            info!("Telegram: MO routing task ended -- `all_users_mo_stream` must have finished.");
             cloned_all_users_mt_rx.close();
         });
         // spawn the MT sending task
@@ -231,7 +231,7 @@ impl TelegramGateway {
     async fn run_webhook(self: &Arc<Self>, bot: Bot) -> anyhow::Result<()> {
         info!("Telegram: Starting in WEBHOOK mode");
         // WEBHOOK_URL must be public HTTPS: e.g. https://bot.yourdomain.com/webhook/abc123
-        let url = env::var("WEBHOOK_URL").expect("WEBHOOK_URL is required in webhook mode");
+        let url = env::var("WEBHOOK_URL").map_err(|err| anyhow!("WEBHOOK_URL is required in webhook mode: {err}"))?;
         let addr = ([0, 0, 0, 0], 8443).into(); // local bind; reverse-proxy can front on :443
 
         // Optional extra security: a secret header on all webhook calls (setWebhook secret_token)
@@ -240,7 +240,7 @@ impl TelegramGateway {
         // teloxide spins up an Axum server & calls setWebhook for you:
         let listener = teloxide::update_listeners::webhooks::axum(bot.clone(), teloxide::update_listeners::webhooks::Options::new(addr, url.parse()?).secret_token(secret.clone()))
             .await
-            .expect("webhook setup failed");
+            .map_err(|err| anyhow!("webhook setup failed: {err}"))?;
 
         info!("Webhook listening; press Ctrl+C to stop");
 
@@ -391,20 +391,19 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
 
     fn consume_mt_stream(&self, concurrency: usize, all_users_mt_stream: impl Stream<Item = TelegramBoxSendFuture> + Send + 'static) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            eprintln!("TELEGRAM: Starting all-users-mt sending task");
+            debug!("TELEGRAM: Starting all-users-mt sending task");
             all_users_mt_stream
                 .for_each_concurrent(concurrency, |mt_future_result| async {
                     _ = mt_future_result
                         .await
                         .inspect_err(|err| {
-                            eprintln!("!!!GOT YOU!!!");
-                            eprintln!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}");
+                            error!("!!!GOT YOU!!!");
                             error!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}")
                         })
-                        .inspect(|response| println!("WE HAVE A RESPONSE! {response}"));
+                        .inspect(|response| debug!("WE HAVE A RESPONSE! {response}"));
                 })
                 .await;
-            eprintln!("Telegram: MT sending task ended -- `all_users_mt_stream` must have finished.");
+            info!("Telegram: MT sending task ended -- `all_users_mt_stream` must have finished.");
         })
     }
 }
@@ -437,7 +436,7 @@ where
                 let msg = format!("Telegram Gateway: error sending MT '{payload}': {err}");
                 anyhow!("{msg}")
             })
-            .inspect_err(|err| eprintln!("### ERROR: {err}"))
+            .inspect_err(|err| error!("### ERROR: {err}"))
             .inspect_err(|err| log::error!("{err}"))
             .map(|output| format!("{output:?}"))
     })
@@ -449,7 +448,7 @@ pub fn mts<OkType: Debug, ErrorType: Into<anyhow::Error> + Display>(process: imp
         process
             .await
             .map_err(|err| anyhow!("Telegram Gateway: error sending MTs: {err}"))
-            .inspect_err(|err| eprintln!("### ERROR: {err}"))
+            .inspect_err(|err| error!("### ERROR: {err}"))
             .inspect_err(|err| log::error!("{err}"))
             .map(|answer| format!("{answer:?}"))
     })

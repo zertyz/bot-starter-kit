@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Enforce CODE_GUIDELINES.md.
+
+Keep this script synchronized with CODE_GUIDELINES.md. The printed numbers and
+titles below intentionally match the document so CI failures are easy to map
+back to the written rules.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+
+SCOPE = (
+    "Unless a rule explicitly says otherwise, guidelines apply to production/project code "
+    "and do not apply to unit tests, integration tests, or examples."
+)
+
+GUIDELINES = [
+    (
+        "1. Error Context Hiding",
+        "Do not allow `anyhow::Context` and related `.context` & `.with_context` high-order-functions.",
+    ),
+    (
+        "2. Program-Crashing Shortcuts Outside Tests",
+        "Do not allow panic-based shortcuts in production Rust source under `src/`.",
+    ),
+]
+
+EXEMPT_DIRS = {"examples", "tests"}
+
+RULE_1_PATTERNS = [
+    re.compile(r"anyhow::Context"),
+    re.compile(r"\.with_context\s*\("),
+    re.compile(r"\.context\s*\("),
+]
+
+RULE_2_PATTERNS = [
+    re.compile(r"\.expect\s*\("),
+    re.compile(r"\.unwrap\s*\("),
+    re.compile(r"\bpanic!\s*\("),
+    re.compile(r"\btodo!\s*\("),
+    re.compile(r"\bunimplemented!\s*\("),
+    re.compile(r"\bunreachable!\s*\("),
+    re.compile(r"\bassert!\s*\("),
+    re.compile(r"\bassert_eq!\s*\("),
+    re.compile(r"\bassert_ne!\s*\("),
+]
+
+
+def rust_files(paths: list[str]) -> list[Path]:
+    files: list[Path] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        if path.is_file() and path.suffix == ".rs":
+            files.append(path)
+        elif path.is_dir():
+            files.extend(sorted(path.rglob("*.rs")))
+    return sorted(files)
+
+
+def is_exempt_path(path: Path) -> bool:
+    return any(part in EXEMPT_DIRS for part in path.parts)
+
+
+def line_matches(line: str, patterns: list[re.Pattern[str]]) -> bool:
+    return any(pattern.search(line) for pattern in patterns)
+
+
+def excerpt(path: Path, line_number: int, line: str) -> str:
+    return f"{path}:{line_number}: {line.strip()}"
+
+
+def production_lines(paths: list[str]):
+    for path in rust_files(paths):
+        if is_exempt_path(path):
+            continue
+
+        test_module_depths: list[int] = []
+        pending_cfg_test = False
+        brace_depth = 0
+
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+            stripped = line.strip()
+            starts_cfg_test = stripped.startswith("#[cfg(test)]")
+            cfg_test_module_starts_here = (pending_cfg_test or starts_cfg_test) and re.search(r"\bmod\s+\w+\s*\{", line)
+            in_test_module = bool(test_module_depths) or bool(cfg_test_module_starts_here)
+
+            if not in_test_module:
+                yield path, line_number, line
+
+            if starts_cfg_test:
+                pending_cfg_test = True
+
+            opens = line.count("{")
+            closes = line.count("}")
+            if cfg_test_module_starts_here:
+                test_module_depths.append(brace_depth + opens - closes)
+                pending_cfg_test = False
+            elif stripped and not stripped.startswith("#"):
+                pending_cfg_test = False
+
+            brace_depth += opens - closes
+            while test_module_depths and brace_depth < test_module_depths[-1]:
+                test_module_depths.pop()
+
+
+def rule_1_violations() -> list[str]:
+    violations: list[str] = []
+    for path, line_number, line in production_lines(["src", "benches"]):
+        if line_matches(line, RULE_1_PATTERNS):
+            violations.append(excerpt(path, line_number, line))
+    return violations
+
+
+def rule_2_violations() -> list[str]:
+    violations: list[str] = []
+    for path, line_number, line in production_lines(["src"]):
+        if line_matches(line, RULE_2_PATTERNS):
+            violations.append(excerpt(path, line_number, line))
+    return violations
+
+
+def print_result(title: str, description: str, violations: list[str]) -> bool:
+    print(f"{title}: {description}")
+    if not violations:
+        print(f"{title}: OK")
+        return True
+
+    print(f"{title}: FAILED")
+    for violation in violations:
+        print(f"  {violation}")
+    return False
+
+
+def main() -> int:
+    print("Checking CODE_GUIDELINES.md")
+    print("Keep CODE_GUIDELINES.md and scripts/enforce_code_guidelines synchronized.")
+    print(f"Scope: {SCOPE}")
+
+    checks = [
+        (*GUIDELINES[0], rule_1_violations()),
+        (*GUIDELINES[1], rule_2_violations()),
+    ]
+    passed = [print_result(title, description, violations) for title, description, violations in checks]
+    return 0 if all(passed) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

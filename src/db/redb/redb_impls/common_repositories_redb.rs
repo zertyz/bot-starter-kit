@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use futures::{stream, Stream};
+use futures::{stream, Stream, StreamExt};
 use redb::{ReadTransaction, ReadableTable, TableDefinition, Value, WriteTransaction};
 use tokio::sync::MutexGuard;
 use crate::mmap_value;
@@ -46,8 +46,7 @@ UsersRepositoryRedb<'r, ReadTxnProviderFut, ReadTxnProviderFn, WriteTxnProviderF
 
     async fn ensure_user(&self, user: &User) -> Result<(), Error> {
         let transaction = (self.write_transaction_provider)().await;
-        let mut users_table = Self::open_users_rw_table(&transaction).await
-            .expect("user range failed");
+        let mut users_table = Self::open_users_rw_table(&transaction).await?;
         let exists = users_table.get(&user)
             .map_err(|redb_err| Error::ReDbStorage { message: String::from("Couldn't fetch a common users table record"), cause: redb_err })?
             .is_some();
@@ -59,28 +58,38 @@ UsersRepositoryRedb<'r, ReadTxnProviderFut, ReadTxnProviderFn, WriteTxnProviderF
     }
 
     async fn enumerate_users_by_realm(&self, realm: UserRealm) -> impl Stream<Item=Result<Self::User, Error>> {
-        let users_table = self.open_users_ro_table().await
-            .expect("user range failed");
+        let users_table = match self.open_users_ro_table().await {
+            Ok(users_table) => users_table,
+            Err(err) => return stream::iter(vec![Err(err)]).left_stream(),
+        };
         let range = match realm {
             UserRealm::Telegram => &User::TelegramUserId(u64::MIN)..=&User::TelegramUserId(u64::MAX),
             UserRealm::Whatsapp => &User::WhatsappUserId(u64::MIN)..=&User::WhatsappUserId(u64::MAX),
         };
-        let iter = users_table.range::<&User>(range).expect("user range failed")
+        let iter = match users_table.range::<&User>(range) {
+            Ok(iter) => iter,
+            Err(redb_err) => return stream::iter(vec![Err(Error::ReDbStorage { message: String::from("user range failed"), cause: redb_err })]).left_stream(),
+        }
             .map(|r| r
                 .map(|(key, _value)| key.value().clone())
                 .map_err(|redb_err| Error::ReDbStorage { message: String::from("Error enumerating users from the common users table"), cause: redb_err }));
-        stream::iter(iter)
+        stream::iter(iter).right_stream()
     }
 
     async fn enumerate_all_users(&self) -> impl Stream<Item=Result<Self::User, Error>> {
-        let users_table = self.open_users_ro_table().await
-            .expect("user range failed");
+        let users_table = match self.open_users_ro_table().await {
+            Ok(users_table) => users_table,
+            Err(err) => return stream::iter(vec![Err(err)]).left_stream(),
+        };
         let range = &User::TelegramUserId(u64::MIN)..=&User::WhatsappUserId(u64::MAX);
-        let iter = users_table.range::<&User>(range).expect("user range failed")
+        let iter = match users_table.range::<&User>(range) {
+            Ok(iter) => iter,
+            Err(redb_err) => return stream::iter(vec![Err(Error::ReDbStorage { message: String::from("user range failed"), cause: redb_err })]).left_stream(),
+        }
             .map(|r| r
                 .map(|(key, _value)| key.value().clone())
                 .map_err(|redb_err| Error::ReDbStorage { message: String::from("Error enumerating users from the common users table"), cause: redb_err }));
-        stream::iter(iter)
+        stream::iter(iter).right_stream()
     }
 }
 
@@ -100,8 +109,9 @@ UsersRepositoryRedb<'r, ReadTxnProviderFut, ReadTxnProviderFn, WriteTxnProviderF
     }
 
     async fn open_users_rw_table<'a>(transaction: &'a MutexGuard<'a, Option<WriteTransaction>>) -> Result<redb::Table<'a, User, ()>, Error> {
-        transaction.as_ref()
-            .expect("Write transaction is absent! :(")
+        transaction
+            .as_ref()
+            .ok_or_else(|| Error::MissingWriteTransaction { message: String::from("Write transaction is absent! :(") })?
             .open_table(TableDefinition::<User, ()>::new(COMMON_USERS_TABLE_NAME))
             .map_err(|redb_err| Error::ReDbTable {
                 message: format!("Couldn't open common users table {COMMON_USERS_TABLE_NAME} in read/write mode"),

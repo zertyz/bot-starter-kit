@@ -1,5 +1,7 @@
+mod logging;
 mod models;
 
+use anyhow::{Result, anyhow};
 use bot_starter_kit::{logic::telegram_demoscene::run, models::config::*};
 use ogre_config_meld::encryptable_tokio_fs::fs;
 use ogre_config_meld::{CmdLineAndConfigIntegration, get_config_file_path, parse_cmdline_args};
@@ -7,7 +9,7 @@ use ogre_config_meld::{CmdLineAndConfigIntegration, get_config_file_path, parse_
 use litcrypt::lc;
 litcrypt::use_litcrypt!();
 
-pub async fn parse_cmdline_and_merge_with_loaded_configs() -> BotConfig {
+pub async fn parse_cmdline_and_merge_with_loaded_configs() -> Result<BotConfig> {
     fs::set_keys_from_passphrase(lc!("This secret string may only be revealed if one is debugging our code. An acceptable risk for our purposes.").as_ref());
 
     let cli_options: models::cli::CliOptions = parse_cmdline_args();
@@ -36,7 +38,7 @@ pub async fn parse_cmdline_and_merge_with_loaded_configs() -> BotConfig {
             }
         }
         Err(err) => {
-            panic!("Error loading the encrypted config file: {err}");
+            return Err(anyhow!("Error loading the encrypted config file: {err}"));
         }
     };
 
@@ -49,14 +51,15 @@ pub async fn parse_cmdline_and_merge_with_loaded_configs() -> BotConfig {
     if write_effective_config {
         ogre_config_meld::save_to_file(&config, "", &config_file_path)
             .await
-            .expect("Couldn't save the config file");
+            .map_err(|err| anyhow!("Couldn't save the config file: {err}"))?;
         eprintln!("Configuration file saved successfully to {config_file_path:?}. Exiting. Re-run the program without -w, -t, and without the `TELOXIDE_TOKEN` env var.");
         std::process::exit(0);
     }
-    config
+    Ok(config)
 }
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let config = parse_cmdline_and_merge_with_loaded_configs().await;
+async fn main() -> Result<()> {
+    let _logging_guard = logging::init()?;
+    let config = parse_cmdline_and_merge_with_loaded_configs().await?;
     run(config).await
 }
