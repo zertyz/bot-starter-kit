@@ -21,7 +21,7 @@ pub struct TelegramConfig {
 }
 #[derive(derive_more::Debug, Serialize, Deserialize, Clone)]
 pub enum TelegramIntegrationMode {
-    Pooling,
+    Polling,
     #[debug("{}", "[REDACTED]")]
     WebHook {
         url: String,
@@ -43,7 +43,7 @@ impl Default for BotConfig {
             repository_config: RepositoryConfig { users_repository_db_file: "./users_repository.redb".to_string() },
             telegram_config: TelegramConfig {
                 teloxide_token: "".to_string(),
-                integration_mode: TelegramIntegrationMode::Pooling,
+                integration_mode: TelegramIntegrationMode::Polling,
             },
             logging_config: LoggingConfig { level: log::LevelFilter::Debug },
         }

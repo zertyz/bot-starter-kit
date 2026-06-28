@@ -37,7 +37,7 @@ pub struct CliOptions {
     /// and that the given value represents the https address that reaches this node & program.
     /// See also `--telegram_webhook_secret`, which should be specified for extra-security.
     ///
-    /// If absent, "Pooling" mode will be used -- ideal for testing & staging: more portable, but less reliable.
+    /// If absent, "Polling" mode will be used -- ideal for testing & staging: more portable, but less reliable.
     #[clap(long, env = "TELOXIDE_WEBHOOK_URL")]
     pub telegram_webhook_url: Option<String>,
 
@@ -45,7 +45,7 @@ pub struct CliOptions {
     /// and that the given value specifies the token to be added to each call header, for extra security.
     /// You also need to specify `--telegram_webhook_url`.
     ///
-    /// If absent, "Pooling" mode will be used -- ideal for testing & staging: more portable, but less reliable.
+    /// If absent, "Polling" mode will be used -- ideal for testing & staging: more portable, but less reliable.
     #[clap(long, env = "TELOXIDE_WEBHOOK_SECRET")]
     pub telegram_webhook_secret: Option<String>,
 }

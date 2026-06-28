@@ -67,7 +67,7 @@ impl TelegramGateway {
                             .run_webhook(bot, url, secret)
                             .await
                     }
-                    TelegramIntegrationMode::Pooling => {
+                    TelegramIntegrationMode::Polling => {
                         instance_clone
                             .run_polling(bot)
                             .await
