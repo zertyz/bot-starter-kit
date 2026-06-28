@@ -1,6 +1,6 @@
 use ::heed::{Database, Env, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
 use anyhow::{Result, anyhow, ensure};
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, stream};
 use std::path::Path;
 use std::pin::pin;
 use tokio::sync::{Mutex, MutexGuard, Semaphore, SemaphorePermit};
@@ -130,6 +130,23 @@ impl AsyncHeed {
             .close()
             .await?;
         Ok(db)
+    }
+
+    pub fn heed_iter_to_stream<'txn, KC, DC>(
+        heed_iter_result: std::result::Result<::heed::RoIter<'txn, KC, DC>, ::heed::Error>,
+    ) -> Result<impl Stream<Item = Result<(<KC as ::heed::BytesDecode<'txn>>::DItem, <DC as ::heed::BytesDecode<'txn>>::DItem)>> + 'txn>
+    where
+        KC: ::heed::BytesDecode<'txn> + 'txn,
+        DC: ::heed::BytesDecode<'txn> + 'txn,
+    {
+        match heed_iter_result {
+            Ok(heed_iter) => {
+                let stream = stream::iter(heed_iter).map(|heed_result| heed_result.map_err(anyhow::Error::new));
+
+                Ok(stream)
+            }
+            Err(heed_err) => Err(anyhow::Error::new(heed_err)),
+        }
     }
 
     pub async fn ingest_stream<KC, DC, KeyType, ValueType>(&self, database: &Database<KC, DC>, input_stream: impl Stream<Item = (KeyType, ValueType)>) -> Result<u64>
@@ -368,6 +385,38 @@ mod tests {
         );
 
         drop(observed_iter);
+
+        let mut observed_stream = AsyncHeed::heed_iter_to_stream(reopened_database.iter(read_txn.inner())).expect("Could not get the Stream");
+
+        let mut expected_stream = stream::iter(expected_data_iter())
+            .enumerate()
+            .map(|(k, v)| anyhow::Result::<(u64, TestModel), anyhow::Error>::Ok((key(k), v)));
+
+        while let Some(Ok((expected_k, expected_v))) = expected_stream
+            .next()
+            .await
+        {
+            if let Some(Ok((observed_k, observed_v))) = observed_stream
+                .next()
+                .await
+            {
+                assert_eq!(observed_k, expected_k, "Stream query failed: row #{expected_k} yielded the value of row#{observed_k}");
+
+                assert_eq!(observed_v.read_unaligned(), expected_v, "Stream query failed @ row #{expected_k}");
+            } else {
+                panic!("Stream query failed: row #{expected_k} is not present in the Stream");
+            }
+        }
+
+        assert!(
+            observed_stream
+                .next()
+                .await
+                .is_none(),
+            "Stream query failed: more elements than expected were produced"
+        );
+
+        drop(observed_stream);
         read_txn
             .close()
             .await

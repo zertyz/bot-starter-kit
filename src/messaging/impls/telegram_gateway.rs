@@ -1,12 +1,11 @@
 //! Telegram/`teloxide` setup & integration for message trafficking
 
 use crate::messaging::contracts::messaging::{Dialog, DialogKind, Language, Messaging, Mo, Party};
-use crate::models::config::BotConfig;
+use crate::models::config::{BotConfig, TelegramIntegrationMode};
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
 use log::{debug, error, info};
 use std::collections::HashMap;
-use std::env;
 use std::fmt::{Debug, Display};
 use std::future;
 use std::pin::Pin;
@@ -44,8 +43,7 @@ impl TelegramGateway {
                     .clone(),
             );
         }
-        let bot = Bot::from_env(); // expects TELOXIDE_TOKEN. How to not involve the environment to pass in this information?
-        let mode = env::var("MODE").unwrap_or_else(|_| "polling".into());
+        let bot = Bot::from_env(); // expects TELOXIDE_TOKEN from env -- set above so no external env setting is needed.
 
         let (all_users_mo_tx, all_users_mo_rx) = async_channel::bounded(64);
         let instance = Arc::new(Self {
@@ -60,13 +58,16 @@ impl TelegramGateway {
             debug!("Telegram: Starting the Teloxide task");
             let instance_clone = instance.clone();
             async move {
-                _ = match mode.as_str() {
-                    "webhook" => {
+                _ = match &config
+                    .telegram_config
+                    .integration_mode
+                {
+                    TelegramIntegrationMode::WebHook { url, secret } => {
                         instance_clone
-                            .run_webhook(bot)
+                            .run_webhook(bot, url, secret)
                             .await
                     }
-                    _ => {
+                    TelegramIntegrationMode::Pooling => {
                         instance_clone
                             .run_polling(bot)
                             .await
@@ -228,17 +229,22 @@ impl TelegramGateway {
     /// TODO:
     /// 1) research if we have either better performance or better limits by using this MO receiving alternative
     /// 2) then complete this method
-    async fn run_webhook(self: &Arc<Self>, bot: Bot) -> anyhow::Result<()> {
+    async fn run_webhook(self: &Arc<Self>, bot: Bot, webhook_url: &str, webhook_secret: &str) -> anyhow::Result<()> {
         info!("Telegram: Starting in WEBHOOK mode");
         // WEBHOOK_URL must be public HTTPS: e.g. https://bot.yourdomain.com/webhook/abc123
-        let url = env::var("WEBHOOK_URL").map_err(|err| anyhow!("WEBHOOK_URL is required in webhook mode: {err}"))?;
+        let url = if webhook_url
+            .trim()
+            .is_empty()
+        {
+            let err = "not present in configuration";
+            return Err(anyhow!("WEBHOOK_URL is required in webhook mode: {err}"));
+        } else {
+            webhook_url
+        };
         let addr = ([0, 0, 0, 0], 8443).into(); // local bind; reverse-proxy can front on :443
 
-        // Optional extra security: a secret header on all webhook calls (setWebhook secret_token)
-        let secret = env::var("WEBHOOK_SECRET").unwrap_or_else(|_| "changeme-42".into());
-
         // teloxide spins up an Axum server & calls setWebhook for you:
-        let listener = teloxide::update_listeners::webhooks::axum(bot.clone(), teloxide::update_listeners::webhooks::Options::new(addr, url.parse()?).secret_token(secret.clone()))
+        let listener = teloxide::update_listeners::webhooks::axum(bot.clone(), teloxide::update_listeners::webhooks::Options::new(addr, url.parse()?).secret_token(webhook_secret.to_string()))
             .await
             .map_err(|err| anyhow!("webhook setup failed: {err}"))?;
 
