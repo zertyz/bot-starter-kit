@@ -44,7 +44,7 @@ pub async fn parse_cmdline_and_merge_with_loaded_configs() -> Result<BotConfig> 
 
     let show_effective_config = cli_options.show_effective_config;
     let write_effective_config = cli_options.write_effective_config;
-    let config = cli_options.merge_with_config(config);
+    let config = cli_options.merge_with_config(config)?;
     if show_effective_config {
         eprintln!("EFFECTIVE CONFIG: {:#?}", config);
     }

@@ -63,7 +63,7 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
         self.show_effective_config
     }
 
-    fn merge_with_config(self, config: BotConfig) -> BotConfig {
+    fn merge_with_config(self, config: BotConfig) -> Result<BotConfig, ogre_config_meld::Error> {
         let mut config = config;
 
         self.log_level
@@ -91,13 +91,13 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
                 .telegram_webhook_url
                 .as_ref()
             else {
-                panic!("CLI parameter `--telegram_webhook_url` is missing");
+                return Err(ogre_config_meld::Error::MergingLogicViolation { message: "CLI parameter `--telegram_webhook_url` is missing".to_string() });
             };
             let Some(telegram_webhook_secret) = self
                 .telegram_webhook_secret
                 .as_ref()
             else {
-                panic!("CLI parameter `--telegram_webhook_secret` is missing");
+                return Err(ogre_config_meld::Error::MergingLogicViolation { message: "CLI parameter `--telegram_webhook_secret` is missing".to_string() });
             };
             config
                 .telegram_config
@@ -107,6 +107,6 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
             };
         }
 
-        config
+        Ok(config)
     }
 }
