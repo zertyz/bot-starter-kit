@@ -1,10 +1,13 @@
-# Instructions for AI Agents
+# Instructions for Codex AI Agents
 
 ## Behavior correction for Codex 5.5 Extra-high
 1. Never drop code -- even if wrong -- when this would mean dropping intention. Ask first.
 2. Never drop comments and do not change Strings, even if they are wrong. Ask first.
-3. Do not make stupid changes. Only make changes to parts you are 100% sure to be what the human wants. Ask for anything else.
+3. Do not make unrelated changes. Only make changes to parts you are 100% sure to be what the human wants -- do not invent unrelated scope; within the requested scope, still use engineering judgment. Ask for anything else.
+
+## Performance Considerations
+1. Spend effort inferring the minimal domain model that makes the requested change coherent -- maybe using Mathematical Inference-like capabilities.
+2. For every solution (and/or details of the solution) you are considering, spend time simulating future evolutions, considering maintainability, and other engineering practices. Always prefer the solutions more in tune with good engineering practices.
 
 ## Knowledge Base
-1. File `CODE_GUIDELINES.md` contains code compliance definitions.
-2. File `CODE_PATTERNS.md` contains project-specific implementation patterns agents should honor before changing code.
+Read KNOWLEDGE_BASE.md for instructions.

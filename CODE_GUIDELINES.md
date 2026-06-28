@@ -1,7 +1,6 @@
 # Denied Constructs
 
-The rules state here are enforced by `scripts/enforce_code_guidelines`. Keep these files in sync and use that script in CI/CD rules.
-Scope: Unless a rule explicitly says otherwise, guidelines apply to production/project code and do not apply to unit tests, integration tests, or examples.
+The rules stated here are enforced by `scripts/enforce_code_guidelines`. Keep these files in sync and use that script in CI/CD rules.
 
 ## Scope
 
