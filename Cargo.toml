@@ -17,7 +17,8 @@ const_format = { version = "0.2" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 futures = { version = "0.3" }
 async-channel = "2.5"
-# ogre-stream-ext = { version = "0.1" }
+ogre-stream-ext = { version = "0.1" }
+futures-time = { version = "3" } # enables the async-io backend required by ogre-stream-ext's deprecated futures-time dependency
 
 # encryptable configs and command-line support
 ogre-config-meld = { version = "0.1.7" }  # for config & cmdline models, merging, encryption

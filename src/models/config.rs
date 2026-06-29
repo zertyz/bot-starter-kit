@@ -1,5 +1,6 @@
 use ogre_config_meld::OgreRootConfig;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BotConfig {
@@ -18,6 +19,9 @@ pub struct TelegramConfig {
     #[debug("{}", "[REDACTED]")]
     pub teloxide_token: String,
     pub integration_mode: TelegramIntegrationMode,
+    /// Maximum idle seconds before the dialog processor are closed
+    /// -- controlling the effective "per user RAM session timeout".
+    pub dialog_processor_idle_timeout: Duration,
 }
 #[derive(derive_more::Debug, Serialize, Deserialize, Clone)]
 pub enum TelegramIntegrationMode {
@@ -44,6 +48,7 @@ impl Default for BotConfig {
             telegram_config: TelegramConfig {
                 teloxide_token: "".to_string(),
                 integration_mode: TelegramIntegrationMode::Polling,
+                dialog_processor_idle_timeout: Duration::from_mins(30),
             },
             logging_config: LoggingConfig { level: log::LevelFilter::Debug },
         }

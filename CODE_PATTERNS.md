@@ -10,7 +10,8 @@ This document can be viewed as a lighter version of `CODE_GUIDELINES.md` -- here
 * Data from external files;
 should be unified through the crate `ogre-config-meld`, using the models in `src/models/config.rs` and merged by
 `parse_cmdline_and_merge_with_loaded_configs()` in the main module.
-1. Should an external crate require an ENV var, we should use `env::set_var()` to allow defining it from the config models 
+1. Should an external crate require an ENV var, we should use `env::set_var()` to allow defining it from the config models
+2. Keep `src/models/config.rs` and  `src/bin/models/cli.rs` in sync. As a project rule, all possible configurations should also have a CLI exposure.
 
 ## 2. Database Wrappers
 All database wrappers in `src/db` should:

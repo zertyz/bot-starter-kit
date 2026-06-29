@@ -5,11 +5,16 @@ use crate::models::config::{BotConfig, TelegramIntegrationMode};
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
 use log::{debug, error, info};
+use ogre_stream_ext::StreamExtCloseOnItemTimeout;
 use std::collections::{HashMap, hash_map::Entry};
 use std::fmt::{Debug, Display};
 use std::future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
 use teloxide::error_handlers::LoggingErrorHandler;
 use teloxide::prelude::{CallbackQuery, Message, Request, ResponseResult, Update};
@@ -41,13 +46,38 @@ type DialogMoReceiver<MoPayloadType> = async_channel::Receiver<Mo<User, MoPayloa
 /// Maps every `user_id` to a dialog.
 type DialogRoutingTable<MoPayloadType> = Arc<Mutex<HashMap<u64, DialogMoSender<MoPayloadType>>>>;
 
+/// One-shot teardown handle for removing a dialog route before closing its channel.
+struct DialogCleanupContext<MoPayloadType> {
+    dialog_mo_tx_by_user: DialogRoutingTable<MoPayloadType>,
+    user_id: u64,
+    mo_tx: DialogMoSender<MoPayloadType>,
+    closed: Arc<AtomicBool>,
+}
+impl<MoPayloadType> Clone for DialogCleanupContext<MoPayloadType> {
+    // note: using #[derive(Clone)] on this struct is not currently possible, as Rust requires `TelegramMo` to also be `Clone` and we don't want that.
+    fn clone(&self) -> Self {
+        Self {
+            dialog_mo_tx_by_user: self
+                .dialog_mo_tx_by_user
+                .clone(),
+            user_id: self.user_id,
+            mo_tx: self
+                .mo_tx
+                .clone(),
+            closed: self
+                .closed
+                .clone(),
+        }
+    }
+}
+
 /// Context needed to spawn a processor for a newly created dialog between this bot and a user.
 struct NewDialogContext<MoPayloadType> {
-    user_id: u64,
+    dialog_cleanup_context: DialogCleanupContext<MoPayloadType>,
     mo_rx: DialogMoReceiver<MoPayloadType>,
 }
 
-/// Routes an MO, creating its per-user dialog context when needed and returning it for spawning a new dialog processor.
+/// Routes an MO to the per-user processor, signaling the caller if a new dialog processor task should be created (return is `Some`) or one already exists (return is `None` `).
 async fn route_mo<MoPayloadType>(dialog_mo_tx_by_user: &DialogRoutingTable<MoPayloadType>, mo: Mo<User, MoPayloadType>) -> Option<NewDialogContext<MoPayloadType>> {
     route_mo_with_before_new_dialog(dialog_mo_tx_by_user, mo, || future::ready(())).await
 }
@@ -69,13 +99,14 @@ where
     let send_mo = async |mo, mo_tx: &DialogMoSender<MoPayloadType>| {
         #[cfg(debug_assertions)]
         debug!("Telegram: ALL-USERS-MO-TASK: routing MO");
-        let route_result = mo_tx
+        mo_tx
             .send(mo)
-            .await;
-        if let Err(err) = route_result {
-            error!("Telegram: Bailing out of User's Dialog Processor task: Error routing MO message to user_id #{user_id}'s channel: {err}");
-            mo_tx.close();
-        }
+            .await
+            .map_err(|err| {
+                error!("Telegram: Bailing out of User's Dialog Processor task: Error routing MO message to user_id #{user_id}'s channel: {err}");
+                mo_tx.close();
+                err.into_inner()
+            })
     };
     /// Routing decision after the dialog map has been updated.
     enum DialogRoute<MoPayloadType> {
@@ -85,12 +116,12 @@ where
 
     // Clone the sender while holding the map lock, then route the MO after releasing it.
     let route = {
-        let mut dialog_mo_tx_by_user = dialog_mo_tx_by_user
+        let mut locked_dialog_mo_tx_by_user = dialog_mo_tx_by_user
             .lock()
             .await;
-        match dialog_mo_tx_by_user.entry(user_id) {
+        match locked_dialog_mo_tx_by_user.entry(user_id) {
             Entry::Occupied(entry) => {
-                // A channel already exist for the user. Route the message.
+                // A channel already exists for the user. Route the message.
                 DialogRoute::Existing(
                     entry
                         .get()
@@ -108,19 +139,88 @@ where
 
     match route {
         DialogRoute::Existing(mo_tx) => {
-            send_mo(mo, &mo_tx).await;
+            _ = send_mo(mo, &mo_tx).await;
             None
         }
         DialogRoute::New { mo_tx, mo_rx } => {
             before_new_dialog().await;
-            send_mo(mo, &mo_tx).await;
-            Some(NewDialogContext { user_id, mo_rx })
+            _ = send_mo(mo, &mo_tx).await;
+            Some(NewDialogContext {
+                dialog_cleanup_context: DialogCleanupContext {
+                    dialog_mo_tx_by_user: dialog_mo_tx_by_user.clone(),
+                    user_id,
+                    mo_tx,
+                    closed: Arc::new(AtomicBool::new(false)),
+                },
+                mo_rx,
+            })
         }
     }
 }
 
+/// Removes a dialog route before closing its channel.
+async fn close_dialog<MoPayloadType>(dialog_cleanup_context: &DialogCleanupContext<MoPayloadType>) -> bool {
+    close_dialog_with_before_channel_close(dialog_cleanup_context, || future::ready(())).await
+}
+
+/// Test-hook variant of [close_dialog]; only tests pass a non-no-op callback.
+async fn close_dialog_with_before_channel_close<MoPayloadType, BeforeChannelCloseFn, BeforeChannelCloseFuture>(
+    dialog_cleanup_context: &DialogCleanupContext<MoPayloadType>,
+    before_channel_close: BeforeChannelCloseFn,
+) -> bool
+where
+    BeforeChannelCloseFn: FnOnce() -> BeforeChannelCloseFuture,
+    BeforeChannelCloseFuture: Future<Output = ()>,
+{
+    if dialog_cleanup_context
+        .closed
+        .swap(true, Ordering::SeqCst)
+    {
+        return false;
+    }
+
+    let had_dialog_route = dialog_cleanup_context
+        .dialog_mo_tx_by_user
+        .lock()
+        .await
+        .remove(&dialog_cleanup_context.user_id)
+        .is_some();
+
+    before_channel_close().await;
+    dialog_cleanup_context
+        .mo_tx
+        .close();
+    had_dialog_route
+}
+
+/// Upgrades the `mo_stream` to one that auto-closes after no MO arrives within `dialog_idle_timeout`.
+fn set_close_on_idle<MoPayloadType: Send + 'static>(
+    dialog_cleanup_context: DialogCleanupContext<MoPayloadType>,
+    mo_stream: DialogMoReceiver<MoPayloadType>,
+    dialog_idle_timeout: Duration,
+) -> impl Stream<Item = Mo<User, MoPayloadType>> + Send {
+    mo_stream
+        .boxed()
+        .close_stream_on_item_timeout(dialog_idle_timeout)
+        .then(move |mo_result| {
+            let dialog_cleanup = dialog_cleanup_context.clone();
+            async move {
+                match mo_result {
+                    Ok(mo) => Some(mo),
+                    Err(err) => {
+                        let user_id = dialog_cleanup.user_id;
+                        close_dialog(&dialog_cleanup).await;
+                        info!("Telegram: Closing dialog processor for user #{user_id} after {dialog_idle_timeout:?} without receiving MOs: {err}");
+                        None
+                    }
+                }
+            }
+        })
+        .filter_map(future::ready)
+}
+
 impl TelegramGateway {
-    pub fn new<ProcessorType: UserMoProcessor + Send + Sync + 'static>(config: BotConfig, user_mo_processor: ProcessorType) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
+    pub fn new<ProcessorType: UserMoProcessor + Send + Sync + 'static>(config: BotConfig, per_user_mo_processor: ProcessorType) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
         unsafe {
             std::env::set_var(
                 "TELOXIDE_TOKEN",
@@ -131,6 +231,9 @@ impl TelegramGateway {
             );
         }
         let bot = Bot::from_env(); // expects TELOXIDE_TOKEN from env -- set above so no external env setting is needed.
+        let dialog_processor_idle_timeout = config
+            .telegram_config
+            .dialog_processor_idle_timeout;
 
         let (all_users_mo_tx, all_users_mo_rx) = async_channel::bounded(64);
         let instance = Arc::new(Self {
@@ -180,7 +283,7 @@ impl TelegramGateway {
 
         // process the stream to completion with the given concurrency
         let mo_routing_task_concurrency = 4;
-        let user_mo_processor = Arc::new(user_mo_processor);
+        let per_user_mo_processor = Arc::new(per_user_mo_processor);
         let bot = instance
             .bot
             .clone();
@@ -201,19 +304,21 @@ impl TelegramGateway {
                     #[cfg(debug_assertions)]
                     debug!("Telegram: ALL-USERS-MO-TASK: {mo:?}");
                     let bot = bot.clone();
-                    let user_mo_processor = user_mo_processor.clone();
+                    let per_user_mo_processor = per_user_mo_processor.clone();
                     let dialog_mo_tx_by_user = dialog_mo_tx_by_user.clone();
                     let all_users_mo_tx = all_users_mo_tx.clone();
                     let all_users_mt_tx = all_users_mt_tx.clone();
                     async move {
                         if let Some(new_dialog_context) = route_mo(&dialog_mo_tx_by_user, mo).await {
-                            let NewDialogContext { user_id, mo_rx } = new_dialog_context;
-                            let user_mo_processor = user_mo_processor.clone();
+                            let NewDialogContext { dialog_cleanup_context: dialog_cleanup, mo_rx } = new_dialog_context;
+                            let user_id = dialog_cleanup.user_id;
+                            let per_user_mo_processor = per_user_mo_processor.clone();
                             tokio::spawn(async move {
                                 #[cfg(debug_assertions)]
                                 debug!("Telegram: Starting Dialog Processor (and user-to-all-users-mt) tasks for user #{user_id}");
-                                let user_mt_stream = user_mo_processor
-                                    .process(bot, mo_rx)
+                                let per_user_ttl_mo_stream = set_close_on_idle(dialog_cleanup.clone(), mo_rx, dialog_processor_idle_timeout);
+                                let user_mt_stream = per_user_mo_processor
+                                    .process(bot, per_user_ttl_mo_stream)
                                     .await;
                                 // process 1 message at a time (per user)
                                 user_mt_stream
@@ -227,6 +332,7 @@ impl TelegramGateway {
                                         }
                                     })
                                     .await;
+                                close_dialog(&dialog_cleanup).await;
                             });
                         }
                     }
@@ -512,7 +618,7 @@ pub fn mts<OkType: Debug, ErrorType: Into<anyhow::Error> + Display>(process: imp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::future::join_all;
+    use futures::{StreamExt, future::join_all, pin_mut};
     use teloxide::types::UserId;
     use tokio::sync::Barrier;
 
@@ -560,7 +666,12 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(new_dialog_contexts.len(), 1);
-        assert_eq!(new_dialog_contexts[0].user_id, USER_ID);
+        assert_eq!(
+            new_dialog_contexts[0]
+                .dialog_cleanup_context
+                .user_id,
+            USER_ID
+        );
         assert_eq!(
             new_dialog_contexts[0]
                 .mo_rx
@@ -571,6 +682,98 @@ mod tests {
             dialog_mo_tx_by_user
                 .lock()
                 .await
+                .len(),
+            1
+        );
+    }
+
+    /// Makes sure idle dialog processors are removed from the routing table.
+    #[tokio::test]
+    async fn idle_dialog_timeout_removes_dialog_route() {
+        const USER_ID: u64 = 42;
+
+        let dialog_mo_tx_by_user = Arc::new(Mutex::new(HashMap::new()));
+        let NewDialogContext { dialog_cleanup_context: dialog_cleanup, mo_rx } = route_mo(&dialog_mo_tx_by_user, test_mo(USER_ID, 1))
+            .await
+            .expect("first MO should create a dialog context");
+        let user_mo_stream = set_close_on_idle(dialog_cleanup, mo_rx, Duration::from_millis(10));
+        pin_mut!(user_mo_stream);
+
+        assert_eq!(
+            user_mo_stream
+                .next()
+                .await
+                .map(|mo| mo.id()),
+            Some(2)
+        );
+        assert!(
+            user_mo_stream
+                .next()
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            dialog_mo_tx_by_user
+                .lock()
+                .await
+                .len(),
+            0
+        );
+    }
+
+    /// Makes sure cleanup removes the route before closing the channel and does not remove a new dialog later.
+    #[tokio::test]
+    async fn dialog_cleanup_removes_route_before_closing_channel() {
+        const USER_ID: u64 = 42;
+
+        let dialog_mo_tx_by_user = Arc::new(Mutex::new(HashMap::new()));
+        let NewDialogContext { dialog_cleanup_context: dialog_cleanup, .. } = route_mo(&dialog_mo_tx_by_user, test_mo(USER_ID, 1))
+            .await
+            .expect("first MO should create a dialog context");
+        let new_dialog_context = Arc::new(Mutex::new(None));
+
+        assert!(
+            close_dialog_with_before_channel_close(&dialog_cleanup, {
+                let dialog_mo_tx_by_user = dialog_mo_tx_by_user.clone();
+                let new_dialog_context = new_dialog_context.clone();
+                || async move {
+                    assert_eq!(
+                        dialog_mo_tx_by_user
+                            .lock()
+                            .await
+                            .len(),
+                        0
+                    );
+                    let mut new_dialog_context = new_dialog_context
+                        .lock()
+                        .await;
+                    *new_dialog_context = route_mo(&dialog_mo_tx_by_user, test_mo(USER_ID, 2)).await;
+                }
+            })
+            .await
+        );
+
+        assert!(
+            dialog_cleanup
+                .mo_tx
+                .is_closed()
+        );
+        assert!(!close_dialog(&dialog_cleanup).await);
+        let new_dialog_context = new_dialog_context
+            .lock()
+            .await
+            .take()
+            .expect("message between route removal and channel close should create a new dialog");
+        assert_eq!(
+            dialog_mo_tx_by_user
+                .lock()
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(
+            new_dialog_context
+                .mo_rx
                 .len(),
             1
         );

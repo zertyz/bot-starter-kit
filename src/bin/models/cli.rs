@@ -1,5 +1,6 @@
 use bot_starter_kit::models::config::{BotConfig, TelegramIntegrationMode};
 use ogre_config_meld::clap;
+use std::time::Duration;
 
 /// Command Line Options
 #[derive(clap::Parser, Debug)]
@@ -48,6 +49,10 @@ pub struct CliOptions {
     /// If absent, "Polling" mode will be used -- ideal for testing & staging: more portable, but less reliable.
     #[clap(long, env = "TELOXIDE_WEBHOOK_SECRET")]
     pub telegram_webhook_secret: Option<String>,
+
+    /// Maximum idle seconds before the per-user dialog processor (a.k.a., session) is closed.
+    #[clap(long)]
+    pub dialog_idle_timeout_secs: Option<u64>,
 }
 
 impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
@@ -80,6 +85,13 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
                     .teloxide_token = teloxide_token.clone()
             });
 
+        self.dialog_idle_timeout_secs
+            .inspect(|dialog_idle_timeout_secs| {
+                config
+                    .telegram_config
+                    .dialog_processor_idle_timeout = Duration::from_secs(*dialog_idle_timeout_secs)
+            });
+
         if self
             .telegram_webhook_url
             .is_some()
@@ -108,5 +120,34 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
         }
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ogre_config_meld::CmdLineAndConfigIntegration;
+
+    #[test]
+    fn merge_dialog_idle_timeout_secs() {
+        let expected_timeout = Duration::from_secs(7);
+        let config = CliOptions {
+            write_effective_config: false,
+            show_effective_config: false,
+            log_level: None,
+            teloxide_token: None,
+            telegram_webhook_url: None,
+            telegram_webhook_secret: None,
+            dialog_idle_timeout_secs: Some(expected_timeout.as_secs()),
+        }
+        .merge_with_config(BotConfig::default())
+        .expect("CLI merge should succeed");
+
+        assert_eq!(
+            config
+                .telegram_config
+                .dialog_processor_idle_timeout,
+            expected_timeout
+        );
     }
 }
