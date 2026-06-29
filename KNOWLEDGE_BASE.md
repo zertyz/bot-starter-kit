@@ -9,4 +9,4 @@
 6. File `Cargo.toml` contains this Rust project's definitions.
 7. Directory `.github` contains the GitHub workflows.
 8. Directory `scripts` contains helper scripts for various parts of this project.
-9. Directory `diagrams` contains images used in the docs, to visually aid the learning-curve for this project.
+9. Directory `diagrams` contains images used in the Rust docs, to visually aid the learning-curve for this project.
