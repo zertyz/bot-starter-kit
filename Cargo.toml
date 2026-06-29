@@ -41,7 +41,7 @@ chrono = { version = "0.4", features = ["clock"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 oxipng = "10"
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "chrono", "line_series", "ttf"] }
-reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"] }   # spike only dependency
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }   # spike only dependency
 
 # really needed ?
 anyhow = "1"

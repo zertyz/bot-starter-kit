@@ -27,19 +27,17 @@ pub async fn parse_cmdline_and_merge_with_loaded_configs() -> Result<BotConfig> 
                         eprintln!(
                             "In addition to passing in the -t option or the TELOXIDE_TOKEN env var, also specify -w to create an encrypted config file allowing you to drop the token and no longer using these options."
                         );
-                        std::process::exit(1);
+                        Err(anyhow!("No Teloxide token found"))?;
                     }
                 } else {
                     eprintln!("Couldn't find the configuration file {config_file_path:?}.");
                     eprintln!("Please, re-run and specify the -t option or the TELOXIDE_TOKEN env var; also specify -w to create an encrypted config file allowing you to drop the token.");
-                    std::process::exit(1);
+                    Err(anyhow!("No Teloxide token found"))?;
                 }
                 BotConfig::default()
             }
         }
-        Err(err) => {
-            return Err(anyhow!("Error loading the encrypted config file: {err}"));
-        }
+        Err(err) => Err(anyhow!("Error loading the encrypted config file: {err}"))?,
     };
 
     let show_effective_config = cli_options.show_effective_config;

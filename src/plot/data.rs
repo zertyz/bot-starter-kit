@@ -22,7 +22,7 @@ struct BcbQuote {
     data_hora_cotacao: String,
 }
 
-pub fn fetch_bcb_usd_brl_quotes(last_n: usize) -> Result<Vec<Quote>> {
+pub async fn fetch_bcb_usd_brl_quotes(last_n: usize) -> Result<Vec<Quote>> {
     let end = Local::now().date_naive();
     let start = end - Duration::days(75);
 
@@ -33,9 +33,11 @@ pub fn fetch_bcb_usd_brl_quotes(last_n: usize) -> Result<Vec<Quote>> {
         bcb_date(end)
     );
 
-    let resp: BcbResponse = reqwest::blocking::get(url)?
+    let resp: BcbResponse = reqwest::get(url)
+        .await?
         .error_for_status()?
-        .json()?;
+        .json()
+        .await?;
 
     let mut by_day = BTreeMap::<NaiveDate, f64>::new();
     for q in resp.value {

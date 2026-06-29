@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::future::Future;
 use std::time::{Duration, Instant};
 
 #[derive(Default, Debug)]
@@ -14,6 +15,19 @@ impl Timings {
         let name = name.into();
         let start = Instant::now();
         let out = f();
+        self.rows
+            .push((name, start.elapsed()));
+        out
+    }
+
+    pub async fn measure_async<T, F, Fut>(&mut self, name: impl Into<String>, f: F) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let name = name.into();
+        let start = Instant::now();
+        let out = f().await;
         self.rows
             .push((name, start.elapsed()));
         out

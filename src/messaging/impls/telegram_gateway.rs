@@ -202,10 +202,10 @@ fn set_close_on_idle<MoPayloadType: Send + 'static>(
     mo_stream
         .boxed()
         .close_stream_on_item_timeout(dialog_idle_timeout)
-        .then(move |mo_result| {
+        .then(move |mo_timeout_result| {
             let dialog_cleanup = dialog_cleanup_context.clone();
             async move {
-                match mo_result {
+                match mo_timeout_result {
                     Ok(mo) => Some(mo),
                     Err(err) => {
                         let user_id = dialog_cleanup.user_id;

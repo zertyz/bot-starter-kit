@@ -88,16 +88,21 @@ pub async fn demo(bot: &Bot, chat_id: ChatId) -> Result<()> {
             .mode = mode;
     }
 
-    let quotes = timings.measure("load data", || {
-        if cli.synthetic {
-            Ok(synthetic_quotes())
-        } else {
-            Ok(fetch_bcb_usd_brl_quotes(90).unwrap_or_else(|err| {
-                log::warn!("BCB API failed; using synthetic data instead: {err}");
-                synthetic_quotes()
-            }))
-        }
-    })?;
+    let quotes = timings
+        .measure_async("load data", || async {
+            if cli.synthetic {
+                Ok(synthetic_quotes())
+            } else {
+                match fetch_bcb_usd_brl_quotes(90).await {
+                    Ok(quotes) => Ok(quotes),
+                    Err(err) => {
+                        log::warn!("BCB API failed; using synthetic data instead: {err}");
+                        Ok(synthetic_quotes())
+                    }
+                }
+            }
+        })
+        .await?;
 
     let moves = timings.measure("detect moves", || {
         Ok(detect_important_moves(
