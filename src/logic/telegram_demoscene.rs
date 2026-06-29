@@ -50,9 +50,15 @@ enum Cmd {
 struct ProcessUserMo;
 
 impl UserMoProcessor for ProcessUserMo {
-    async fn process<MoStream: Stream<Item = Mo<User, TelegramMo>> + Send>(&self, bot: Bot, _user: User, user_mo_stream: MoStream) -> impl Stream<Item = TelegramBoxSendFuture> + Send {
+    async fn process<MoStream: Stream<Item = Mo<User, TelegramMo>> + Send>(&self, bot: Bot, user_mo_stream: MoStream) -> impl Stream<Item = TelegramBoxSendFuture> + Send {
         #[cfg(debug_assertions)]
-        let user_mo_stream = user_mo_stream.inspect(move |mo| log::info!("User '{}' MO: {mo:?}", _user.first_name));
+        let user_mo_stream = user_mo_stream.inspect(move |mo| {
+            log::info!(
+                "User '{}' MO: {mo:?}",
+                mo.sender()
+                    .first_name
+            )
+        });
         user_mo_stream.map(move |mo| {
             let chat_id = ChatId(
                 mo.sender()

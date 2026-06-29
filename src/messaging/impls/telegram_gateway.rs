@@ -5,7 +5,7 @@ use crate::models::config::{BotConfig, TelegramIntegrationMode};
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
 use log::{debug, error, info};
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::fmt::{Debug, Display};
 use std::future;
 use std::pin::Pin;
@@ -16,7 +16,7 @@ use teloxide::prelude::{CallbackQuery, Message, Request, ResponseResult, Update}
 use teloxide::requests::Payload;
 use teloxide::types::{ChatKind, Seconds, User};
 use teloxide::{Bot, RequestError, dptree};
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 #[derive(Debug)]
 pub enum TelegramMo {
@@ -28,8 +28,95 @@ pub enum TelegramMo {
 
 pub struct TelegramGateway {
     all_users_mo_tx: async_channel::Sender<TelegramMo>,
-    per_user_mo_tx: Arc<RwLock<HashMap<u64, async_channel::Sender<Mo<User, TelegramMo>>>>>,
+    dialog_mo_tx_by_user: DialogRoutingTable<TelegramMo>,
     bot: Bot,
+}
+
+/// Sender used to enqueue MOs for one active dialog processor.
+type DialogMoSender<MoPayloadType> = async_channel::Sender<Mo<User, MoPayloadType>>;
+
+/// Stream handed to a processor when a dialog is created.
+type DialogMoReceiver<MoPayloadType> = async_channel::Receiver<Mo<User, MoPayloadType>>;
+
+/// Maps every `user_id` to a dialog.
+type DialogRoutingTable<MoPayloadType> = Arc<Mutex<HashMap<u64, DialogMoSender<MoPayloadType>>>>;
+
+/// Context needed to spawn a processor for a newly created dialog between this bot and a user.
+struct NewDialogContext<MoPayloadType> {
+    user_id: u64,
+    mo_rx: DialogMoReceiver<MoPayloadType>,
+}
+
+/// Routes an MO, creating its per-user dialog context when needed and returning it for spawning a new dialog processor.
+async fn route_mo<MoPayloadType>(dialog_mo_tx_by_user: &DialogRoutingTable<MoPayloadType>, mo: Mo<User, MoPayloadType>) -> Option<NewDialogContext<MoPayloadType>> {
+    route_mo_with_before_new_dialog(dialog_mo_tx_by_user, mo, || future::ready(())).await
+}
+
+/// Test-hook variant of [route_mo]; only tests pass a non-no-op callback.
+async fn route_mo_with_before_new_dialog<MoPayloadType, BeforeNewDialogFn, BeforeNewDialogFuture>(
+    dialog_mo_tx_by_user: &DialogRoutingTable<MoPayloadType>,
+    mo: Mo<User, MoPayloadType>,
+    before_new_dialog: BeforeNewDialogFn,
+) -> Option<NewDialogContext<MoPayloadType>>
+where
+    BeforeNewDialogFn: Fn() -> BeforeNewDialogFuture,
+    BeforeNewDialogFuture: Future<Output = ()>,
+{
+    let user = mo.sender();
+    let user_id = user
+        .id
+        .0;
+    let send_mo = async |mo, mo_tx: &DialogMoSender<MoPayloadType>| {
+        #[cfg(debug_assertions)]
+        debug!("Telegram: ALL-USERS-MO-TASK: routing MO");
+        let route_result = mo_tx
+            .send(mo)
+            .await;
+        if let Err(err) = route_result {
+            error!("Telegram: Bailing out of User's Dialog Processor task: Error routing MO message to user_id #{user_id}'s channel: {err}");
+            mo_tx.close();
+        }
+    };
+    /// Routing decision after the dialog map has been updated.
+    enum DialogRoute<MoPayloadType> {
+        Existing(DialogMoSender<MoPayloadType>),
+        New { mo_tx: DialogMoSender<MoPayloadType>, mo_rx: DialogMoReceiver<MoPayloadType> },
+    }
+
+    // Clone the sender while holding the map lock, then route the MO after releasing it.
+    let route = {
+        let mut dialog_mo_tx_by_user = dialog_mo_tx_by_user
+            .lock()
+            .await;
+        match dialog_mo_tx_by_user.entry(user_id) {
+            Entry::Occupied(entry) => {
+                // A channel already exist for the user. Route the message.
+                DialogRoute::Existing(
+                    entry
+                        .get()
+                        .clone(),
+                )
+            }
+            Entry::Vacant(entry) => {
+                // No channel exists yet for the user. Create, Store & spawn the Dialog Processor task... and also send the message as above
+                let (mo_tx, mo_rx) = async_channel::unbounded();
+                entry.insert(mo_tx.clone());
+                DialogRoute::New { mo_tx, mo_rx }
+            }
+        }
+    };
+
+    match route {
+        DialogRoute::Existing(mo_tx) => {
+            send_mo(mo, &mo_tx).await;
+            None
+        }
+        DialogRoute::New { mo_tx, mo_rx } => {
+            before_new_dialog().await;
+            send_mo(mo, &mo_tx).await;
+            Some(NewDialogContext { user_id, mo_rx })
+        }
+    }
 }
 
 impl TelegramGateway {
@@ -48,7 +135,7 @@ impl TelegramGateway {
         let (all_users_mo_tx, all_users_mo_rx) = async_channel::bounded(64);
         let instance = Arc::new(Self {
             all_users_mo_tx,
-            per_user_mo_tx: Arc::new(RwLock::new(HashMap::new())),
+            dialog_mo_tx_by_user: Arc::new(Mutex::new(HashMap::new())),
             bot: bot.clone(),
         });
 
@@ -78,12 +165,12 @@ impl TelegramGateway {
                     .all_users_mo_tx
                     .close();
                 instance_clone
-                    .per_user_mo_tx
-                    .read()
+                    .dialog_mo_tx_by_user
+                    .lock()
                     .await
                     .values()
-                    .for_each(|user_mo_tx| {
-                        user_mo_tx.close();
+                    .for_each(|mo_tx| {
+                        mo_tx.close();
                     });
                 info!("Shutting Down Telegram -- possibly due to operator's request via CTRL-C or SIGTERM");
             }
@@ -102,8 +189,8 @@ impl TelegramGateway {
             .clone();
         let (all_users_mt_tx, all_users_mt_rx) = async_channel::bounded(64);
         let cloned_all_users_mt_rx = all_users_mt_rx.clone();
-        let per_user_mo_tx = instance
-            .per_user_mo_tx
+        let dialog_mo_tx_by_user = instance
+            .dialog_mo_tx_by_user
             .clone();
         // spawn the MO routing task
         tokio::spawn(async move {
@@ -115,65 +202,32 @@ impl TelegramGateway {
                     debug!("Telegram: ALL-USERS-MO-TASK: {mo:?}");
                     let bot = bot.clone();
                     let user_mo_processor = user_mo_processor.clone();
-                    let per_user_mo_tx = per_user_mo_tx.clone();
+                    let dialog_mo_tx_by_user = dialog_mo_tx_by_user.clone();
                     let all_users_mo_tx = all_users_mo_tx.clone();
                     let all_users_mt_tx = all_users_mt_tx.clone();
                     async move {
-                        let user = mo
-                            .sender()
-                            .clone();
-                        let user_id = user
-                            .id
-                            .0;
-                        let route_mo = async |mo, user_mo_tx: &async_channel::Sender<Mo<User, TelegramMo>>| {
-                            #[cfg(debug_assertions)]
-                            debug!("Telegram: ALL-USERS-MO-TASK: routing MO");
-                            let route_result = user_mo_tx
-                                .send(mo)
-                                .await;
-                            if let Err(err) = route_result {
-                                error!("Telegram: Bailing out of User's Dialog Processor task: Error routing MO message to user_id #{user_id}'s channel: {err}");
-                                user_mo_tx.close();
-                            }
-                        };
-                        let locked_per_user_mo_tx = per_user_mo_tx
-                            .read()
-                            .await;
-                        match locked_per_user_mo_tx.get(&user_id) {
-                            Some(user_mo_tx) => {
-                                // A channel already exist for the user. Route the message.
-                                route_mo(mo, user_mo_tx).await;
-                            }
-                            None => {
-                                // No channel exists yet for the user. Create, Store & spawn the Dialog Processor task... and also send the message as above
-                                let (user_mo_tx, user_mo_rx) = async_channel::unbounded();
-                                route_mo(mo, &user_mo_tx).await;
-                                drop(locked_per_user_mo_tx);
-                                per_user_mo_tx
-                                    .write()
-                                    .await
-                                    .insert(user_id, user_mo_tx);
-                                let user_mo_processor = user_mo_processor.clone();
-                                tokio::spawn(async move {
-                                    #[cfg(debug_assertions)]
-                                    debug!("Telegram: Starting Dialog Processor (and user-to-all-users-mt) tasks for user #{user_id}");
-                                    let user_mt_stream = user_mo_processor
-                                        .process(bot, user, user_mo_rx)
-                                        .await;
-                                    // process 1 message at a time (per user)
-                                    user_mt_stream
-                                        .for_each(|user_mt| async {
-                                            let route_result = all_users_mt_tx
-                                                .send(user_mt)
-                                                .await;
-                                            if let Err(err) = route_result {
-                                                error!("Telegram: Bailing out of User's Dialog Processor task: Error routing user_id #{user_id}'s MT message to the all-users mt channel: {err}");
-                                                all_users_mo_tx.close();
-                                            }
-                                        })
-                                        .await;
-                                });
-                            }
+                        if let Some(new_dialog_context) = route_mo(&dialog_mo_tx_by_user, mo).await {
+                            let NewDialogContext { user_id, mo_rx } = new_dialog_context;
+                            let user_mo_processor = user_mo_processor.clone();
+                            tokio::spawn(async move {
+                                #[cfg(debug_assertions)]
+                                debug!("Telegram: Starting Dialog Processor (and user-to-all-users-mt) tasks for user #{user_id}");
+                                let user_mt_stream = user_mo_processor
+                                    .process(bot, mo_rx)
+                                    .await;
+                                // process 1 message at a time (per user)
+                                user_mt_stream
+                                    .for_each(|user_mt| async {
+                                        let route_result = all_users_mt_tx
+                                            .send(user_mt)
+                                            .await;
+                                        if let Err(err) = route_result {
+                                            error!("Telegram: Bailing out of User's Dialog Processor task: Error routing user_id #{user_id}'s MT message to the all-users mt channel: {err}");
+                                            all_users_mo_tx.close();
+                                        }
+                                    })
+                                    .await;
+                            });
                         }
                     }
                 })
@@ -304,12 +358,7 @@ impl TelegramGateway {
 
 pub trait UserMoProcessor {
     /// per user Stream processor
-    fn process<MoStream: Stream<Item = Mo<User, TelegramMo>> + Send>(
-        &self,
-        bot: Bot,
-        user: User,
-        user_mo_stream: MoStream,
-    ) -> impl Future<Output = impl Stream<Item = TelegramBoxSendFuture> + Send> + Send;
+    fn process<MoStream: Stream<Item = Mo<User, TelegramMo>> + Send>(&self, bot: Bot, user_mo_stream: MoStream) -> impl Future<Output = impl Stream<Item = TelegramBoxSendFuture> + Send> + Send;
 }
 
 impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
@@ -458,4 +507,89 @@ pub fn mts<OkType: Debug, ErrorType: Into<anyhow::Error> + Display>(process: imp
             .inspect_err(|err| log::error!("{err}"))
             .map(|answer| format!("{answer:?}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::future::join_all;
+    use teloxide::types::UserId;
+    use tokio::sync::Barrier;
+
+    /// Makes sure our routing is rock-solid by simulating a surge of messages from the same user.
+    /// We want to make sure a single dialog processor per user will be created.
+    #[tokio::test]
+    async fn concurrent_first_mos_for_same_user_create_one_user_channel() {
+        const ROUTED_MESSAGES: u64 = 128;
+        const USER_ID: u64 = 42;
+
+        let dialog_mo_tx_by_user = Arc::new(Mutex::new(HashMap::new()));
+        let lock_guard = dialog_mo_tx_by_user
+            .lock()
+            .await;
+        let start = Arc::new(Barrier::new(ROUTED_MESSAGES as usize + 1));
+
+        let route_tasks = (0..ROUTED_MESSAGES)
+            .map(|message_id| {
+                let dialog_mo_tx_by_user = dialog_mo_tx_by_user.clone();
+                let start = start.clone();
+                tokio::spawn(async move {
+                    start
+                        .wait()
+                        .await;
+                    route_mo_with_before_new_dialog(&dialog_mo_tx_by_user, test_mo(USER_ID, message_id), || async {
+                        tokio::task::yield_now().await;
+                    })
+                    .await
+                })
+            })
+            .collect::<Vec<_>>();
+
+        start
+            .wait()
+            .await;
+        for _ in 0..ROUTED_MESSAGES {
+            tokio::task::yield_now().await;
+        }
+        drop(lock_guard);
+
+        let new_dialog_contexts = join_all(route_tasks)
+            .await
+            .into_iter()
+            .filter_map(|join_result| join_result.expect("routing task panicked"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(new_dialog_contexts.len(), 1);
+        assert_eq!(new_dialog_contexts[0].user_id, USER_ID);
+        assert_eq!(
+            new_dialog_contexts[0]
+                .mo_rx
+                .len(),
+            ROUTED_MESSAGES as usize
+        );
+        assert_eq!(
+            dialog_mo_tx_by_user
+                .lock()
+                .await
+                .len(),
+            1
+        );
+    }
+
+    fn test_user(user_id: u64) -> User {
+        User {
+            id: UserId(user_id),
+            is_bot: false,
+            first_name: format!("test-user-{user_id}"),
+            last_name: None,
+            username: None,
+            language_code: None,
+            is_premium: false,
+            added_to_attachment_menu: false,
+        }
+    }
+
+    fn test_mo(user_id: u64, message_id: u64) -> Mo<User, ()> {
+        Mo::new(message_id + 1, Party::new(test_user(user_id)), Dialog::new(777, DialogKind::Private, Language::English), ())
+    }
 }
