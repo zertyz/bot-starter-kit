@@ -1,4 +1,4 @@
-name: `main` Branch Checks, Build, and Release
+name: main Branch Checks, Build, and Release
 
 on:
   push:
