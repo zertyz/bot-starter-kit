@@ -31,12 +31,6 @@ pub enum TelegramMo {
     CallbackQuery(Box<CallbackQuery>),
 }
 
-pub struct TelegramGateway {
-    all_users_mo_tx: async_channel::Sender<TelegramMo>,
-    dialog_mo_tx_by_user: DialogRoutingTable<TelegramMo>,
-    bot: Bot,
-}
-
 /// Sender used to enqueue MOs for one active dialog processor.
 type DialogMoSender<MoPayloadType> = async_channel::Sender<Mo<User, MoPayloadType>>;
 
@@ -45,6 +39,14 @@ type DialogMoReceiver<MoPayloadType> = async_channel::Receiver<Mo<User, MoPayloa
 
 /// Maps every `user_id` to a dialog.
 type DialogRoutingTable<MoPayloadType> = Arc<Mutex<HashMap<u64, DialogMoSender<MoPayloadType>>>>;
+
+pub struct TelegramGateway {
+    /// The channel that receives each and every Telegram Message -- for all users
+    all_users_mo_tx: async_channel::Sender<TelegramMo>,
+    /// The aggregator of per-user channels that will receive each user's MO
+    per_user_mo_tx: DialogRoutingTable<TelegramMo>,
+    bot: Bot,
+}
 
 /// One-shot teardown handle for removing a dialog route before closing its channel.
 struct DialogCleanupContext<MoPayloadType> {
@@ -75,6 +77,7 @@ impl<MoPayloadType> Clone for DialogCleanupContext<MoPayloadType> {
 struct NewDialogContext<MoPayloadType> {
     dialog_cleanup_context: DialogCleanupContext<MoPayloadType>,
     mo_rx: DialogMoReceiver<MoPayloadType>,
+    user: User,
 }
 
 /// Routes an MO to the per-user processor, signaling the caller if a new dialog processor task should be created (return is `Some`) or one already exists (return is `None` `).
@@ -97,8 +100,7 @@ where
         .id
         .0;
     let send_mo = async |mo, mo_tx: &DialogMoSender<MoPayloadType>| {
-        #[cfg(debug_assertions)]
-        debug!("Telegram: ALL-USERS-MO-TASK: routing MO");
+        info!("Telegram: ALL-USERS-MO-TASK: routing MO");
         mo_tx
             .send(mo)
             .await
@@ -143,6 +145,7 @@ where
             None
         }
         DialogRoute::New { mo_tx, mo_rx } => {
+            let user = user.clone();
             before_new_dialog().await;
             _ = send_mo(mo, &mo_tx).await;
             Some(NewDialogContext {
@@ -153,6 +156,7 @@ where
                     closed: Arc::new(AtomicBool::new(false)),
                 },
                 mo_rx,
+                user,
             })
         }
     }
@@ -238,14 +242,13 @@ impl TelegramGateway {
         let (all_users_mo_tx, all_users_mo_rx) = async_channel::bounded(64);
         let instance = Arc::new(Self {
             all_users_mo_tx,
-            dialog_mo_tx_by_user: Arc::new(Mutex::new(HashMap::new())),
+            per_user_mo_tx: Arc::new(Mutex::new(HashMap::new())),
             bot: bot.clone(),
         });
 
         // spawn the Teloxide gateway
         tokio::spawn({
-            #[cfg(debug_assertions)]
-            debug!("Telegram: Starting the Teloxide task");
+            info!("Telegram: Starting the Teloxide event loop task");
             let instance_clone = instance.clone();
             async move {
                 _ = match &config
@@ -268,7 +271,7 @@ impl TelegramGateway {
                     .all_users_mo_tx
                     .close();
                 instance_clone
-                    .dialog_mo_tx_by_user
+                    .per_user_mo_tx
                     .lock()
                     .await
                     .values()
@@ -292,30 +295,34 @@ impl TelegramGateway {
             .clone();
         let (all_users_mt_tx, all_users_mt_rx) = async_channel::bounded(64);
         let cloned_all_users_mt_rx = all_users_mt_rx.clone();
-        let dialog_mo_tx_by_user = instance
-            .dialog_mo_tx_by_user
+        let per_user_mo_tx = instance
+            .per_user_mo_tx
             .clone();
         // spawn the MO routing task
         tokio::spawn(async move {
-            #[cfg(debug_assertions)]
-            debug!("Telegram: Starting the all-users-to-each-user MO routing task");
+            info!("Telegram: Starting the all-users-to-each-user MO routing task");
             all_users_mo_stream
                 .for_each_concurrent(mo_routing_task_concurrency, move |mo| {
-                    #[cfg(debug_assertions)]
-                    debug!("Telegram: ALL-USERS-MO-TASK: {mo:?}");
+                    debug!("Telegram: ALL-USERS-MO-TASK received a message: {mo:?}");
                     let bot = bot.clone();
                     let per_user_mo_processor = per_user_mo_processor.clone();
-                    let dialog_mo_tx_by_user = dialog_mo_tx_by_user.clone();
+                    let per_user_mo_tx = per_user_mo_tx.clone();
                     let all_users_mo_tx = all_users_mo_tx.clone();
                     let all_users_mt_tx = all_users_mt_tx.clone();
                     async move {
-                        if let Some(new_dialog_context) = route_mo(&dialog_mo_tx_by_user, mo).await {
-                            let NewDialogContext { dialog_cleanup_context: dialog_cleanup, mo_rx } = new_dialog_context;
+                        if let Some(new_dialog_context) = route_mo(&per_user_mo_tx, mo).await {
+                            let NewDialogContext { dialog_cleanup_context: dialog_cleanup, mo_rx, user } = new_dialog_context;
                             let user_id = dialog_cleanup.user_id;
                             let per_user_mo_processor = per_user_mo_processor.clone();
                             tokio::spawn(async move {
-                                #[cfg(debug_assertions)]
-                                debug!("Telegram: Starting Dialog Processor (and user-to-all-users-mt) tasks for user #{user_id}");
+                                info!(
+                                    "Telegram: Starting Dialog Processor (and user-to-all-users-mt) tasks for user #{user_id}, named '{}{}'",
+                                    user.first_name,
+                                    user.last_name
+                                        .as_ref()
+                                        .map(|last_name| format!(" {last_name}"))
+                                        .unwrap_or_default()
+                                );
                                 let per_user_ttl_mo_stream = set_close_on_idle(dialog_cleanup.clone(), mo_rx, dialog_processor_idle_timeout);
                                 let user_mt_stream = per_user_mo_processor
                                     .process(bot, per_user_ttl_mo_stream)
@@ -332,13 +339,21 @@ impl TelegramGateway {
                                         }
                                     })
                                     .await;
+                                info!(
+                                    "Telegram: Closing Dialog Processor (and user-to-all-users-mt) tasks for user #{user_id}, named '{}{}'",
+                                    user.first_name,
+                                    user.last_name
+                                        .as_ref()
+                                        .map(|last_name| format!(" {last_name}"))
+                                        .unwrap_or_default()
+                                );
                                 close_dialog(&dialog_cleanup).await;
                             });
                         }
                     }
                 })
                 .await;
-            info!("Telegram: MO routing task ended -- `all_users_mo_stream` must have finished.");
+            info!("Telegram: MO routing task ended -- `all_users_mo_stream` must have finished. Bot is likely shutting down...");
             cloned_all_users_mt_rx.close();
         });
         // spawn the MT sending task
@@ -552,19 +567,16 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
 
     fn consume_mt_stream(&self, concurrency: usize, all_users_mt_stream: impl Stream<Item = TelegramBoxSendFuture> + Send + 'static) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            debug!("TELEGRAM: Starting all-users-mt sending task");
+            info!("TELEGRAM: Starting all-users-mt sending task");
             all_users_mt_stream
                 .for_each_concurrent(concurrency, |mt_future_result| async {
                     _ = mt_future_result
                         .await
-                        .inspect_err(|err| {
-                            error!("!!!GOT YOU!!!");
-                            error!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}")
-                        })
-                        .inspect(|response| debug!("WE HAVE A RESPONSE! {response}"));
+                        .inspect_err(|err| error!("TELEGRAM: error processing or sending message #{{mt.id()}}: {err}"))
+                        .inspect(|response| debug!("MT! {response}"));
                 })
                 .await;
-            info!("Telegram: MT sending task ended -- `all_users_mt_stream` must have finished.");
+            info!("Telegram: MT sending task ended -- `all_users_mt_stream` must have finished. But is, likely, shutting down.");
         })
     }
 }
@@ -608,7 +620,7 @@ pub fn mts<OkType: Debug, ErrorType: Into<anyhow::Error> + Display>(process: imp
     Box::pin(async move {
         process
             .await
-            .map_err(|err| anyhow!("Telegram Gateway: error sending MTs: {err}"))
+            .map_err(|err| anyhow!("Telegram Gateway: error processing or sending MTs: {err}"))
             .inspect_err(|err| error!("### ERROR: {err}"))
             .inspect_err(|err| log::error!("{err}"))
             .map(|answer| format!("{answer:?}"))
@@ -693,7 +705,7 @@ mod tests {
         const USER_ID: u64 = 42;
 
         let dialog_mo_tx_by_user = Arc::new(Mutex::new(HashMap::new()));
-        let NewDialogContext { dialog_cleanup_context: dialog_cleanup, mo_rx } = route_mo(&dialog_mo_tx_by_user, test_mo(USER_ID, 1))
+        let NewDialogContext { dialog_cleanup_context: dialog_cleanup, mo_rx, user: _ } = route_mo(&dialog_mo_tx_by_user, test_mo(USER_ID, 1))
             .await
             .expect("first MO should create a dialog context");
         let user_mo_stream = set_close_on_idle(dialog_cleanup, mo_rx, Duration::from_millis(10));
