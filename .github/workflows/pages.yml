@@ -1,4 +1,4 @@
-name: Pages
+name: Docs, Coverage, and Benchmarks to Pages
 
 on:
   push:

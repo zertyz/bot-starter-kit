@@ -1,4 +1,4 @@
-name: Rust
+name: `main` Branch Checks, Build, and Release
 
 on:
   push:
@@ -122,14 +122,14 @@ jobs:
           ssh "${SSH_OPTIONS[@]}" "$REMOTE" \
             "set -x; \
              echo '### Shutting down the remote service:'; \
-             echo pkill -f '[t]elegram_bot_rust_starter_kit' || true; \
+             pkill -f '[t]elegram_bot_rust_starter_kit'; \
              for i in {1..10}; do pgrep -f '[t]elegram_bot_rust_starter_kit' && sleep 5 || break; done; \
              mv '${DEPLOY_REMOTE_BINARY}~' '${DEPLOY_REMOTE_BINARY}'; \
              echo '### Restarting:'; \
              chmod 0755 '$DEPLOY_REMOTE_BINARY' && \
              nohup '$DEPLOY_REMOTE_BINARY' \
                >/tmp/log.log 2>&1 </dev/null & \
-             sleep 5; head /tmp/log.log"
+             sleep 5; head /tmp/log.log; exit"
 
       - name: Remove SSH private key
         if: always()

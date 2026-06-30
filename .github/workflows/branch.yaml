@@ -1,4 +1,4 @@
-name: Rust
+name: Ordinary Branch Checks
 
 on:
   push:
