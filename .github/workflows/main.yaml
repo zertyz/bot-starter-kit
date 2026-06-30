@@ -120,8 +120,9 @@ jobs:
           # nohup and detached standard streams allow the process to survive
           # after the SSH connection closes.
           ssh "${SSH_OPTIONS[@]}" "$REMOTE" \
-            "echo '### Shutting down the remote service:'; \
-             pkill -f '[t]elegram_bot_rust_starter_kit' || true; \
+            "set -x; \
+             echo '### Shutting down the remote service:'; \
+             echo pkill -f '[t]elegram_bot_rust_starter_kit' || true; \
              for i in {1..10}; do pgrep -f '[t]elegram_bot_rust_starter_kit' && sleep 5 || break; done; \
              mv '${DEPLOY_REMOTE_BINARY}~' '${DEPLOY_REMOTE_BINARY}'; \
              echo '### Restarting:'; \
