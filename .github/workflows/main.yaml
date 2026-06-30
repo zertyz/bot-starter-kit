@@ -127,9 +127,8 @@ jobs:
              mv '${DEPLOY_REMOTE_BINARY}~' '${DEPLOY_REMOTE_BINARY}'; \
              echo '### Restarting:'; \
              chmod 0755 '$DEPLOY_REMOTE_BINARY' && \
-             nohup '$DEPLOY_REMOTE_BINARY' \
-               >/tmp/log.log 2>&1 </dev/null & \
-             sleep 5; head /tmp/log.log; exit"
+             setsid -f '${DEPLOY_REMOTE_BINARY}' </dev/null &>/tmp/log.log \
+             sleep 5; head /tmp/log.log"
 
       - name: Remove SSH private key
         if: always()
