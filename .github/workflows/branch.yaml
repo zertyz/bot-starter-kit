@@ -1,4 +1,4 @@
-name: Ordinary Branch Checks
+name: branch
 
 on:
   push:
