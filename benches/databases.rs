@@ -12,10 +12,11 @@
 //! -- for instance: range queries are performed only in SQLite's UI benchmarks;
 //! here we implement "point queries" / "single record fetch queries" for everyone.
 
+use std::hint::black_box;
 use std::time::Duration;
 
 use bot_starter_kit::db::{heed, redb, sqlite};
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 const RECORDS_PER_ITERATION: u64 = 16 * 1024;
 
