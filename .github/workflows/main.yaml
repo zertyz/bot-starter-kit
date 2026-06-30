@@ -115,12 +115,6 @@ jobs:
             -o ConnectTimeout=20
           )
 
-          # Stop the previous process. The bracket expression prevents pkill
-          # from matching its own command line.
-          ssh "${SSH_OPTIONS[@]}" "$REMOTE" \
-            "mkdir -p '$REMOTE_DIRECTORY' && \
-             (pkill -f '[t]elegram_bot_rust_starter_kit' || true)"
-
           scp "${SCP_OPTIONS[@]}" \
             artifact/bot_starter_kit \
             "${REMOTE}:${DEPLOY_REMOTE_BINARY}~"
@@ -129,7 +123,7 @@ jobs:
           # after the SSH connection closes.
           ssh "${SSH_OPTIONS[@]}" "$REMOTE" \
             "echo '### Shutting down the remote service:' \
-             pkill -f '[t]elegram_bot_rust_starter_kit' \
+             pkill -f '[t]elegram_bot_rust_starter_kit' || true \
              for i in {1..10}; do pgrep -f '[t]elegram_bot_rust_starter_kit' && sleep 5 || break; done \
              mv '${DEPLOY_REMOTE_BINARY}~' '${DEPLOY_REMOTE_BINARY}' \
              echo '### Restarting:'
