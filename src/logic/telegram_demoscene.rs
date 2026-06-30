@@ -51,9 +51,8 @@ struct ProcessUserMo;
 
 impl UserMoProcessor for ProcessUserMo {
     async fn process<MoStream: Stream<Item = Mo<User, TelegramMo>> + Send>(&self, bot: Bot, user_mo_stream: MoStream) -> impl Stream<Item = TelegramBoxSendFuture> + Send {
-        #[cfg(debug_assertions)]
         let user_mo_stream = user_mo_stream.inspect(move |mo| {
-            log::info!(
+            log::debug!(
                 "User '{}' MO: {mo:?}",
                 mo.sender()
                     .first_name

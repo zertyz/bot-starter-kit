@@ -100,7 +100,7 @@ where
         .id
         .0;
     let send_mo = async |mo, mo_tx: &DialogMoSender<MoPayloadType>| {
-        info!("Telegram: ALL-USERS-MO-TASK: routing MO");
+        debug!("Telegram: `route_mo_with_before_new_dialog()`: routing MO");
         mo_tx
             .send(mo)
             .await

@@ -10,7 +10,7 @@ name = "bot_starter_kit"
 
 [dependencies]
 
-once_cell = { version = "1" }
+#once_cell = { version = "1" }
 const_format = { version = "0.2" }
 
 # async & streams
@@ -24,7 +24,7 @@ futures-time = { version = "3" } # enables the async-io backend required by ogre
 ogre-config-meld = { version = "0.1.7" }  # for config & cmdline models, merging, encryption
 litcrypt = { version = "0.4" }  # in-program safe-ish secrets
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+#serde_json = "1"
 
 derive_more = { version = "2", features = ["debug"] }   # several auto-implementation macros for convenience traits, field redaction, and more
 
@@ -52,11 +52,11 @@ ftlog = "0.2"
 teloxide = { version = "0.17", features = ["macros", "throttle", "webhooks-axum"] }
 
 # HTTP endpoints
-axum = {  version = "0.8", features = ["tokio", "macros", "http2"]  }
+#axum = {  version = "0.8", features = ["tokio", "macros", "http2"]  }
 
 [dev-dependencies]
 
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 
 [[bench]]

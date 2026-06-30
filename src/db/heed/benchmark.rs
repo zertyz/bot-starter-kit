@@ -141,7 +141,7 @@ where
 
     let ingest_elapsed = started.elapsed();
     let inserted_rows_per_sec = inserted as f64 / ingest_elapsed.as_secs_f64();
-    report_progress(&report, format!("✅ Ingestion completed -- rows/sec: {inserted_rows_per_sec:.0}. Starting sampled borrowed mmap point lookups.")).await?;
+    report_progress(&report, format!("✅ Ingestion completed -- rows/sec: {inserted_rows_per_sec:.0}. Starting the point lookup queries.")).await?;
 
     let point_query = benchmark_point_query(&heed, &events, run_id, config.expected_records, config.point_query_step, &report, inserted_rows_per_sec).await?;
 
