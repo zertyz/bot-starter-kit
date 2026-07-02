@@ -80,7 +80,7 @@ pub struct Party<PartyType> {
     pub address: Option<String>,
     /// The name of the sender
     pub name: Option<String>,
-    // note: the fields bellow should be accessible through traits
+    // note: the fields below should be accessible through traits
     // e.g: impl MessagingPlatformParty<teloxide::Bot> for Party<teloxide::Bot> { ... } and so on
     /*
     real_mobile_phone_number: Option<NonZeroU64>,
@@ -198,3 +198,27 @@ pub enum Payload {
 }
 
 pub type Url = String;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn party_initialization() {
+        let party = Party::new(1, ())
+            .with_address("dom")
+            .with_name("Luiz Silveira");
+        assert_eq!(
+            party
+                .address
+                .as_deref(),
+            Some("dom")
+        );
+        assert_eq!(
+            party
+                .name
+                .as_deref(),
+            Some("Luiz Silveira")
+        );
+    }
+}

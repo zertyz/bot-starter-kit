@@ -258,31 +258,38 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
                 .unwrap_or(Language::Unspecified)
         }
 
+        fn map_user(teloxide_user: &User) -> Party<User> {
+            let username = teloxide_user
+                .username
+                .as_deref()
+                .unwrap_or_default();
+            let first_name = teloxide_user
+                .first_name
+                .as_str();
+            let last_name = teloxide_user
+                .last_name
+                .as_deref()
+                .unwrap_or_default();
+            Party::new(
+                teloxide_user
+                    .id
+                    .0,
+                teloxide_user.clone(),
+            )
+            .with_address(username)
+            .with_name(format!("{first_name} {last_name}").as_str())
+        }
+
         fn map_mo(telegram_mo: TelegramMo) -> Option<Mo<User, TelegramMo>> {
             match &telegram_mo {
                 TelegramMo::Message(message) => {
-                    let from = message
-                        .from
-                        .as_ref()?;
                     let id = message
                         .id
                         .0 as u64;
-                    let username = from
-                        .username
-                        .as_deref()
-                        .unwrap_or_default();
-                    let first_name = &from.first_name;
-                    let last_name = from
-                        .last_name
-                        .as_deref()
-                        .unwrap_or_default();
-                    let sender = Party::new(
-                        from.id
-                            .0,
-                        from.clone(),
-                    )
-                    .with_address(username)
-                    .with_name(format!("{first_name} {last_name}").as_str());
+                    let from = message
+                        .from
+                        .as_ref()?;
+                    let sender = map_user(from);
 
                     let kind = map_kind(
                         &message
@@ -324,15 +331,7 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
                             }),
                     );
                     let dialog = Dialog::new(id, kind, language);
-                    let sender = Party::new(
-                        callback_query
-                            .from
-                            .id
-                            .0,
-                        callback_query
-                            .from
-                            .clone(),
-                    );
+                    let sender = map_user(&callback_query.from);
                     Some(Mo::new(id, sender, dialog, telegram_mo))
                 }
             }

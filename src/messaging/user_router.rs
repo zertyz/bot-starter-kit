@@ -159,11 +159,11 @@ impl<UserType: Debug + Clone + Send + Sync + 'static, HandleType: Send + Sync + 
                                 "UserRouter: Starting Dialog Processor (and MT Routing) tasks for user #{}{}{}",
                                 user.id(),
                                 user.address
-                                    .as_ref()
+                                    .as_deref()
                                     .map(|address| format!("/{address}"))
                                     .unwrap_or_default(),
                                 user.name
-                                    .as_ref()
+                                    .as_deref()
                                     .map(|name| format!(", named '{name}'"))
                                     .unwrap_or_default()
                             );
@@ -189,11 +189,11 @@ impl<UserType: Debug + Clone + Send + Sync + 'static, HandleType: Send + Sync + 
                                 "UserRouter: Dialog Processor (and MT Routing) tasks were closed for user #{}{}{}",
                                 user.id(),
                                 user.address
-                                    .as_ref()
+                                    .as_deref()
                                     .map(|address| format!("/{address}"))
                                     .unwrap_or_default(),
                                 user.name
-                                    .as_ref()
+                                    .as_deref()
                                     .map(|name| format!(", named '{name}'"))
                                     .unwrap_or_default()
                             );
