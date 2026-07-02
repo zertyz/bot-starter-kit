@@ -169,9 +169,6 @@ impl TelegramGateway {
         Ok(())
     }
 
-    /// TODO:
-    /// 1) research if we have either better performance or better limits by using this MO receiving alternative
-    /// 2) then complete this method
     async fn run_webhook(self: &Arc<Self>, bot: Bot, webhook_url: &str, webhook_secret: &str, webhook_certificate_file: &str, webhook_private_key_file: &str) -> anyhow::Result<()> {
         info!("Telegram: Starting in WEBHOOK mode");
         // WEBHOOK_URL must be public HTTPS: e.g. https://bot.yourdomain.com/webhook/abc123

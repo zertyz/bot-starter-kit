@@ -10,7 +10,7 @@ use litcrypt::lc;
 litcrypt::use_litcrypt!();
 
 pub async fn parse_cmdline_and_merge_with_loaded_configs() -> Result<BotConfig> {
-    fs::set_keys_from_passphrase(lc!("This secret string may only be revealed if one is debugging our code. An acceptable risk for our purposes.").as_ref());
+    fs::set_keys_from_passphrase(lc!("The following secret string may only be revealed if one is debugging our code. An acceptable risk for our purposes.").as_ref());
 
     let cli_options: models::cli::CliOptions = parse_cmdline_args();
     let config_file_path = get_config_file_path::<models::cli::CliOptions, BotConfig>();
@@ -27,7 +27,7 @@ pub async fn parse_cmdline_and_merge_with_loaded_configs() -> Result<BotConfig> 
                         eprintln!(
                             "In addition to passing in the -t option or the TELOXIDE_TOKEN env var, also specify -w to create an encrypted config file allowing you to drop the token and no longer using these options."
                         );
-                        Err(anyhow!("No Teloxide token found"))?;
+                        Err(anyhow!("We can only continue when the TELOXIDE token is not coming form the command-line"))?;
                     }
                 } else {
                     eprintln!("Couldn't find the configuration file {config_file_path:?}.");

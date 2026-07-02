@@ -163,9 +163,9 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
                 };
             }
             (None, None, None, None) => {
-                config
+                /*config
                     .telegram
-                    .integration_mode = TelegramIntegrationMode::Polling;
+                    .integration_mode = TelegramIntegrationMode::Polling;*/
             }
             _ => {
                 Err(ogre_config_meld::Error::MergingLogicViolation { message: "Configuration error: when specifying one of these options, all of them should be specified: `--telegram_webhook_url`, `--telegram_webhook_secret`, --telegram_webhook_certificate_file, --telegram_webhook_private_key_file".to_string() })?
@@ -180,6 +180,7 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
 mod tests {
     use super::*;
     use ogre_config_meld::CmdLineAndConfigIntegration;
+    use bot_starter_kit::models::config::TelegramConfig;
 
     #[test]
     fn merge_dialog_processor() {
@@ -259,5 +260,38 @@ mod tests {
                 assert_eq!(&private_key_file, expected_private_key_file, "Merging logic failed for `telegram_webhook_private_key_file`");
             }
         }
+    }
+
+    #[test]
+    fn merging_preserves_webhook_mode() {
+        let config_from_file = BotConfig {
+            telegram: TelegramConfig {
+                teloxide_token: "my-secret-token".to_string(),
+                integration_mode: TelegramIntegrationMode::WebHook {
+                    url: "my-url".to_string(),
+                    secret: "really-a-secret".to_string(),
+                    certificate_file: "/a/b/c".to_string(),
+                    private_key_file: "/a/b/c/d".to_string(),
+                }
+            },
+            ..BotConfig::default()
+        };
+        let cli_options = CliOptions {
+            write_effective_config: false,
+            show_effective_config: false,
+            log_level: None,
+            teloxide_token: None,
+            telegram_webhook_url: None,
+            telegram_webhook_secret: None,
+            telegram_webhook_certificate_file: None,
+            telegram_webhook_private_key_file: None,
+            dialog_idle_timeout_secs: None,
+            per_user_mo_throttle_interval_secs: None,
+            shutdown_grace_period_secs: None,
+        };
+        let effective_config = cli_options.merge_with_config(config_from_file)
+            .expect("CLI merge should succeed");
+
+        assert!(matches!(effective_config.telegram.integration_mode, TelegramIntegrationMode::WebHook {..}), "Polling mode, somehow, sneaked in again!");
     }
 }
