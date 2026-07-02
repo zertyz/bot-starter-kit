@@ -179,8 +179,8 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ogre_config_meld::CmdLineAndConfigIntegration;
     use bot_starter_kit::models::config::TelegramConfig;
+    use ogre_config_meld::CmdLineAndConfigIntegration;
 
     #[test]
     fn merge_dialog_processor() {
@@ -272,7 +272,7 @@ mod tests {
                     secret: "really-a-secret".to_string(),
                     certificate_file: "/a/b/c".to_string(),
                     private_key_file: "/a/b/c/d".to_string(),
-                }
+                },
             },
             ..BotConfig::default()
         };
@@ -289,9 +289,18 @@ mod tests {
             per_user_mo_throttle_interval_secs: None,
             shutdown_grace_period_secs: None,
         };
-        let effective_config = cli_options.merge_with_config(config_from_file)
+        let effective_config = cli_options
+            .merge_with_config(config_from_file)
             .expect("CLI merge should succeed");
 
-        assert!(matches!(effective_config.telegram.integration_mode, TelegramIntegrationMode::WebHook {..}), "Polling mode, somehow, sneaked in again!");
+        assert!(
+            matches!(
+                effective_config
+                    .telegram
+                    .integration_mode,
+                TelegramIntegrationMode::WebHook { .. }
+            ),
+            "Polling mode, somehow, sneaked in again!"
+        );
     }
 }
