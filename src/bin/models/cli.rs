@@ -96,6 +96,13 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
                     .dialog_processor_idle_timeout = Duration::from_secs(*dialog_idle_timeout_secs)
             });
 
+        self.shutdown_grace_period_secs
+            .inspect(|shutdown_grace_period_secs| {
+                config
+                    .dialog_processor
+                    .shutdown_grace_period = Duration::from_secs(*shutdown_grace_period_secs)
+            });
+
         if self
             .telegram_webhook_url
             .is_some()
