@@ -37,10 +37,8 @@ impl<PartyType, PayloadType> Mo<PartyType, PayloadType> {
             .map(NonZeroU64::get)
             .unwrap_or_default()
     }
-    pub fn sender(&self) -> &PartyType {
-        &self
-            .sender
-            .inner
+    pub fn sender(&self) -> &Party<PartyType> {
+        &self.sender
     }
 
     pub fn dialog(&self) -> &Dialog {
@@ -73,21 +71,44 @@ pub struct Mt<PartyType, PayloadType> {
 /// Model for a message party identification within a given messaging platform
 /// OBS: telegram does provide additional info we can use when starting a dialog:
 ///      * is_bot, is_premium, language,
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Party<PartyType> {
-    inner: PartyType,
+    pub inner: PartyType,
+    /// Any unique numeric id given to the user by the messaging platform
+    id: Option<NonZeroU64>,
+    /// How to address the sender in the platform -- a phone number, a nickname, ... ?
+    pub address: Option<String>,
+    /// The name of the sender
+    pub name: Option<String>,
     // note: the fields bellow should be accessible through traits
     // e.g: impl MessagingPlatformParty<teloxide::Bot> for Party<teloxide::Bot> { ... } and so on
-    /*    /// Any unique numeric id given to the user by the messaging platform
-    id: Option<NonZeroU64>,
+    /*
     real_mobile_phone_number: Option<NonZeroU64>,
     username: Option<String>,
     first_name: Option<String>,
     last_name: Option<String>,*/
 }
-impl<PartyType> Party<PartyType> {
-    pub fn new(inner: PartyType) -> Self {
-        Party { inner }
+impl<PartyType: Clone> Party<PartyType> {
+    pub fn new(id: u64, inner: PartyType) -> Self {
+        Self { inner, id: NonZeroU64::new(id), address: None, name: None }
+    }
+
+    pub fn with_address(mut self, address: String) -> Self {
+        self.address
+            .replace(address);
+        self
+    }
+
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name
+            .replace(name);
+        self
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+            .map(NonZeroU64::get)
+            .unwrap_or_default()
     }
 }
 

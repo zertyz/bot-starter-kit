@@ -58,6 +58,6 @@ pub async fn parse_cmdline_and_merge_with_loaded_configs() -> Result<BotConfig> 
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = parse_cmdline_and_merge_with_loaded_configs().await?;
-    let _logging_guard = logging::init(&config.logging_config)?;
+    let _logging_guard = logging::init(&config.logging)?;
     run(config).await
 }

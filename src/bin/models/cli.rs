@@ -53,6 +53,10 @@ pub struct CliOptions {
     /// Maximum idle seconds before the per-user dialog processor (a.k.a., session) is closed.
     #[clap(long)]
     pub dialog_idle_timeout_secs: Option<u64>,
+
+    /// The maximum time to wait for a clean shutdown -- in seconds
+    #[clap(long)]
+    pub shutdown_grace_period_secs: Option<u64>,
 }
 
 impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
@@ -74,21 +78,21 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
         self.log_level
             .inspect(|log_level| {
                 config
-                    .logging_config
+                    .logging
                     .level = *log_level
             });
 
         self.teloxide_token
             .inspect(|teloxide_token| {
                 config
-                    .telegram_config
+                    .telegram
                     .teloxide_token = teloxide_token.clone()
             });
 
         self.dialog_idle_timeout_secs
             .inspect(|dialog_idle_timeout_secs| {
                 config
-                    .telegram_config
+                    .dialog_processor
                     .dialog_processor_idle_timeout = Duration::from_secs(*dialog_idle_timeout_secs)
             });
 
@@ -112,7 +116,7 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
                 return Err(ogre_config_meld::Error::MergingLogicViolation { message: "CLI parameter `--telegram_webhook_secret` is missing".to_string() });
             };
             config
-                .telegram_config
+                .telegram
                 .integration_mode = TelegramIntegrationMode::WebHook {
                 url: telegram_webhook_url.to_string(),
                 secret: telegram_webhook_secret.to_string(),
@@ -130,7 +134,8 @@ mod tests {
 
     #[test]
     fn merge_dialog_idle_timeout_secs() {
-        let expected_timeout = Duration::from_secs(7);
+        let expected_dialog_processor_idle_timeout = Duration::from_secs(7);
+        let expected_shutdown_grace_period = Duration::from_secs(8);
         let config = CliOptions {
             write_effective_config: false,
             show_effective_config: false,
@@ -138,16 +143,25 @@ mod tests {
             teloxide_token: None,
             telegram_webhook_url: None,
             telegram_webhook_secret: None,
-            dialog_idle_timeout_secs: Some(expected_timeout.as_secs()),
+            dialog_idle_timeout_secs: Some(expected_dialog_processor_idle_timeout.as_secs()),
+            shutdown_grace_period_secs: Some(expected_shutdown_grace_period.as_secs()),
         }
         .merge_with_config(BotConfig::default())
         .expect("CLI merge should succeed");
 
         assert_eq!(
             config
-                .telegram_config
+                .dialog_processor
                 .dialog_processor_idle_timeout,
-            expected_timeout
+            expected_dialog_processor_idle_timeout,
+            "Merging logic failed for `dialog_processor_idle_timeout`"
+        );
+        assert_eq!(
+            config
+                .dialog_processor
+                .shutdown_grace_period,
+            expected_shutdown_grace_period,
+            "Merging logic failed for `shutdown_grace_period`"
         );
     }
 }

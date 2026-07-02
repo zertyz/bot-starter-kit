@@ -121,7 +121,7 @@ jobs:
           # nohup and detached standard streams allow the process to survive
           # after the SSH connection closes.
           ssh "${SSH_OPTIONS[@]}" "$REMOTE" \
-            "set -x; \
+            "set -xEeuo pipefail; \
              echo '### Shutting down the remote service:'; \
              pkill -f '^${DEPLOY_REMOTE_BINARY}$'; \
              for i in {1..10}; do pgrep -f '^${DEPLOY_REMOTE_BINARY}$' && sleep 5 || break; done; \

@@ -56,6 +56,14 @@ teloxide = { version = "0.17", features = ["macros", "throttle", "webhooks-axum"
 
 [dev-dependencies]
 
+# tests
+#######
+
+ctor = "1"
+
+# benchmarks
+############
+
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 

@@ -2,7 +2,8 @@
 
 use crate::db::{heed, redb, sqlite};
 use crate::messaging::contracts::messaging::Mo;
-use crate::messaging::impls::telegram_gateway::{TelegramBoxSendFuture, TelegramGateway, TelegramMo, UserMoProcessor, mt, mts};
+use crate::messaging::gateways::telegram_gateway::{TelegramBoxSendFuture, TelegramGateway, TelegramMo, mt, mts};
+use crate::messaging::user_router::UserMoProcessor;
 use crate::models::config::BotConfig;
 use crate::plot;
 use crate::resources::{FRAMES, RESULT};
@@ -49,18 +50,20 @@ enum Cmd {
 
 struct ProcessUserMo;
 
-impl UserMoProcessor for ProcessUserMo {
+impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUserMo {
     async fn process<MoStream: Stream<Item = Mo<User, TelegramMo>> + Send>(&self, bot: Bot, user_mo_stream: MoStream) -> impl Stream<Item = TelegramBoxSendFuture> + Send {
         let user_mo_stream = user_mo_stream.inspect(move |mo| {
             log::debug!(
                 "User '{}' MO: {mo:?}",
                 mo.sender()
+                    .inner
                     .first_name
             )
         });
         user_mo_stream.map(move |mo| {
             let chat_id = ChatId(
                 mo.sender()
+                    .inner
                     .id
                     .0 as i64,
             );
@@ -150,10 +153,10 @@ impl UserMoProcessor for ProcessUserMo {
 }
 
 pub async fn run(config: BotConfig) -> Result<()> {
-    let (_telegram_gateway, task_join_handle) = TelegramGateway::new(config, ProcessUserMo);
-    task_join_handle
+    let telegram_gateway = TelegramGateway::new(config, ProcessUserMo).await;
+    telegram_gateway
+        .await_termination()
         .await
-        .map_err(|err| anyhow!("TelegramGateway ended: {err}"))
 }
 
 fn main_menu() -> InlineKeyboardMarkup {

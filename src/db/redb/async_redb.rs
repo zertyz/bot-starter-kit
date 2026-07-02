@@ -268,7 +268,7 @@ impl<'db> ReDbWriteTransaction<'db> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commons::test_commons::redb_test_commons::TestModel;
+    use crate::commons::test_commons::db_test_commons::TestModel;
     use redb::TableDefinition;
 
     #[tokio::test]
