@@ -35,9 +35,9 @@ pub struct TelegramConfig {
 #[derive(derive_more::Debug, Clone, Serialize, Deserialize)]
 pub enum TelegramIntegrationMode {
     Polling,
-    #[debug("{}", "[REDACTED]")]
     WebHook {
         url: String,
+        #[debug("{}", "[REDACTED]")]
         secret: String,
         certificate_file: String,
         private_key_file: String,
