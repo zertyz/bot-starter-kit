@@ -14,7 +14,7 @@ name = "bot_starter_kit"
 const_format = { version = "0.2" }
 
 # async & streams
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time"] }
 futures = { version = "0.3" }
 async-channel = "2.5"
 ogre-stream-ext = { version = "0.1" }
@@ -52,7 +52,10 @@ ftlog = "0.2"
 teloxide = { version = "0.17", features = ["macros", "throttle", "webhooks-axum"] }
 
 # HTTP endpoints
-#axum = {  version = "0.8", features = ["tokio", "macros", "http2"]  }
+axum = { version = "0.8", features = ["tokio", "http1", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+url = "2"
 
 [dev-dependencies]
 

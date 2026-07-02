@@ -39,6 +39,8 @@ pub enum TelegramIntegrationMode {
     WebHook {
         url: String,
         secret: String,
+        certificate_file: String,
+        private_key_file: String,
     },
 }
 

@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Create Telegram webhook TLS files for direct HTTPS hosting."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import secrets
+import shlex
+import string
+import subprocess
+import sys
+from pathlib import Path
+
+
+SUPPORTED_TELEGRAM_WEBHOOK_PORTS = {80, 88, 443, 8443}
+SECRET_ALPHABET = string.ascii_letters + string.digits + "_-"
+
+
+def token(length: int = 32) -> str:
+    return "".join(secrets.choice(SECRET_ALPHABET) for _ in range(length))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Create a self-signed Telegram webhook certificate, private key, and env file.",
+    )
+    parser.add_argument(
+        "--domain",
+        required=True,
+        help="Public DNS name used in TELOXIDE_WEBHOOK_URL and the certificate SAN.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8443,
+        help="Public HTTPS port. Telegram supports 80, 88, 443, and 8443. Default: 8443.",
+    )
+    parser.add_argument(
+        "--path",
+        default=None,
+        help="Webhook URL path. Default: /webhook/<generated-token>.",
+    )
+    parser.add_argument(
+        "--secret",
+        default=None,
+        help="Telegram X-Telegram-Bot-Api-Secret-Token value. Default: generated.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="target/telegram-webhook-tls",
+        help="Directory to write webhook-public.pem, webhook-private.key, and telegram-webhook.env.",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=365,
+        help="Certificate validity in days. Default: 365.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing output files.",
+    )
+    return parser.parse_args()
+
+
+def validate(args: argparse.Namespace) -> None:
+    if "://" in args.domain or "/" in args.domain or ":" in args.domain:
+        raise ValueError("--domain must be a host name only, without scheme, path, or port")
+    if args.port not in SUPPORTED_TELEGRAM_WEBHOOK_PORTS:
+        supported = ", ".join(str(port) for port in sorted(SUPPORTED_TELEGRAM_WEBHOOK_PORTS))
+        raise ValueError(f"--port must be one of Telegram's supported webhook ports: {supported}")
+    if args.days <= 0:
+        raise ValueError("--days must be positive")
+    if args.path is not None and not args.path.startswith("/"):
+        raise ValueError("--path must start with '/'")
+    if args.secret is not None:
+        if not 1 <= len(args.secret) <= 256:
+            raise ValueError("--secret length must be in the Telegram-supported range 1..=256")
+        if any(char not in SECRET_ALPHABET for char in args.secret):
+            raise ValueError("--secret may only contain A-Z, a-z, 0-9, '_' and '-'")
+
+
+def write_env_file(env_path: Path, values: dict[str, str]) -> None:
+    lines = [f"export {name}={shlex.quote(value)}\n" for name, value in values.items()]
+    env_path.write_text("".join(lines), encoding="utf-8")
+    os.chmod(env_path, 0o600)
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        validate(args)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+
+    output_dir = Path(args.output_dir).expanduser()
+    created_output_dir = not output_dir.exists()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = output_dir.resolve()
+    if created_output_dir:
+        os.chmod(output_dir, 0o700)
+
+    certificate_file = output_dir / "webhook-public.pem"
+    private_key_file = output_dir / "webhook-private.key"
+    env_file = output_dir / "telegram-webhook.env"
+    outputs = [certificate_file, private_key_file, env_file]
+    existing = [path for path in outputs if path.exists()]
+    if existing and not args.force:
+        names = ", ".join(str(path) for path in existing)
+        print(f"error: refusing to overwrite existing file(s): {names}. Use --force.", file=sys.stderr)
+        return 1
+
+    webhook_path = args.path or f"/webhook/{token(32)}"
+    webhook_secret = args.secret or token(32)
+    port_suffix = "" if args.port == 443 else f":{args.port}"
+    webhook_url = f"https://{args.domain}{port_suffix}{webhook_path}"
+
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-newkey",
+            "rsa:2048",
+            "-sha256",
+            "-nodes",
+            "-x509",
+            "-days",
+            str(args.days),
+            "-keyout",
+            str(private_key_file),
+            "-out",
+            str(certificate_file),
+            "-subj",
+            f"/CN={args.domain}",
+            "-addext",
+            f"subjectAltName=DNS:{args.domain}",
+        ],
+        check=True,
+    )
+    os.chmod(private_key_file, 0o600)
+    os.chmod(certificate_file, 0o644)
+
+    write_env_file(
+        env_file,
+        {
+            "TELOXIDE_WEBHOOK_URL": webhook_url,
+            "TELOXIDE_WEBHOOK_SECRET": webhook_secret,
+            "TELOXIDE_WEBHOOK_CERTIFICATE_FILE": str(certificate_file),
+            "TELOXIDE_WEBHOOK_PRIVATE_KEY_FILE": str(private_key_file),
+        },
+    )
+
+    print(f"Public certificate: {certificate_file}")
+    print(f"Private key:        {private_key_file}")
+    print(f"Environment file:   {env_file}")
+    print(f"Webhook URL:        {webhook_url}")
+    print()
+    print(f"Load it with:       set -a; . {shlex.quote(str(env_file))}; set +a")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

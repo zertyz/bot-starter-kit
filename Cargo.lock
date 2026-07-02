@@ -341,6 +341,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
+ "axum",
  "bytemuck",
  "chrono",
  "const_format",
@@ -361,11 +362,14 @@ dependencies = [
  "redb",
  "reqwest",
  "rkyv",
+ "rustls",
  "serde",
  "sqlx",
  "teloxide",
  "tempfile",
  "tokio",
+ "tokio-rustls",
+ "url",
 ]
 
 [[package]]

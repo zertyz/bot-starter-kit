@@ -7,18 +7,29 @@ use crate::models::config::{BotConfig, TelegramIntegrationMode};
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
 use log::{debug, error, info};
+use rustls::{
+    ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+};
 use std::fmt::{Debug, Display};
 use std::future;
+use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
 use teloxide::error_handlers::LoggingErrorHandler;
 use teloxide::prelude::{CallbackQuery, Message, Request, ResponseResult, Update};
 use teloxide::requests::Payload;
-use teloxide::types::{ChatKind, Seconds, User};
+use teloxide::types::{ChatKind, InputFile, Seconds, User};
+use teloxide::update_listeners::UpdateListener;
 use teloxide::{Bot, RequestError, dptree};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
+use url::Url;
 
 #[derive(Debug)]
 pub enum TelegramMo {
@@ -64,9 +75,9 @@ impl TelegramGateway {
                     .telegram
                     .integration_mode
                 {
-                    TelegramIntegrationMode::WebHook { url, secret } => {
+                    TelegramIntegrationMode::WebHook { url, secret, certificate_file, private_key_file } => {
                         instance
-                            .run_webhook(bot, url, secret)
+                            .run_webhook(bot, url, secret, certificate_file, private_key_file)
                             .await
                     }
                     TelegramIntegrationMode::Polling => {
@@ -161,50 +172,76 @@ impl TelegramGateway {
     /// TODO:
     /// 1) research if we have either better performance or better limits by using this MO receiving alternative
     /// 2) then complete this method
-    async fn run_webhook(self: &Arc<Self>, bot: Bot, webhook_url: &str, webhook_secret: &str) -> anyhow::Result<()> {
+    async fn run_webhook(self: &Arc<Self>, bot: Bot, webhook_url: &str, webhook_secret: &str, webhook_certificate_file: &str, webhook_private_key_file: &str) -> anyhow::Result<()> {
         info!("Telegram: Starting in WEBHOOK mode");
         // WEBHOOK_URL must be public HTTPS: e.g. https://bot.yourdomain.com/webhook/abc123
-        let url = if webhook_url
-            .trim()
-            .is_empty()
-        {
-            let err = "not present in configuration";
-            return Err(anyhow!("WEBHOOK_URL is required in webhook mode: {err}"));
+        let url = parse_webhook_url(webhook_url)?;
+        let addr = webhook_bind_addr(&url)?; // local bind; reverse-proxy can front on :443
+
+        if let Some((certificate_file, private_key_file)) = webhook_tls_files(webhook_certificate_file, webhook_private_key_file)? {
+            let tls_config = load_tls_server_config(certificate_file, private_key_file)?;
+            let tcp_listener = TcpListener::bind(addr)
+                .await
+                .map_err(|err| anyhow!("couldn't bind HTTPS webhook listener to {addr}: {err}"))?;
+            let options = teloxide::update_listeners::webhooks::Options::new(addr, url)
+                .secret_token(webhook_secret.to_string())
+                .certificate(InputFile::file(certificate_file.to_string()));
+            let (listener, stop_flag, app) = teloxide::update_listeners::webhooks::axum_to_router(bot.clone(), options)
+                .await
+                .map_err(|err| anyhow!("webhook setup failed: {err}"))?;
+            tokio::spawn(async move {
+                _ = run_tls_webhook_server(tcp_listener, tls_config, app, stop_flag)
+                    .await
+                    .inspect_err(|err| error!("HTTPS webhook server exited with error: {err}"));
+            });
+
+            info!("HTTPS webhook listening; press Ctrl+C to stop");
+            self.dispatch_webhook_listener(bot, listener)
+                .await
         } else {
-            webhook_url
+            // teloxide spins up an Axum server & calls setWebhook for you:
+            let listener = teloxide::update_listeners::webhooks::axum(bot.clone(), teloxide::update_listeners::webhooks::Options::new(addr, url).secret_token(webhook_secret.to_string()))
+                .await
+                .map_err(|err| anyhow!("webhook setup failed: {err}"))?;
+
+            info!("Webhook listening; press Ctrl+C to stop");
+            self.dispatch_webhook_listener(bot, listener)
+                .await
+        }
+    }
+
+    async fn dispatch_webhook_listener<UListener>(self: &Arc<Self>, bot: Bot, listener: UListener) -> anyhow::Result<()>
+    where
+        UListener: UpdateListener + Send,
+        UListener::Err: Debug,
+    {
+        let message_handler = {
+            let self_clone = self.clone();
+            move |bot: Bot, msg: Message| {
+                let self_clone = self_clone.clone();
+                async move {
+                    self_clone
+                        .handler(bot, msg)
+                        .await
+                }
+            }
         };
-        let addr = ([0, 0, 0, 0], 8443).into(); // local bind; reverse-proxy can front on :443
 
-        // teloxide spins up an Axum server & calls setWebhook for you:
-        let listener = teloxide::update_listeners::webhooks::axum(bot.clone(), teloxide::update_listeners::webhooks::Options::new(addr, url.parse()?).secret_token(webhook_secret.to_string()))
-            .await
-            .map_err(|err| anyhow!("webhook setup failed: {err}"))?;
-
-        info!("Webhook listening; press Ctrl+C to stop");
-
-        let handlers = Update::filter_message()
-            .branch(dptree::endpoint({
-                let self_clone = self.clone();
-                move |bot: Bot, msg: Message| {
-                    let self_clone = self_clone.clone();
-                    async move {
-                        self_clone
-                            .handler(bot, msg)
-                            .await
-                    }
+        let callback_handler = {
+            let self_clone = self.clone();
+            move |bot: Bot, q: CallbackQuery| {
+                let self_clone = self_clone.clone();
+                async move {
+                    self_clone
+                        .on_callback(bot, q)
+                        .await
                 }
-            }))
-            .branch(Update::filter_callback_query().endpoint({
-                let self_clone = self.clone();
-                move |bot: Bot, callback_query: CallbackQuery| {
-                    let self_clone = self_clone.clone();
-                    async move {
-                        self_clone
-                            .on_callback(bot, callback_query)
-                            .await
-                    }
-                }
-            }));
+            }
+        };
+
+        let handlers = dptree::entry()
+            .branch(Update::filter_message().endpoint(message_handler))
+            .branch(Update::filter_callback_query().endpoint(callback_handler));
         Dispatcher::builder(bot, handlers)
             .enable_ctrlc_handler()
             .build()
@@ -356,6 +393,120 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
     }
 }
 
+struct TlsListener {
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = TlsStream<TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (stream, addr) = match self
+                .listener
+                .accept()
+                .await
+            {
+                Ok(accepted) => accepted,
+                Err(err) => {
+                    error!("HTTPS webhook TCP accept failed: {err}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            match self
+                .acceptor
+                .accept(stream)
+                .await
+            {
+                Ok(stream) => return (stream, addr),
+                Err(err) => error!("HTTPS webhook TLS handshake failed for {addr}: {err}"),
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener
+            .local_addr()
+    }
+}
+
+fn parse_webhook_url(webhook_url: &str) -> Result<Url> {
+    if webhook_url
+        .trim()
+        .is_empty()
+    {
+        let err = "not present in configuration";
+        return Err(anyhow!("WEBHOOK_URL is required in webhook mode: {err}"));
+    }
+    let url = webhook_url
+        .parse::<Url>()
+        .map_err(|err| anyhow!("WEBHOOK_URL is not a valid URL: {err}"))?;
+    if url.scheme() != "https" {
+        return Err(anyhow!("WEBHOOK_URL must use HTTPS for Telegram webhook mode"));
+    }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("WEBHOOK_URL must include a supported Telegram webhook port"))?;
+    if !matches!(port, 80 | 88 | 443 | 8443) {
+        return Err(anyhow!("WEBHOOK_URL port {port} is not supported by Telegram webhooks; use 80, 88, 443, or 8443"));
+    }
+    Ok(url)
+}
+
+fn webhook_bind_addr(webhook_url: &Url) -> Result<SocketAddr> {
+    let port = webhook_url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("WEBHOOK_URL must include a supported Telegram webhook port"))?;
+    Ok(([0, 0, 0, 0], port).into())
+}
+
+fn webhook_tls_files<'a>(certificate_file: &'a str, private_key_file: &'a str) -> Result<Option<(&'a str, &'a str)>> {
+    let certificate_file = certificate_file.trim();
+    let certificate_file = if certificate_file.is_empty() { None } else { Some(certificate_file) };
+    let private_key_file = private_key_file.trim();
+    let private_key_file = if private_key_file.is_empty() { None } else { Some(private_key_file) };
+
+    match (certificate_file, private_key_file) {
+        (Some(certificate_file), Some(private_key_file)) => Ok(Some((certificate_file, private_key_file))),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(anyhow!("Telegram Gateway: Configuration Error: TELOXIDE_WEBHOOK_PRIVATE_KEY_FILE is required when TELOXIDE_WEBHOOK_CERTIFICATE_FILE is specified")),
+        (None, Some(_)) => Err(anyhow!("Telegram Gateway: Configuration Error: TELOXIDE_WEBHOOK_CERTIFICATE_FILE is required when TELOXIDE_WEBHOOK_PRIVATE_KEY_FILE is specified")),
+    }
+}
+
+async fn run_tls_webhook_server<StopFlag>(tcp_listener: TcpListener, tls_config: ServerConfig, app: axum::Router, stop_flag: StopFlag) -> Result<()>
+where
+    StopFlag: Future<Output = ()> + Send + 'static,
+{
+    let listener = TlsListener { listener: tcp_listener, acceptor: TlsAcceptor::from(Arc::new(tls_config)) };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(stop_flag)
+        .await
+        .map_err(|err| anyhow!("HTTPS webhook server failed: {err}"))
+}
+
+fn load_tls_server_config(certificate_file: &str, private_key_file: &str) -> Result<ServerConfig> {
+    let certificate_chain = CertificateDer::pem_file_iter(certificate_file)
+        .map_err(|err| anyhow!("couldn't open TLS certificate file '{certificate_file}': {err}"))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| anyhow!("couldn't parse TLS certificate file '{certificate_file}': {err}"))?;
+    if certificate_chain.is_empty() {
+        return Err(anyhow!("TLS certificate file '{certificate_file}' did not contain any certificates"));
+    }
+
+    let private_key = PrivateKeyDer::from_pem_file(private_key_file).map_err(|err| anyhow!("couldn't read TLS private key file '{private_key_file}': {err}"))?;
+
+    ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificate_chain, private_key)
+        .map_err(|err| anyhow!("couldn't build TLS server configuration: {err}"))
+}
+
 pub type TelegramBoxSendFuture = Pin<Box<dyn Future<Output = Result<String>> + Send + 'static>>;
 
 /// Since Teloxide doesn't provide a single type that would be the root of all MT messages,
@@ -404,5 +555,49 @@ pub fn mts<OkType: Debug, ErrorType: Into<anyhow::Error> + Display>(process: imp
 
 #[cfg(test)]
 mod tests {
-    //use super::*;
+    use super::*;
+
+    #[test]
+    fn webhook_bind_addr_uses_explicit_url_port() {
+        let url = parse_webhook_url("https://bot.example.com:8443/webhook").expect("URL should be accepted");
+        assert_eq!(
+            webhook_bind_addr(&url)
+                .expect("bind address should be derived")
+                .port(),
+            8443,
+            "Explicit webhook URL port should be used as the local bind port"
+        );
+    }
+
+    #[test]
+    fn webhook_bind_addr_uses_https_default_port() {
+        let url = parse_webhook_url("https://bot.example.com/webhook").expect("URL should be accepted");
+        assert_eq!(
+            webhook_bind_addr(&url)
+                .expect("bind address should be derived")
+                .port(),
+            443,
+            "HTTPS webhook URLs without explicit ports should bind to 443"
+        );
+    }
+
+    #[test]
+    fn webhook_url_rejects_unsupported_port() {
+        let err = parse_webhook_url("https://bot.example.com:3000/webhook").expect_err("Unsupported Telegram webhook port should be rejected");
+        assert!(
+            err.to_string()
+                .contains("not supported by Telegram webhooks"),
+            "Unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn webhook_url_rejects_plain_http() {
+        let err = parse_webhook_url("http://bot.example.com:8443/webhook").expect_err("Plain HTTP webhook URL should be rejected");
+        assert!(
+            err.to_string()
+                .contains("must use HTTPS"),
+            "Unexpected error: {err}"
+        );
+    }
 }
