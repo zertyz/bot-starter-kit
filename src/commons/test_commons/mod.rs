@@ -1,6 +1,6 @@
 //! Contains code used across different tests
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 pub mod db_test_commons;
 
