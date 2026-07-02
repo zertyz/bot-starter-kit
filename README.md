@@ -2,7 +2,7 @@
 
 **Work in progress:** this is an experimental backend Rust bot starter kit, not a production-ready framework yet. It is useful as a living template, reference implementation, and performance playground while the architecture is still being refined.
 
-[![Rust](https://github.com/zertyz/bot-starter-kit/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/zertyz/bot-starter-kit/actions/workflows/rust.yml)
+[![Main](https://github.com/zertyz/bot-starter-kit/actions/workflows/main.yml/badge.svg?branch=main)](https://github.com/zertyz/bot-starter-kit/actions/workflows/main.yml)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://zertyz.github.io/bot-starter-kit/doc/bot_starter_kit/)
 [![Coverage report](https://img.shields.io/badge/coverage-report-blue)](https://zertyz.github.io/bot-starter-kit/coverage/html/)
 [![Benchmark report](https://img.shields.io/badge/benchmarks-report-blue)](https://zertyz.github.io/bot-starter-kit/benchmarks/report/)

@@ -8,7 +8,7 @@ use crate::messaging::contracts::messaging_platform::MessagingPlatform;
 use crate::models::config::BotConfig;
 use futures::{Stream, StreamExt};
 use log::{debug, error, info};
-use ogre_stream_ext::StreamExtCloseOnItemTimeout;
+use ogre_stream_ext::{StreamExtCloseOnItemTimeout, throttle_stream};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt::Debug;
@@ -70,7 +70,8 @@ impl<UserType: Debug + Clone + Send + Sync + 'static, HandleType: Send + Sync + 
                 tokio::time::sleep(Duration::from_millis(100)).await; // prevents fast starts from missing messages
                 let grace_period_start = Instant::now();
                 loop {
-                    let remaining_len = messaging_platform_mt_consumer.len();
+                    let remaining_mos = instance.per_user_mo_tx.lock().await.values().fold(0, |acc, mo_tx| acc + mo_tx.len());
+                    let remaining_mts = messaging_platform_mt_consumer.len();
                     let grace_period_elapsed = grace_period_start.elapsed();
                     if grace_period_elapsed
                         >= instance
@@ -79,22 +80,20 @@ impl<UserType: Debug + Clone + Send + Sync + 'static, HandleType: Send + Sync + 
                             .shutdown_grace_period
                     {
                         info!(
-                            "UserRouter: Shut Down grace period of {:?} is over. Ignoring the remaining {} MTs.",
+                            "UserRouter: Shut Down grace period of {:?} is over. Ignoring the remaining {remaining_mos} MOs and {remaining_mts} MTs.",
                             instance
                                 .config
                                 .dialog_processor
                                 .shutdown_grace_period,
-                            remaining_len
                         );
-                    } else if remaining_len > 0 {
+                    } else if remaining_mos + remaining_mts > 0 {
                         info!(
-                            "UserRouter: Shutting Down... waiting up to {:?} for {} MTs to be processed upstream...",
+                            "UserRouter: Shutting Down... waiting up to {:?} for {remaining_mos} MOs and {remaining_mts} MTs to be processed upstream...",
                             instance
                                 .config
                                 .dialog_processor
                                 .shutdown_grace_period
-                                - grace_period_elapsed,
-                            remaining_len
+                                - grace_period_elapsed
                         );
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         continue;
@@ -138,6 +137,10 @@ impl<UserType: Debug + Clone + Send + Sync + 'static, HandleType: Send + Sync + 
             .config
             .dialog_processor
             .dialog_processor_idle_timeout;
+        let per_user_mo_throttle_interval = self
+            .config
+            .dialog_processor
+            .per_user_mo_throttle_interval;
         let handle_supplier = Arc::new(handle_supplier);
         let per_user_mo_processor = Arc::new(per_user_mo_processor);
         messaging_platform_mo_stream
@@ -170,9 +173,10 @@ impl<UserType: Debug + Clone + Send + Sync + 'static, HandleType: Send + Sync + 
                             let handle = handle_supplier
                                 .supply()
                                 .await;
-                            let per_user_ttl_mo_stream = this.set_close_on_idle(user.id(), &mo_tx, mo_rx, dialog_processor_idle_timeout);
+                            let per_user_mo_stream = this.clone().set_close_on_idle(user.id(), mo_tx.clone(), mo_rx, dialog_processor_idle_timeout);
+                            let per_user_mo_stream = Self::set_throttle(per_user_mo_stream, per_user_mo_throttle_interval);
                             let user_mt_stream = per_user_mo_processor
-                                .process(handle, per_user_ttl_mo_stream)
+                                .process(handle, per_user_mo_stream)
                                 .await;
                             // process 1 message at a time (per user)
                             user_mt_stream
@@ -269,31 +273,45 @@ impl<UserType: Debug + Clone + Send + Sync + 'static, HandleType: Send + Sync + 
 
     /// Upgrades the `mo_stream` to one that auto-closes after no MO arrives within `dialog_idle_timeout`.
     fn set_close_on_idle(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         user_id: u64,
-        mo_tx: &async_channel::Sender<Mo<UserType, InnerMoType>>,
+        mo_tx: async_channel::Sender<Mo<UserType, InnerMoType>>,
         mo_stream: impl Stream<Item = Mo<UserType, InnerMoType>> + Send + 'static,
         dialog_idle_timeout: Duration,
     ) -> impl Stream<Item = Mo<UserType, InnerMoType>> + Send {
         mo_stream
             .boxed()
             .close_stream_on_item_timeout(dialog_idle_timeout)
-            .then(move |mo_timeout_result| async move {
-                match mo_timeout_result {
-                    Ok(mo) => Some(mo),
-                    Err(_err) => {
-                        let removed = self
-                            .close_dialog(user_id, mo_tx)
-                            .await;
-                        info!(
+            .then(move |mo_timeout_result| {
+                let this = self.clone();
+                let mo_tx = mo_tx.clone();
+                async move {
+                    match mo_timeout_result {
+                        Ok(mo) => Some(mo),
+                        Err(_err) => {
+                            let removed = this
+                                .close_dialog(user_id, &mo_tx)
+                                .await;
+                            info!(
                             "UserRouter: Closing dialog processor for user #{user_id} after {dialog_idle_timeout:?} without receiving MOs{}",
                             if !removed { " -- BUT IT SEEMS TO HAVE BEEN REMOVED ALREADY" } else { "" }
                         );
-                        None
+                            None
+                        }
                     }
                 }
             })
             .filter_map(future::ready)
+    }
+
+    /// Upgrades the `mo_stream` to yield MOs at most once per `throttle_interval`.
+    fn set_throttle(mo_stream: impl Stream<Item = Mo<UserType, InnerMoType>> + Send + 'static, throttle_interval: Duration) -> impl Stream<Item = Mo<UserType, InnerMoType>> + Send {
+        if throttle_interval.is_zero() {
+            mo_stream.boxed()
+        } else {
+            let elements_per_second = 1.0 / throttle_interval.as_secs_f64();
+            throttle_stream(mo_stream, elements_per_second).boxed()
+        }
     }
 
     /// Removes a dialog route before closing its channel.
@@ -448,6 +466,35 @@ mod tests {
         };
     }
 
+    /// Assures the per-user MO stream is throttled before messages reach the Dialog Processor.
+    #[tokio::test]
+    async fn per_user_mo_stream_throttle() {
+        const EXPECTED_MESSAGES_COUNT: u64 = 3;
+        const USER_ID: u64 = 97;
+        const THROTTLE_INTERVAL: Duration = Duration::from_millis(30);
+        const TIMEOUT: Duration = Duration::from_secs(5);
+
+        let mut config = TEST_CONFIG;
+        config
+            .dialog_processor
+            .per_user_mo_throttle_interval = THROTTLE_INTERVAL;
+
+        let mo_stream = stream::iter((0..EXPECTED_MESSAGES_COUNT)
+            .map(|i| test_mo(USER_ID, i)));
+        let instance = UserRouter::new(&config, MessagingPlatform::TestPlatform);
+        let mt_stream = instance
+            .start(mo_stream, TestHandleSupplier, TestMoProcessor)
+            .await;
+
+        let minimum_duration = Duration::from_secs_f64(THROTTLE_INTERVAL.as_secs_f64() * (EXPECTED_MESSAGES_COUNT as f64 - 1.0));
+        let start = Instant::now();
+        let observed_mts_count = timeout(TIMEOUT, mt_stream
+            .count()).await
+            .expect("Timeout while waiting for the MTs");
+        assert_eq!(observed_mts_count as u64, EXPECTED_MESSAGES_COUNT, "Number of MTs do not match");
+        assert!(start.elapsed() >= minimum_duration, "The per-user MO stream was not throttled");
+    }
+
     /// Assures the shutdown grace period is honored before hard closing the router
     #[tokio::test]
     async fn grace_period() {
@@ -516,6 +563,9 @@ mod tests {
             .dialog_processor
             .shutdown_grace_period = Duration::from_mins(1);
         config
+            .dialog_processor
+            .per_user_mo_throttle_interval = Duration::ZERO;
+        config
     };
 
     fn test_user(user_id: u64) -> User {
@@ -532,7 +582,7 @@ mod tests {
     }
 
     fn test_mo(user_id: u64, message_id: u64) -> Mo<User, ()> {
-        Mo::new(message_id + 1, Party::new(user_id, test_user(user_id)), Dialog::new(777, DialogKind::Private, Language::English), ())
+        Mo::new(message_id, Party::new(user_id, test_user(user_id)), Dialog::new(777, DialogKind::Private, Language::English), ())
     }
 
     struct TestHandleSupplier;

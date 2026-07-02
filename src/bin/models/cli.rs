@@ -54,6 +54,10 @@ pub struct CliOptions {
     #[clap(long)]
     pub dialog_idle_timeout_secs: Option<u64>,
 
+    /// Minimum seconds between MOs yielded to each user's dialog processor.
+    #[clap(long)]
+    pub per_user_mo_throttle_interval_secs: Option<u64>,
+
     /// The maximum time to wait for a clean shutdown -- in seconds
     #[clap(long)]
     pub shutdown_grace_period_secs: Option<u64>,
@@ -94,6 +98,13 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
                 config
                     .dialog_processor
                     .dialog_processor_idle_timeout = Duration::from_secs(*dialog_idle_timeout_secs)
+            });
+
+        self.per_user_mo_throttle_interval_secs
+            .inspect(|per_user_mo_throttle_interval_secs| {
+                config
+                    .dialog_processor
+                    .per_user_mo_throttle_interval = Duration::from_secs(*per_user_mo_throttle_interval_secs)
             });
 
         self.shutdown_grace_period_secs
@@ -142,6 +153,7 @@ mod tests {
     #[test]
     fn merge_dialog_idle_timeout_secs() {
         let expected_dialog_processor_idle_timeout = Duration::from_secs(7);
+        let expected_per_user_mo_throttle_interval = Duration::from_secs(6);
         let expected_shutdown_grace_period = Duration::from_secs(8);
         let config = CliOptions {
             write_effective_config: false,
@@ -151,6 +163,7 @@ mod tests {
             telegram_webhook_url: None,
             telegram_webhook_secret: None,
             dialog_idle_timeout_secs: Some(expected_dialog_processor_idle_timeout.as_secs()),
+            per_user_mo_throttle_interval_secs: Some(expected_per_user_mo_throttle_interval.as_secs()),
             shutdown_grace_period_secs: Some(expected_shutdown_grace_period.as_secs()),
         }
         .merge_with_config(BotConfig::default())
@@ -162,6 +175,13 @@ mod tests {
                 .dialog_processor_idle_timeout,
             expected_dialog_processor_idle_timeout,
             "Merging logic failed for `dialog_processor_idle_timeout`"
+        );
+        assert_eq!(
+            config
+                .dialog_processor
+                .per_user_mo_throttle_interval,
+            expected_per_user_mo_throttle_interval,
+            "Merging logic failed for `per_user_mo_throttle_interval`"
         );
         assert_eq!(
             config

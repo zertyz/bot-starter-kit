@@ -19,6 +19,8 @@ pub struct DialogProcessorConfig {
     /// Maximum idle seconds before the dialog processor are closed
     /// -- controlling the effective "per user RAM session timeout".
     pub dialog_processor_idle_timeout: Duration,
+    /// Minimum delay between MOs yielded to each user's dialog processor.
+    pub per_user_mo_throttle_interval: Duration,
     /// The maximum time to wait for a clean shutdown
     pub shutdown_grace_period: Duration,
 }
@@ -54,6 +56,7 @@ impl BotConfig {
             repository: RepositoryConfig { users_repository_db_file: String::new() },
             dialog_processor: DialogProcessorConfig {
                 dialog_processor_idle_timeout: Duration::from_mins(30),
+                per_user_mo_throttle_interval: Duration::from_secs(5),
                 shutdown_grace_period: Duration::from_mins(1),
             },
             telegram: TelegramConfig {
