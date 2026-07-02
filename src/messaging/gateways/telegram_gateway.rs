@@ -267,11 +267,23 @@ impl Messaging<User, TelegramMo, TelegramBoxSendFuture> for TelegramGateway {
                     let id = message
                         .id
                         .0 as u64;
+                    let username = from
+                        .username
+                        .as_deref()
+                        .unwrap_or_default();
+                    let first_name = &from.first_name;
+                    let last_name = from
+                        .last_name
+                        .as_deref()
+                        .unwrap_or_default();
                     let sender = Party::new(
                         from.id
                             .0,
                         from.clone(),
-                    );
+                    )
+                    .with_address(username)
+                    .with_name(format!("{first_name} {last_name}").as_str());
+
                     let kind = map_kind(
                         &message
                             .chat

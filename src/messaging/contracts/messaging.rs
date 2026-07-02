@@ -93,15 +93,21 @@ impl<PartyType: Clone> Party<PartyType> {
         Self { inner, id: NonZeroU64::new(id), address: None, name: None }
     }
 
-    pub fn with_address(mut self, address: String) -> Self {
-        self.address
-            .replace(address);
+    pub fn with_address(mut self, address: &str) -> Self {
+        let address = address.trim();
+        if !address.is_empty() {
+            self.address
+                .replace(address.to_string());
+        }
         self
     }
 
-    pub fn with_name(mut self, name: String) -> Self {
-        self.name
-            .replace(name);
+    pub fn with_name(mut self, name: &str) -> Self {
+        let name = name.trim();
+        if !name.is_empty() {
+            self.name
+                .replace(name.to_string());
+        }
         self
     }
 

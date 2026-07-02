@@ -123,7 +123,7 @@ jobs:
           ssh "${SSH_OPTIONS[@]}" "$REMOTE" \
             "set -xEeuo pipefail; \
              echo '### Shutting down the remote service:'; \
-             pkill -f '^${DEPLOY_REMOTE_BINARY}$'; \
+             pkill -f '^${DEPLOY_REMOTE_BINARY}$' || true; \
              for i in {1..10}; do pgrep -f '^${DEPLOY_REMOTE_BINARY}$' && sleep 5 || break; done; \
              mv '${DEPLOY_REMOTE_BINARY}~' '${DEPLOY_REMOTE_BINARY}'; \
              echo '### Restarting:'; \
