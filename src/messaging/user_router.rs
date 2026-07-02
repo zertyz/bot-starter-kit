@@ -70,7 +70,12 @@ impl<UserType: Debug + Clone + Send + Sync + 'static, HandleType: Send + Sync + 
                 tokio::time::sleep(Duration::from_millis(100)).await; // prevents fast starts from missing messages
                 let grace_period_start = Instant::now();
                 loop {
-                    let remaining_mos = instance.per_user_mo_tx.lock().await.values().fold(0, |acc, mo_tx| acc + mo_tx.len());
+                    let remaining_mos = instance
+                        .per_user_mo_tx
+                        .lock()
+                        .await
+                        .values()
+                        .fold(0, |acc, mo_tx| acc + mo_tx.len());
                     let remaining_mts = messaging_platform_mt_consumer.len();
                     let grace_period_elapsed = grace_period_start.elapsed();
                     if grace_period_elapsed
@@ -173,7 +178,9 @@ impl<UserType: Debug + Clone + Send + Sync + 'static, HandleType: Send + Sync + 
                             let handle = handle_supplier
                                 .supply()
                                 .await;
-                            let per_user_mo_stream = this.clone().set_close_on_idle(user.id(), mo_tx.clone(), mo_rx, dialog_processor_idle_timeout);
+                            let per_user_mo_stream = this
+                                .clone()
+                                .set_close_on_idle(user.id(), mo_tx.clone(), mo_rx, dialog_processor_idle_timeout);
                             let per_user_mo_stream = Self::set_throttle(per_user_mo_stream, per_user_mo_throttle_interval);
                             let user_mt_stream = per_user_mo_processor
                                 .process(handle, per_user_mo_stream)
@@ -293,9 +300,9 @@ impl<UserType: Debug + Clone + Send + Sync + 'static, HandleType: Send + Sync + 
                                 .close_dialog(user_id, &mo_tx)
                                 .await;
                             info!(
-                            "UserRouter: Closing dialog processor for user #{user_id} after {dialog_idle_timeout:?} without receiving MOs{}",
-                            if !removed { " -- BUT IT SEEMS TO HAVE BEEN REMOVED ALREADY" } else { "" }
-                        );
+                                "UserRouter: Closing dialog processor for user #{user_id} after {dialog_idle_timeout:?} without receiving MOs{}",
+                                if !removed { " -- BUT IT SEEMS TO HAVE BEEN REMOVED ALREADY" } else { "" }
+                            );
                             None
                         }
                     }
@@ -479,8 +486,7 @@ mod tests {
             .dialog_processor
             .per_user_mo_throttle_interval = THROTTLE_INTERVAL;
 
-        let mo_stream = stream::iter((0..EXPECTED_MESSAGES_COUNT)
-            .map(|i| test_mo(USER_ID, i)));
+        let mo_stream = stream::iter((0..EXPECTED_MESSAGES_COUNT).map(|i| test_mo(USER_ID, i)));
         let instance = UserRouter::new(&config, MessagingPlatform::TestPlatform);
         let mt_stream = instance
             .start(mo_stream, TestHandleSupplier, TestMoProcessor)
@@ -488,8 +494,8 @@ mod tests {
 
         let minimum_duration = Duration::from_secs_f64(THROTTLE_INTERVAL.as_secs_f64() * (EXPECTED_MESSAGES_COUNT as f64 - 1.0));
         let start = Instant::now();
-        let observed_mts_count = timeout(TIMEOUT, mt_stream
-            .count()).await
+        let observed_mts_count = timeout(TIMEOUT, mt_stream.count())
+            .await
             .expect("Timeout while waiting for the MTs");
         assert_eq!(observed_mts_count as u64, EXPECTED_MESSAGES_COUNT, "Number of MTs do not match");
         assert!(start.elapsed() >= minimum_duration, "The per-user MO stream was not throttled");
