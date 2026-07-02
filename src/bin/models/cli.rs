@@ -126,28 +126,28 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
         let telegram_webhook_url = self
             .telegram_webhook_url
             .filter(|telegram_webhook_url| {
-                telegram_webhook_url
+                !telegram_webhook_url
                     .trim()
                     .is_empty()
             });
         let telegram_webhook_secret = self
             .telegram_webhook_secret
             .filter(|telegram_webhook_secret| {
-                telegram_webhook_secret
+                !telegram_webhook_secret
                     .trim()
                     .is_empty()
             });
         let telegram_certificate_file = self
             .telegram_webhook_certificate_file
             .filter(|telegram_certificate_file| {
-                telegram_certificate_file
+                !telegram_certificate_file
                     .trim()
                     .is_empty()
             });
         let telegram_certificate_key_file = self
             .telegram_webhook_private_key_file
             .filter(|telegram_certificate_key_file| {
-                telegram_certificate_key_file
+                !telegram_certificate_key_file
                     .trim()
                     .is_empty()
             });
@@ -162,7 +162,11 @@ impl ogre_config_meld::CmdLineAndConfigIntegration<BotConfig> for CliOptions {
                     private_key_file: telegram_certificate_key_file.to_string(),
                 };
             }
-            (None, None, None, None) => {}
+            (None, None, None, None) => {
+                config
+                    .telegram
+                    .integration_mode = TelegramIntegrationMode::Polling;
+            }
             _ => {
                 Err(ogre_config_meld::Error::MergingLogicViolation { message: "Configuration error: when specifying one of these options, all of them should be specified: `--telegram_webhook_url`, `--telegram_webhook_secret`, --telegram_webhook_certificate_file, --telegram_webhook_private_key_file".to_string() })?
             }
