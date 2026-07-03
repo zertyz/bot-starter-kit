@@ -1,0 +1,713 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# UPDATE: this script is bound to be short-lived.
+#         Once we add Whatsapp, it requires all IPs to reach our servers, hence no firewall rule
+#         can prevent automated network scanners from bothering our bot.
+#         The future solution would be to create different DNS names like:
+#         - telegram.bot.ogrerobot.com, at port 443
+#         - whatsapp.bot.ogrerobot.com, at port 443 with mTLS
+#         - admin.bot.ogrerobot.com, at port 443
+#         And hold any accesses targeted at any other SNI or host (including those made directly to the server's IP address)
+#         for 60 seconds without any reply. The intention is to slow down opportunistic malicious
+#         scripts that scan the Internet and only know the IP address.
+#         Additionally: traffic can be intercepted at the TLS layer, using the SNI (hostname) info
+#         -- hence these malicious scripts will never reach the HTTP layer.
+#         Then, at the HTTP layer, the Axum server distinguishes what to serve based off the
+#         "Host: XXX" header.
+
+# Google Cloud Webhook Firewall Manager
+
+# Required envs:
+#   VM=my-vm
+#   ZONE=us-central1-a
+#
+# Optional:
+#   PROJECT=my-project
+#   NIC=nic0
+#   PORT=8443
+#   RULE=allow-telegram-webhook-8443
+#   TAG=telegram-webhook
+#   PRIORITY=900
+
+TELEGRAM_RANGES="149.154.160.0/20,91.108.4.0/22"  # verified 2026-07-02 -- https://core.telegram.org/bots/webhooks
+
+# Purpose
+# -------
+# Audits and updates an existing Google Cloud VPC firewall rule that
+# controls inbound TCP traffic to HTTPS ports using self-signed certificates
+# -- normally TCP 8443.
+#
+# The intended security policy is to permit webhook connections only
+# from the source networks officially documented by Telegram, etc.
+#
+# PS: Whatsapp currently uses a different mechanism not tied to any firewall rules
+#     -- it uses mTLS (Mutual TLS) for the server to be sure it is talking with a trusted client
+#     -- and would require the bot to listen on different ports to support both
+#     Telegram and Whatsapp webhooks.
+#
+# Current webhook source networks for each messaging platform are declared above.
+#
+# Safety model
+# ------------
+# This script operates on one PRE-EXISTING firewall rule identified by
+# the RULE environment variable.
+#
+# It may:
+#
+# - display the rule;
+# - verify its source ranges;
+# - replace its source ranges;
+# - audit other firewall rules affecting the VM.
+#
+# Unless you command so, it will not:
+#
+# - guess a firewall rule name;
+# - create a firewall rule;
+# - add or remove VM network tags;
+# - change target tags;
+# - change target service accounts;
+# - change the allowed protocol or port;
+# - change the rule priority;
+# - enable or disable the rule.
+#
+# Required environment variables
+# ------------------------------
+#
+# PROJECT   Google Cloud project ID -- only if your local `gcloud-cli` is configured to another project
+# VM        Compute Engine VM name
+# ZONE      Compute Engine zone
+#
+# Optional environment variables
+# ------------------------------
+#
+# RULE      Existing VPC firewall rule name to inspect or modify
+# PORT      Webhook TCP port; defaults to 8443
+# NIC       VM network interface name; defaults to nic0
+#
+# Examples
+# --------
+#
+# VM="vmname" ZONE="zone-name" ./gcp_webhook_firewall audit
+# VM="vmname" ZONE="zone-name" ./gcp_webhook_firewall show
+# VM="vmname" ZONE="zone-name" ./gcp_webhook_firewall check telegram
+# VM="vmname" ZONE="zone-name" ./gcp_webhook_firewall set telegram
+# VM="vmname" ZONE="zone-name" ./gcp_webhook_firewall set 203.0.113.47/32
+#
+# CIDR terminology
+# ----------------
+# CIDR notation represents an IP network as an address followed by the
+# number of fixed leading bits.
+#
+# 203.0.113.47/32      exactly one IPv4 address
+# 91.108.4.0/22        1,024 IPv4 addresses
+# 149.154.160.0/20     4,096 IPv4 addresses
+# 0.0.0.0/0            every IPv4 address
+#
+# Operational warning
+# -------------------
+# A mistaken source-range update can stop Telegram webhook delivery.
+# Record the current rule configuration before changing it and run the
+# audit command immediately afterward.
+
+: "${VM:?Set VM to the Compute Engine instance name}"
+: "${ZONE:?Set ZONE to the Compute Engine zone}"
+
+PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
+NIC="${NIC:-nic0}"
+PORT="${PORT:-8443}"
+RULE="${RULE:-allow-telegram-webhook-8443}"
+TAG="${TAG:-telegram-webhook-8443}"
+PRIORITY="${PRIORITY:-900}"
+
+if [[ -z "$PROJECT" || "$PROJECT" == "(unset)" ]]; then
+    echo "PROJECT is not set and gcloud has no active project" >&2
+    exit 2
+fi
+
+for command in gcloud jq python3; do
+    command -v "$command" >/dev/null || {
+        echo "Required command not found: $command" >&2
+        exit 2
+    }
+done
+
+GCLOUD=(
+    gcloud
+    "--project=$PROJECT"
+    --quiet
+)
+
+get_vm_json() {
+    "${GCLOUD[@]}" compute instances describe "$VM" \
+        "--zone=$ZONE" \
+        --format=json
+}
+
+VM_JSON="$(get_vm_json)"
+
+NETWORK="$(
+    jq -r --arg nic "$NIC" '
+        .networkInterfaces[]
+        | select(.name == $nic)
+        | .network
+        | split("/")[-1]
+    ' <<<"$VM_JSON"
+)"
+
+if [[ -z "$NETWORK" || "$NETWORK" == "null" ]]; then
+    echo "Network interface '$NIC' was not found on VM '$VM'" >&2
+    exit 2
+fi
+
+VM_TAGS_JSON="$(jq -c '.tags.items // []' <<<"$VM_JSON")"
+VM_SERVICE_ACCOUNTS_JSON="$(
+    jq -c '[.serviceAccounts[]?.email]' <<<"$VM_JSON"
+)"
+
+usage() {
+    cat <<EOF
+Usage:
+  $0 audit
+  $0 show
+  $0 check CIDR[,CIDR...]
+  $0 set CIDR[,CIDR...]
+  $0 set telegram
+  $0 set all
+  $0 disable
+  $0 delete
+
+Examples:
+  VM=$VM ZONE=$ZONE $0 audit
+
+  VM=$VM ZONE=$ZONE $0 check telegram
+
+  VM=$VM ZONE=$ZONE $0 set \
+    149.154.160.0/20,91.108.4.0/22
+
+  VM=$VM ZONE=$ZONE $0 set 203.0.113.10/32
+
+  VM=$VM ZONE=$ZONE $0 set all
+
+Special values:
+  telegram  $TELEGRAM_RANGES
+  all       0.0.0.0/0
+EOF
+}
+
+expand_ranges_alias() {
+    local value="${1:?Missing ranges}"
+
+    case "${value,,}" in
+        telegram)
+            printf '%s\n' "$TELEGRAM_RANGES"
+            ;;
+        all)
+            printf '%s\n' "0.0.0.0/0"
+            ;;
+        *)
+            printf '%s\n' "$value"
+            ;;
+    esac
+}
+
+canonicalize_ranges() {
+    local raw
+    raw="$(expand_ranges_alias "$1")"
+
+    python3 - "$raw" <<'PY'
+import ipaddress
+import sys
+
+raw = sys.argv[1]
+parts = [part.strip() for part in raw.split(",") if part.strip()]
+
+if not parts:
+    raise SystemExit("No CIDR ranges supplied")
+
+networks = [
+    ipaddress.ip_network(part, strict=False)
+    for part in parts
+]
+
+versions = {network.version for network in networks}
+
+if len(versions) != 1:
+    raise SystemExit(
+        "A Google Cloud VPC firewall rule cannot mix IPv4 and IPv6 ranges"
+    )
+
+collapsed = list(ipaddress.collapse_addresses(networks))
+collapsed.sort(
+    key=lambda network: (
+        network.version,
+        int(network.network_address),
+        network.prefixlen,
+    )
+)
+
+print(",".join(map(str, collapsed)))
+PY
+}
+
+rule_exists() {
+    "${GCLOUD[@]}" compute firewall-rules describe "$RULE" \
+        >/dev/null 2>&1
+}
+
+get_rule_json() {
+    "${GCLOUD[@]}" compute firewall-rules describe "$RULE" \
+        --format=json
+}
+
+ensure_vm_tag() {
+    if jq -e --arg tag "$TAG" '
+        (.tags.items // []) | index($tag) != null
+    ' <<<"$VM_JSON" >/dev/null; then
+        return
+    fi
+
+    echo "Adding network tag '$TAG' to VM '$VM'"
+
+    "${GCLOUD[@]}" compute instances add-tags "$VM" \
+        "--zone=$ZONE" \
+        "--tags=$TAG"
+
+    VM_JSON="$(get_vm_json)"
+    VM_TAGS_JSON="$(jq -c '.tags.items // []' <<<"$VM_JSON")"
+}
+
+show_rule() {
+    echo "Project:   $PROJECT"
+    echo "VM:        $VM"
+    echo "Zone:      $ZONE"
+    echo "NIC:       $NIC"
+    echo "Network:   $NETWORK"
+    echo "Rule:      $RULE"
+    echo "Target tag: $TAG"
+    echo
+
+    if ! rule_exists; then
+        echo "Managed rule does not exist."
+        return 1
+    fi
+
+    "${GCLOUD[@]}" compute firewall-rules describe "$RULE" \
+        --format='yaml(
+            name,
+            network,
+            direction,
+            priority,
+            disabled,
+            sourceRanges,
+            sourceTags,
+            sourceServiceAccounts,
+            targetTags,
+            targetServiceAccounts,
+            allowed,
+            denied,
+            description
+        )'
+}
+
+validate_existing_rule_shape() {
+    local json="$1"
+    local existing_network
+    local direction
+
+    existing_network="$(
+        jq -r '.network | split("/")[-1]' <<<"$json"
+    )"
+
+    direction="$(jq -r '.direction' <<<"$json")"
+
+    if [[ "$existing_network" != "$NETWORK" ]]; then
+        echo "Refusing to modify rule '$RULE'." >&2
+        echo "It belongs to network '$existing_network', not '$NETWORK'." >&2
+        exit 3
+    fi
+
+    if [[ "$direction" != "INGRESS" ]]; then
+        echo "Refusing to modify rule '$RULE'." >&2
+        echo "It is not an INGRESS rule." >&2
+        exit 3
+    fi
+
+    if ! jq -e '
+        (.sourceTags // [] | length) == 0
+        and (.sourceServiceAccounts // [] | length) == 0
+        and (.targetServiceAccounts // [] | length) == 0
+    ' <<<"$json" >/dev/null; then
+        echo "Refusing to modify rule '$RULE'." >&2
+        echo "It contains source tags or service-account selectors." >&2
+        echo "Delete or rename it before letting this script own the name." >&2
+        exit 3
+    fi
+}
+
+set_ranges() {
+    local ranges
+    ranges="$(canonicalize_ranges "$1")"
+
+    ensure_vm_tag
+
+    if rule_exists; then
+        local existing
+        existing="$(get_rule_json)"
+        validate_existing_rule_shape "$existing"
+
+        echo "Previous source ranges:"
+        jq -r '
+            (.sourceRanges // [])
+            | if length == 0 then "(none)" else .[] end
+        ' <<<"$existing"
+
+        echo
+        echo "Replacing source ranges with: $ranges"
+
+        "${GCLOUD[@]}" compute firewall-rules update "$RULE" \
+            "--priority=$PRIORITY" \
+            "--allow=tcp:$PORT" \
+            "--source-ranges=$ranges" \
+            "--target-tags=$TAG" \
+            --no-disabled
+    else
+        echo "Creating rule '$RULE' with source ranges: $ranges"
+
+        "${GCLOUD[@]}" compute firewall-rules create "$RULE" \
+            "--network=$NETWORK" \
+            --direction=INGRESS \
+            "--priority=$PRIORITY" \
+            "--allow=tcp:$PORT" \
+            "--source-ranges=$ranges" \
+            "--target-tags=$TAG" \
+            --description="Managed allow rule for webhook TCP $PORT"
+    fi
+
+    echo
+    check_rule "$ranges"
+}
+
+check_rule() {
+    local expected
+    expected="$(canonicalize_ranges "$1")"
+
+    if ! rule_exists; then
+        echo "FAIL: rule '$RULE' does not exist" >&2
+        return 1
+    fi
+
+    local json actual
+    json="$(get_rule_json)"
+
+    actual="$(
+        jq -r '(.sourceRanges // []) | join(",")' <<<"$json"
+    )"
+
+    if [[ -n "$actual" ]]; then
+        actual="$(canonicalize_ranges "$actual")"
+    fi
+
+    local failures=0
+
+    check_condition() {
+        local description="$1"
+        shift
+
+        if "$@"; then
+            printf 'PASS: %s\n' "$description"
+        else
+            printf 'FAIL: %s\n' "$description" >&2
+            failures=$((failures + 1))
+        fi
+    }
+
+    is_equal() {
+        [[ "$1" == "$2" ]]
+    }
+
+    jq_true() {
+        local expression="$1"
+        jq -e "$expression" <<<"$json" >/dev/null
+    }
+
+    check_condition \
+        "source ranges equal '$expected'" \
+        is_equal "$actual" "$expected"
+
+    check_condition \
+        "rule is enabled" \
+        jq_true '(.disabled // false) == false'
+
+    check_condition \
+        "direction is INGRESS" \
+        jq_true '.direction == "INGRESS"'
+
+    check_condition \
+        "rule allows only TCP port '"$PORT"'" \
+        jq_true '
+            (.denied // [] | length) == 0
+            and (.allowed // [] | length) == 1
+            and .allowed[0].IPProtocol == "tcp"
+            and (.allowed[0].ports // []) == ["'"$PORT"'"]
+        '
+
+    check_condition \
+        "target tag is exactly '$TAG'" \
+        jq_true '
+            (.targetTags // [] | sort) == ["'"$TAG"'"]
+        '
+
+    check_condition \
+        "VM has target tag '$TAG'" \
+        jq -e --arg tag "$TAG" '
+            (.tags.items // []) | index($tag) != null
+        ' <<<"$VM_JSON" >/dev/null
+
+    local effective_json
+    effective_json="$(
+        "${GCLOUD[@]}" compute instances network-interfaces \
+            get-effective-firewalls "$VM" \
+            "--zone=$ZONE" \
+            "--network-interface=$NIC" \
+            --format=json
+    )"
+
+    check_condition \
+        "managed rule appears in the VM interface's effective rules" \
+        jq -e --arg rule "$RULE" '
+            [
+                ..
+                | objects
+                | select(
+                    (.name? == $rule)
+                    or (.ruleName? == $rule)
+                )
+            ]
+            | length > 0
+        ' <<<"$effective_json" >/dev/null
+
+    if (( failures != 0 )); then
+        echo
+        echo "$failures check(s) failed." >&2
+        return 1
+    fi
+
+    echo
+    echo "Managed rule configuration is consistent."
+}
+
+audit_applicable_vpc_rules() {
+    local rules_json
+
+    rules_json="$(
+        "${GCLOUD[@]}" compute firewall-rules list \
+            --format=json
+    )"
+
+    echo "Applicable VPC ALLOW rules covering TCP port $PORT:"
+    echo
+
+    jq \
+        --arg network "$NETWORK" \
+        --argjson port "$PORT" \
+        --argjson vm_tags "$VM_TAGS_JSON" \
+        --argjson vm_service_accounts "$VM_SERVICE_ACCOUNTS_JSON" '
+        def intersects($left; $right):
+            any($left[] as $item; $right | index($item) != null);
+
+        def target_applies:
+            (.targetTags // []) as $target_tags
+            | (.targetServiceAccounts // []) as $target_accounts
+            | (
+                (
+                    ($target_tags | length) == 0
+                    and
+                    ($target_accounts | length) == 0
+                )
+                or intersects($target_tags; $vm_tags)
+                or intersects(
+                    $target_accounts;
+                    $vm_service_accounts
+                )
+            );
+
+        def port_matches($ports; $wanted):
+            ($ports | length) == 0
+            or any(
+                $ports[];
+                if test("^[0-9]+$") then
+                    tonumber == $wanted
+                elif test("^[0-9]+-[0-9]+$") then
+                    split("-")
+                    | map(tonumber)
+                    | .[0] <= $wanted
+                      and $wanted <= .[1]
+                else
+                    false
+                end
+            );
+
+        def allows_tcp_port:
+            any(
+                (.allowed // [])[];
+                (
+                    .IPProtocol == "tcp"
+                    or .IPProtocol == "6"
+                )
+                and port_matches(
+                    (.ports // []);
+                    $port
+                )
+            );
+
+        [
+            .[]
+            | select(
+                (.network | split("/")[-1]) == $network
+            )
+            | select(.direction == "INGRESS")
+            | select((.disabled // false) == false)
+            | select(target_applies)
+            | select(allows_tcp_port)
+            | {
+                name,
+                priority,
+                sourceRanges:
+                    (
+                        .sourceRanges
+                        // []
+                    ),
+                sourceTags:
+                    (
+                        .sourceTags
+                        // []
+                    ),
+                sourceServiceAccounts:
+                    (
+                        .sourceServiceAccounts
+                        // []
+                    ),
+                targetTags:
+                    (
+                        .targetTags
+                        // []
+                    ),
+                targetServiceAccounts:
+                    (
+                        .targetServiceAccounts
+                        // []
+                    ),
+                allowed
+            }
+        ]
+    ' <<<"$rules_json"
+}
+
+audit_effective_rules() {
+    echo
+    echo "All effective firewall rules for $VM/$NIC:"
+    echo
+
+    "${GCLOUD[@]}" compute instances network-interfaces \
+        get-effective-firewalls "$VM" \
+        "--zone=$ZONE" \
+        "--network-interface=$NIC" \
+        --sort-by=priority \
+        --format='table(
+            type,
+            firewall_policy_name,
+            priority,
+            action,
+            direction,
+            ip_ranges.list():label=IP_RANGES,
+            name,
+            disabled,
+            target_tags.list():label=TARGET_TAGS,
+            target_svc_acct:label=TARGET_SERVICE_ACCOUNT,
+            description
+        )'
+}
+
+audit() {
+    echo "=== Managed rule ==="
+    show_rule || true
+
+    echo
+    echo "=== Applicable VPC rules covering port $PORT ==="
+    audit_applicable_vpc_rules
+
+    echo
+    echo "=== Complete effective-firewall view ==="
+    audit_effective_rules
+
+    echo
+    echo "Audit notes:"
+    echo "  - The JSON section identifies applicable classic VPC ALLOW rules."
+    echo "  - The effective table also exposes inherited and policy-level rules."
+    echo "  - Inspect unexpected ALLOW or DENY entries by priority."
+}
+
+disable_rule() {
+    if ! rule_exists; then
+        echo "Rule '$RULE' does not exist."
+        return
+    fi
+
+    "${GCLOUD[@]}" compute firewall-rules update "$RULE" \
+        --disabled
+
+    echo "Rule '$RULE' disabled."
+    echo "Other rules may still permit TCP port $PORT."
+}
+
+delete_rule() {
+    if ! rule_exists; then
+        echo "Rule '$RULE' does not exist."
+        return
+    fi
+
+    "${GCLOUD[@]}" compute firewall-rules delete "$RULE"
+    echo "Rule '$RULE' deleted."
+}
+
+case "${1:-}" in
+    audit)
+        audit
+        ;;
+
+    show)
+        show_rule
+        ;;
+
+    check)
+        [[ $# -eq 2 ]] || {
+            usage >&2
+            exit 2
+        }
+
+        check_rule "$2"
+        ;;
+
+    set)
+        [[ $# -eq 2 ]] || {
+            usage >&2
+            exit 2
+        }
+
+        set_ranges "$2"
+        ;;
+
+    disable)
+        disable_rule
+        ;;
+
+    delete)
+        delete_rule
+        ;;
+
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

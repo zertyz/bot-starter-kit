@@ -1,6 +1,6 @@
 # Denied Constructs
 
-The rules stated here are enforced by `scripts/enforce_code_guidelines`. Keep these files in sync and use that script in CI/CD rules.
+The rules stated here are enforced by `scripts/ci/enforce_code_guidelines`. Keep these files in sync and use that script in CI/CD rules.
 
 ## Scope
 

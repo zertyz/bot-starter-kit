@@ -10,7 +10,7 @@ use crate::resources::{FRAMES, RESULT};
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, User};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, User};
 use teloxide::{
     prelude::*,
     types::{InputFile, InputMedia, InputMediaPhoto},
@@ -73,11 +73,13 @@ impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUs
                     if let Some(text) = msg.text() {
                         if let Ok(cmd) = Cmd::parse(text, "telegram_demoscene") {
                             match cmd {
-                                Cmd::Start => mt(bot.send_message(chat_id, format!("Welcome to the <b>OgreRobot's Telegram Demoscene</b>!\nPick an option:\n{}", Cmd::descriptions()))),
+                                Cmd::Start => mt(bot
+                                    .send_message(chat_id, format!("Welcome to the <b>OgreRobot's Telegram Demoscene</b>!\nPick an option:\n{}", Cmd::descriptions()))
+                                    .parse_mode(ParseMode::Html)),
                                 Cmd::Help => mt(bot.send_message(chat_id, Cmd::descriptions().to_string())),
-                                Cmd::ChatId => {
-                                    mt(bot.send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id)))
-                                }
+                                Cmd::ChatId => mt(bot
+                                    .send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id))
+                                    .parse_mode(ParseMode::Html)),
                                 Cmd::Run => mts(run_long_job(bot.clone(), chat_id)),
                                 Cmd::Render => mts(render_swap(bot.clone(), chat_id)),
                                 Cmd::Graphical | Cmd::Menu => mt(bot
@@ -126,6 +128,7 @@ impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUs
                             "mm:render" => render_swap(bot.clone(), chat_id).await?,
                             "mm:chatid" => bot
                                 .send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id))
+                                .parse_mode(ParseMode::Html)
                                 .await
                                 .map(|_| ())
                                 .map_err(|err| anyhow!("`chat_id` failed: {err}"))?,
