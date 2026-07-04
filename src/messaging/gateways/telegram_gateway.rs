@@ -48,16 +48,11 @@ pub struct TelegramGateway {
 
 impl TelegramGateway {
     pub async fn new<ProcessorType: UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> + Send + Sync + 'static>(config: BotConfig, per_user_mo_processor: ProcessorType) -> Arc<Self> {
-        unsafe {
-            std::env::set_var(
-                "TELOXIDE_TOKEN",
-                config
-                    .telegram
-                    .teloxide_token
-                    .clone(),
-            );
-        }
-        let bot = Bot::from_env(); // expects TELOXIDE_TOKEN from env -- set above so no external env setting is needed.
+        let bot = Bot::new(
+            &config
+                .telegram
+                .teloxide_token,
+        );
 
         let (teloxide_mo_producer, teloxide_stream) = async_channel::bounded(64);
         let instance = Arc::new(Self { bot: bot.clone(), teloxide_mo_producer, join_handle: Mutex::new(None) });

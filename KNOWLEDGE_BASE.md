@@ -6,7 +6,8 @@
 3. File `CLAUDE.md` contains Claude-specific instructions.
 4. File `CODE_GUIDELINES.md` contains code compliance definitions.
 5. File `CODE_PATTERNS.md` contains project-specific implementation patterns agents should honor before changing code.
-6. File `Cargo.toml` contains this Rust project's definitions.
-7. Directory `.github` contains the GitHub workflows.
-8. Directory `scripts` contains helper scripts for various parts of this project.
-9. Directory `diagrams` contains images used in the Rust docs, to visually aid the learning-curve for this project.
+6. File 'MANAGEMENT.md' contains rules about how this project is managed and should be conducted.
+7. File `Cargo.toml` contains this Rust project's definitions.
+8. Directory `.github` contains the GitHub workflows.
+9. Directory `scripts` contains helper scripts for various parts of this project.
+10. Directory `diagrams` contains images used in the Rust docs, to visually aid the learning-curve for this project.

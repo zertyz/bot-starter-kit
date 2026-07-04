@@ -36,10 +36,14 @@ pub struct TelegramConfig {
 pub enum TelegramIntegrationMode {
     Polling,
     WebHook {
+        /// Public HTTPS URL registered with Telegram
         url: String,
+        /// Telegram webhook secret sent in `X-Telegram-Bot-Api-Secret-Token`
         #[debug("{}", "[REDACTED]")]
         secret: String,
+        /// Public PEM certificate file uploaded to Telegram and served by the HTTPS webhook client.
         certificate_file: String,
+        /// Private key PEM file paired with `certificate_file`; keep it readable only by this program.
         private_key_file: String,
     },
 }

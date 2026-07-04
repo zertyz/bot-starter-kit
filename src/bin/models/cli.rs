@@ -36,6 +36,9 @@ pub struct CliOptions {
 
     /// If present, specifies that `teloxide` should communicate with the Telegram servers through the "WebHook" mode,
     /// and that the given value represents the https address that reaches this node & program.
+    ///
+    /// The gateway currently binds `0.0.0.0` to this URL's port.
+    ///
     /// See also `--telegram_webhook_secret`, which should be specified for extra-security.
     ///
     /// If absent, "Polling" mode will be used -- ideal for testing & staging: more portable, but less reliable.
@@ -44,17 +47,20 @@ pub struct CliOptions {
 
     /// If present, specifies that `teloxide` should communicate with the Telegram servers through the "WebHook" mode,
     /// and that the given value specifies the token to be added to each call header, for extra security.
+    ///
+    /// Generated high-entropy value using Telegram-supported characters: `A-Z`, `a-z`, `0-9`, `_`, and `-`.
+    ///
     /// You also need to specify `--telegram_webhook_url`.
     ///
     /// If absent, "Polling" mode will be used -- ideal for testing & staging: more portable, but less reliable.
     #[clap(long, env = "TELOXIDE_WEBHOOK_SECRET")]
     pub telegram_webhook_secret: Option<String>,
 
-    /// Public PEM certificate file used by the Telegram webhook HTTPS server.
+    /// Public PEM certificate file uploaded to Telegram and served by the HTTPS webhook client.
     #[clap(long, env = "TELOXIDE_WEBHOOK_CERTIFICATE_FILE")]
     pub telegram_webhook_certificate_file: Option<String>,
 
-    /// Private key PEM file used by the Telegram webhook HTTPS server.
+    /// Private key PEM file paired with `--telegram_webhook_certificate_file`; keep it readable only by this program.
     #[clap(long, env = "TELOXIDE_WEBHOOK_PRIVATE_KEY_FILE")]
     pub telegram_webhook_private_key_file: Option<String>,
 
