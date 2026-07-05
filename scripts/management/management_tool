@@ -35,6 +35,7 @@ SUPPORTING_FILES = [
     "INCIDENTS.md",
     "EXPERIMENTS.md",
     "TRACEABILITY.md",
+    "TOOLING.md",
 ]
 
 VALID_STATES = [
@@ -73,6 +74,23 @@ VERIFICATION_COMMANDS = [
     "cargo fmt --all -- --check",
     "cargo clippy --all-targets --all-features -- -D warnings",
     "cargo test --verbose",
+]
+
+REVIEW_RULE_REFERENCES = [
+    "management/DEFINITION_OF_READY_DONE.md",
+    "management/TRACEABILITY.md",
+    "CODE_GUIDELINES.md",
+    "CODE_PATTERNS.md",
+]
+
+REVIEW_CHECKLIST = [
+    "Does the implementation satisfy the governing requirement and the backlog work-item description?",
+    "Did implementation reveal requirement drift that must be reported before merge?",
+    "Are new or changed behaviors covered by tests, benchmarks, operational evidence, or explicit review evidence?",
+    "Does the change preserve the responsibility boundaries in CODE_PATTERNS.md?",
+    "Does production Rust avoid the denied constructs in CODE_GUIDELINES.md?",
+    "Is any new non-blocking debt documented with justification and deadline?",
+    "Does the backlog state match the real review phase?",
 ]
 
 SECTION_RE = re.compile(r'^#\s+(?P<title>.+?)\s+"(?P<abbr>[A-Za-z][A-Za-z0-9]*)"\s*$')
@@ -427,6 +445,26 @@ def changed_files(base_ref: str | None) -> tuple[list[str], list[str]]:
         and (path in tracked or (REPO_ROOT / path).exists())
     ]
     return sorted(current_files), notes
+
+
+def diff_stat(base_ref: str | None) -> tuple[list[str], list[str]]:
+    sections: list[str] = []
+    notes: list[str] = []
+    if base_ref:
+        if git_ref_exists(base_ref):
+            branch_stat = git_output(["diff", "--stat", "--compact-summary", f"{base_ref}...HEAD"])
+            if branch_stat:
+                sections.append(f"Committed branch diff against {base_ref}:\n{branch_stat}")
+        else:
+            notes.append(f"Base ref {base_ref} does not exist locally; committed branch diff stat was skipped.")
+
+    worktree_stat = git_output(["diff", "--stat", "--compact-summary", "HEAD"])
+    if worktree_stat:
+        sections.append(f"Uncommitted worktree diff against HEAD:\n{worktree_stat}")
+    staged_stat = git_output(["diff", "--cached", "--stat", "--compact-summary"])
+    if staged_stat:
+        sections.append(f"Staged diff:\n{staged_stat}")
+    return sections, notes
 
 
 def tracked_files() -> list[str]:
@@ -1019,6 +1057,93 @@ def cmd_verification_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    base_ref = args.base or "origin/main"
+    files, file_notes = changed_files(base_ref)
+    stat_sections, stat_notes = diff_stat(base_ref)
+    changed_tests = [path for path in files if test_evidence_file(path)]
+    changed_benchmarks = [path for path in files if benchmark_evidence_file(path)]
+    operations_files = [path for path in files if operations_evidence_file(path)]
+    security_files = [path for path in files if security_evidence_file(path)]
+    recovery_files = [path for path in files if recovery_evidence_file(path)]
+    product_files = [path for path in files if product_evidence_file(path)]
+
+    print("Review Packet")
+    print("=============")
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+    print()
+    print(f"Diff base: {base_ref}")
+    for note in [*file_notes, *stat_notes]:
+        print(f"Note: {note}")
+    if item.state not in {"Started", "In Code Review", "QA"}:
+        print(f"State note: {item.id} is currently {item.state}; normal implementation review usually happens after Started.")
+    print()
+
+    if files:
+        print("Changed files:")
+        for path in limited(files, args.limit):
+            print(f"  - {path}")
+    else:
+        print("Changed files: none detected")
+    print()
+
+    if stat_sections:
+        print("Diff stats:")
+        for section in stat_sections:
+            print(section)
+    else:
+        print("Diff stats: none detected")
+    print()
+
+    print("Evidence summary:")
+    print(f"  Functional tests changed: {len(changed_tests)}")
+    print(f"  Benchmarks changed:       {len(changed_benchmarks)}")
+    print(f"  Security evidence:        {len(security_files)}")
+    print(f"  Operations evidence:      {len(operations_files)}")
+    print(f"  Recovery evidence:        {len(recovery_files)}")
+    print(f"  Product evidence:         {len(product_files)}")
+    print()
+
+    print("Rule references:")
+    for path in REVIEW_RULE_REFERENCES:
+        print(f"  - {path}")
+    print()
+
+    print("Review checklist:")
+    for item_text in REVIEW_CHECKLIST:
+        print(f"  - {item_text}")
+    print()
+
+    print("Suggested commands before accepting review:")
+    for command in VERIFICATION_COMMANDS:
+        print(f"  - {command}")
+    if changed_benchmarks or any(path.startswith(("src/db/", "src/messaging/", "src/plot/")) for path in files):
+        print("  - cargo bench --benches")
+    print()
+
+    print("AI review prompt:")
+    print(
+        f"Review {item.id} against {item.requirement_id}. Start with concrete bugs, regressions, missing tests, "
+        "requirement drift, and violations of CODE_GUIDELINES.md or CODE_PATTERNS.md. Treat this packet as context, "
+        "not as proof of correctness."
+    )
+    return 0
+
+
 def cmd_advance_state(args: argparse.Namespace) -> int:
     model = load_model()
     if model.errors:
@@ -1132,6 +1257,12 @@ def build_parser() -> argparse.ArgumentParser:
     verification_check.add_argument("--base", help="Base git ref for changed-file detection. Default: origin/main.")
     verification_check.add_argument("--limit", type=int, default=8, help="Maximum evidence paths to print per section. Default: 8.")
     verification_check.set_defaults(func=cmd_verification_check)
+
+    review = subparsers.add_parser("review", help="Print a code-review packet for a work item or branch.")
+    review.add_argument("ref", nargs="?", help="Work item id or branch name. Defaults to the current branch.")
+    review.add_argument("--base", help="Base git ref for changed-file and diff-stat detection. Default: origin/main.")
+    review.add_argument("--limit", type=int, default=8, help="Maximum changed paths to print. Default: 8.")
+    review.set_defaults(func=cmd_review)
 
     return parser
 

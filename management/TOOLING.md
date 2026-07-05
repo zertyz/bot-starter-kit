@@ -49,3 +49,13 @@ scripts/management/verification_check Luiz/ER.MCP.02.a-001 --base origin/main
 ```
 
 The command inventories changed files and likely verification evidence for functional behavior, performance, security, operations, maintainability, disaster recovery, and product behavior. It reports evidence gaps; it does not decide acceptance.
+
+
+## Prepare a Review Packet
+
+```bash
+scripts/management/review Luiz/ER.MCP.02.a-001
+scripts/management/review Luiz/ER.MCP.02.a-001 --base origin/main
+```
+
+The command prints the governing requirement, backlog item, changed files, diff statistics, evidence summary, rule references, and a review checklist. It prepares review context; it does not approve the change.

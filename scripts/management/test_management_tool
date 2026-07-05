@@ -20,6 +20,7 @@ SUPPORTING_FILES = [
     "INCIDENTS.md",
     "EXPERIMENTS.md",
     "TRACEABILITY.md",
+    "TOOLING.md",
 ]
 
 
@@ -150,6 +151,12 @@ class ManagementToolTest(unittest.TestCase):
         self.assertIn("Verification Check", check.stdout)
         self.assertIn("Functional behavior: FOUND", check.stdout)
         self.assertIn("src/lib.rs", check.stdout)
+
+    def test_review_prints_packet_and_checklist(self) -> None:
+        review = self.tool_run("review", "Luiz/EN.MCP.01-001")
+        self.assertIn("Review Packet", review.stdout)
+        self.assertIn("Review checklist:", review.stdout)
+        self.assertIn("AI review prompt:", review.stdout)
 
 
 if __name__ == "__main__":
