@@ -22,6 +22,17 @@ scripts/management/management_status --html public/management
 The command prints a project-management status summary and can render a static HTML dashboard. GitHub Pages publishes the dashboard next to Rust docs, coverage, and benchmark reports.
 
 
+## Local Management GUI
+
+```bash
+scripts/management/gui
+scripts/management/gui --no-browser
+scripts/management/gui --port 8780
+```
+
+The GUI runs a localhost-only browser console over the same management files and helper commands. It shows requirements, backlog work, ledgers, diagrams, status metrics, and workflow forms for planning, state changes, evidence links, releases, branch checks, and ledger entries. Browser actions are allowlisted by the Python server; they do not execute arbitrary shell commands.
+
+
 ## Architecture Diagrams
 
 ```bash
