@@ -61,6 +61,9 @@ jobs:
         cp -r target/doc/. public/doc/
         cp -r target/criterion/. public/benchmarks/
         scripts/management/management_status --html public/management
+        scripts/management/diagram_architecture_real --html public/management/diagrams
+        scripts/management/diagram_architecture_planned --html public/management/diagrams
+        scripts/management/diagram_module_dependencies --html public/management/diagrams
         node <<'NODE'
         const fs = require("fs");
         const report = JSON.parse(fs.readFileSync("target/llvm-cov/summary.json", "utf8"));

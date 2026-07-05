@@ -22,6 +22,18 @@ scripts/management/management_status --html public/management
 The command prints a project-management status summary and can render a static HTML dashboard. GitHub Pages publishes the dashboard next to Rust docs, coverage, and benchmark reports.
 
 
+## Architecture Diagrams
+
+```bash
+scripts/management/diagram_architecture_real
+scripts/management/diagram_architecture_planned
+scripts/management/diagram_module_dependencies
+scripts/management/diagram_module_dependencies --scope messaging
+```
+
+The diagram commands render static SVG files under `public/management/diagrams` by default. `diagram_architecture_real` derives the current architecture from Rust source dependencies. `diagram_architecture_planned` overlays open backlog work in blue and requirements with no mapped work in orange. `diagram_module_dependencies` shows Rust module-to-module references; `--scope` narrows the graph while keeping directly connected modules visible.
+
+
 ## Advance Backlog State
 
 ```bash

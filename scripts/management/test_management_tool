@@ -108,6 +108,37 @@ class ManagementToolTest(unittest.TestCase):
         for name in SUPPORTING_FILES:
             (self.management / name).write_text(f"# {name}\n", encoding="utf-8")
 
+    def write_rust_architecture_files(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "bot-starter-kit"\nversion = "0.1.0"\n\n[lib]\nname = "bot_starter_kit"\n',
+            encoding="utf-8",
+        )
+        src = self.root / "src"
+        (src / "bin").mkdir(parents=True)
+        (src / "logic").mkdir(parents=True)
+        (src / "messaging").mkdir(parents=True)
+        (src / "models").mkdir(parents=True)
+        (src / "bin" / "bot_starter_kit.rs").write_text(
+            "use bot_starter_kit::{logic::telegram_demoscene::run, models::config::Config};\nfn main() {}\n",
+            encoding="utf-8",
+        )
+        (src / "lib.rs").write_text(
+            "pub mod logic;\npub mod messaging;\npub mod models;\n",
+            encoding="utf-8",
+        )
+        (src / "logic" / "mod.rs").write_text("pub mod telegram_demoscene;\n", encoding="utf-8")
+        (src / "logic" / "telegram_demoscene.rs").write_text(
+            "use crate::messaging::user_router;\nuse crate::models::config;\npub fn run() {}\n",
+            encoding="utf-8",
+        )
+        (src / "messaging" / "mod.rs").write_text("pub mod user_router;\n", encoding="utf-8")
+        (src / "messaging" / "user_router.rs").write_text(
+            "use crate::models::config;\npub fn route() {}\n",
+            encoding="utf-8",
+        )
+        (src / "models" / "mod.rs").write_text("pub mod config;\n", encoding="utf-8")
+        (src / "models" / "config.rs").write_text("pub struct Config;\n", encoding="utf-8")
+
     def init_git(self) -> None:
         run(self.root, ["git", "init", "-b", "main"])
         run(self.root, ["git", "config", "user.email", "test@example.invalid"])
@@ -237,7 +268,33 @@ class ManagementToolTest(unittest.TestCase):
         self.assertIn("HTML dashboard:", status.stdout)
         dashboard = (dashboard_dir / "index.html").read_text(encoding="utf-8")
         self.assertIn("Management Dashboard", dashboard)
+        self.assertIn("Architecture Diagrams", dashboard)
         self.assertIn("Traceability Gaps", dashboard)
+
+    def test_diagram_commands_render_static_svg(self) -> None:
+        self.write_rust_architecture_files()
+        diagram_dir = self.root / "public" / "management" / "diagrams"
+        real = self.tool_run("diagram-architecture-real", "--html", str(diagram_dir))
+        planned = self.tool_run("diagram-architecture-planned", "--html", str(diagram_dir))
+        dependencies = self.tool_run("diagram-module-dependencies", "--html", str(diagram_dir))
+
+        self.assertIn("Current Architecture Diagram", real.stdout)
+        self.assertIn("Planned Architecture Diagram", planned.stdout)
+        self.assertIn("Module Dependencies Diagram", dependencies.stdout)
+
+        real_svg = (diagram_dir / "architecture-real.svg").read_text(encoding="utf-8")
+        planned_svg = (diagram_dir / "architecture-planned.svg").read_text(encoding="utf-8")
+        dependency_svg = (diagram_dir / "module-dependencies.svg").read_text(encoding="utf-8")
+        index_html = (diagram_dir / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("Current Architecture", real_svg)
+        self.assertIn("Messaging Layer", real_svg)
+        self.assertIn("EN.MCP.01-001", planned_svg)
+        self.assertIn("E.MCP.02.b", planned_svg)
+        self.assertIn("bin::bot_starter_kit", dependency_svg)
+        self.assertIn("crate::logic::telegram_demoscene", dependency_svg)
+        self.assertIn("crate::messaging::user_router", dependency_svg)
+        self.assertIn("Current architecture", index_html)
 
     def test_trace_requirement_and_link_evidence(self) -> None:
         src = self.root / "src"
