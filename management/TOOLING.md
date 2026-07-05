@@ -61,6 +61,17 @@ scripts/management/draft_plan E.MCP.02.b --write
 The command proposes the next syntactically valid backlog entry for a requirement and prints the existing work already tied to that requirement. By default it is a dry run; `--write` appends the entry under `Under Planning`. Use `--title`, `--motivation`, `--body-line`, `--date`, and `--allow-existing-open` when the default draft is not the intended plan.
 
 
+## Audit Requirements
+
+```bash
+scripts/management/audit_requirements
+scripts/management/audit_requirements --document E
+scripts/management/audit_requirements --strict
+```
+
+The command reports local heuristic findings across requirements, backlog links, and `TRACEABILITY.md`: missing or thin requirement text, unbounded wording, implementation-heavy wording, unclear actors, likely compound scope, missing work, and missing traceability. It is an audit aid; market fit, competitor analysis, code-semantic drift, and final wording remain human PM/manager decisions.
+
+
 ## Check Verification Evidence
 
 ```bash

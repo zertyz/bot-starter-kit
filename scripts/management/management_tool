@@ -102,6 +102,74 @@ MOTIVATION_DESCRIPTIONS = {
 
 VALID_MOTIVATIONS = list(MOTIVATION_DESCRIPTIONS)
 
+AUDIT_SEVERITIES = ["BLOCKER", "REVIEW", "INFO"]
+
+UNBOUNDED_REQUIREMENT_TERMS = [
+    "all",
+    "any",
+    "appropriate",
+    "easy",
+    "efficient",
+    "fast",
+    "robust",
+    "scalable",
+    "secure",
+    "simple",
+    "transparent",
+    "transparently",
+    "up-to-date",
+    "whatever",
+]
+
+IMPLEMENTATION_REQUIREMENT_TERMS = [
+    "/examples",
+    "backend",
+    "crate",
+    "directory",
+    "facade",
+    "file",
+    "folder",
+    "implementation",
+    "module",
+    "rust",
+    "src/",
+]
+
+ACTOR_TERMS = [
+    "admin",
+    "agent",
+    "application",
+    "bot",
+    "developer",
+    "engineer",
+    "gateway",
+    "human",
+    "logic",
+    "manager",
+    "operator",
+    "platform",
+    "service",
+    "system",
+    "user",
+]
+
+FAILURE_BEHAVIOR_TERMS = [
+    "cannot",
+    "crash",
+    "degradation",
+    "error",
+    "fail",
+    "failure",
+    "fallback",
+    "if",
+    "invalid",
+    "restart",
+    "restore",
+    "unless",
+    "unavailable",
+    "when",
+]
+
 SECTION_RE = re.compile(r'^#\s+(?P<title>.+?)\s+"(?P<abbr>[A-Za-z][A-Za-z0-9]*)"\s*$')
 REQUIREMENT_HEADING_RE = re.compile(r"^#{2,6}\s+(?P<number>\d{2})(?P<subtopics>(?:\.[a-z]+)*)\)\s+(?P<title>.+?)\s*$")
 STATE_HEADING_RE = re.compile(r'^#\s+(?P<state>"?[^"#]+"?)\s*$')
@@ -197,6 +265,17 @@ class ManagementModel:
 
     def warning(self, path: Path, line: int, message: str) -> None:
         self.warnings.append(Issue("WARN", path, line, message))
+
+
+@dataclasses.dataclass(frozen=True)
+class AuditFinding:
+    severity: str
+    requirement: Requirement
+    category: str
+    message: str
+
+    def format(self) -> str:
+        return f"{self.severity}: {self.requirement.id}: {self.category}: {self.message} ({relative(self.requirement.path)}:{self.requirement.line})"
 
 
 def relative(path: Path) -> str:
@@ -830,6 +909,136 @@ def open_work_items(items: list[WorkItem]) -> list[WorkItem]:
     return [item for item in items if item.state not in {"Merged", "Rolled Out", "Rejected", "Cancelled"}]
 
 
+def words_in(text: str) -> list[str]:
+    return re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", text.lower())
+
+
+def requirement_text(requirement: Requirement) -> str:
+    return f"{requirement.title}\n{requirement.body}"
+
+
+def normalized_requirement_text(requirement: Requirement) -> str:
+    return " ".join(words_in(requirement_text(requirement)))
+
+
+def requirement_work_items(model: ManagementModel, requirement: Requirement) -> list[WorkItem]:
+    related_prefix = f"{requirement.id}."
+    return sorted(
+        [
+            item
+            for item in model.work_items.values()
+            if item.requirement_id == requirement.id or (not requirement.subtopics and item.requirement_id.startswith(related_prefix))
+        ],
+        key=lambda item: item.id,
+    )
+
+
+def traceability_status(requirement: Requirement, traceability: str) -> str:
+    if requirement.id in traceability:
+        return "direct"
+    if not requirement.subtopics and f"{requirement.id}." in traceability:
+        return "child"
+    if f"{requirement.document}.{requirement.section}.*" in traceability:
+        return "area"
+    return "missing"
+
+
+def contains_term(text: str, term: str) -> bool:
+    if any(character in term for character in "/-"):
+        return term in text
+    return re.search(rf"\b{re.escape(term)}\b", text) is not None
+
+
+def matching_terms(text: str, terms: list[str]) -> list[str]:
+    lowered = text.lower()
+    return [term for term in terms if contains_term(lowered, term)]
+
+
+def likely_compound_requirement(requirement: Requirement) -> bool:
+    body = requirement.body
+    bullet_lines = [line for line in body.splitlines() if re.match(r"\s*(?:[-*]|\d+\.)\s+", line)]
+    obligation_markers = len(re.findall(r"\b(?:and|also|or)\b", body.lower()))
+    return len(bullet_lines) >= 4 or obligation_markers >= 5
+
+
+def audit_requirement(
+    model: ManagementModel,
+    requirement: Requirement,
+    traceability: str,
+    duplicate_titles: dict[str, list[Requirement]],
+    duplicate_bodies: dict[str, list[Requirement]],
+) -> list[AuditFinding]:
+    findings: list[AuditFinding] = []
+    text = requirement_text(requirement)
+    body = requirement.body.strip()
+    body_words = words_in(body)
+    work_items = requirement_work_items(model, requirement)
+    completed_items = completed_work_items(work_items)
+    active_items = open_work_items(work_items)
+
+    def add(severity: str, category: str, message: str) -> None:
+        findings.append(AuditFinding(severity, requirement, category, message))
+
+    if not body or body.lower() in {"tbd", "todo"}:
+        add("BLOCKER", "clarity", "requirement body is empty or TBD")
+    elif len(body_words) < 8:
+        add("REVIEW", "clarity", "requirement body is very short")
+
+    unbounded = matching_terms(text, UNBOUNDED_REQUIREMENT_TERMS)
+    if unbounded:
+        add("REVIEW", "boundedness", f"contains broad terms that need explicit bounds: {', '.join(unbounded[:5])}")
+
+    implementation_terms = matching_terms(text, IMPLEMENTATION_REQUIREMENT_TERMS)
+    if implementation_terms:
+        add("REVIEW", "outcome-focus", f"mentions implementation terms; confirm this is intended: {', '.join(implementation_terms[:5])}")
+
+    if not matching_terms(text, ACTOR_TERMS):
+        add("REVIEW", "actor", "actor or responsible subject is not obvious")
+
+    if likely_compound_requirement(requirement):
+        add("REVIEW", "scope", "may combine multiple obligations that could need separate sub-requirements")
+
+    if re.search(r"\b(?:must|should|needs?|allow|support|persist|store|route)\b", text.lower()) and not matching_terms(text, FAILURE_BEHAVIOR_TERMS):
+        add("INFO", "failure-behavior", "no explicit failure or unavailable-path behavior detected")
+
+    title_key = " ".join(words_in(requirement.title))
+    title_duplicates = duplicate_titles.get(title_key, [])
+    if title_key and len(title_duplicates) > 1:
+        others = ", ".join(item.id for item in title_duplicates if item.id != requirement.id)
+        add("REVIEW", "redundancy", f"title matches another requirement: {others}")
+
+    body_key = " ".join(body_words)
+    body_duplicates = duplicate_bodies.get(body_key, [])
+    if body_key and len(body_key) > 40 and len(body_duplicates) > 1:
+        others = ", ".join(item.id for item in body_duplicates if item.id != requirement.id)
+        add("REVIEW", "redundancy", f"body matches another requirement: {others}")
+
+    if not work_items:
+        add("REVIEW", "planning", "no backlog work item maps to this requirement")
+    elif not active_items and not completed_items:
+        add("REVIEW", "planning", "only rejected or cancelled work maps to this requirement")
+
+    status = traceability_status(requirement, traceability)
+    if status == "missing":
+        add("REVIEW", "traceability", "not mentioned in TRACEABILITY.md")
+    elif status == "area":
+        add("REVIEW", "traceability", "listed only through an unmapped requirement area in TRACEABILITY.md")
+
+    if work_items and not completed_items:
+        add("INFO", "evidence", "no merged or rolled-out work item maps to this requirement yet")
+
+    return findings
+
+
+def duplicate_requirement_groups(requirements: list[Requirement], key_func) -> dict[str, list[Requirement]]:
+    groups: dict[str, list[Requirement]] = {}
+    for requirement in requirements:
+        key = key_func(requirement)
+        if key:
+            groups.setdefault(key, []).append(requirement)
+    return {key: values for key, values in groups.items() if len(values) > 1}
+
+
 def issue_line(severity: str, message: str) -> str:
     return f"{severity}: {message}"
 
@@ -1237,6 +1446,59 @@ def cmd_draft_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_audit_requirements(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    requirements = sorted(model.requirements.values(), key=lambda requirement: requirement.id)
+    if args.document:
+        requirements = [requirement for requirement in requirements if requirement.document == args.document]
+
+    traceability_path = MANAGEMENT_DIR / "TRACEABILITY.md"
+    traceability = traceability_path.read_text(encoding="utf-8") if traceability_path.exists() else ""
+    duplicate_titles = duplicate_requirement_groups(requirements, lambda requirement: " ".join(words_in(requirement.title)))
+    duplicate_bodies = duplicate_requirement_groups(requirements, lambda requirement: " ".join(words_in(requirement.body)))
+
+    findings: list[AuditFinding] = []
+    for requirement in requirements:
+        findings.extend(audit_requirement(model, requirement, traceability, duplicate_titles, duplicate_bodies))
+
+    severity_order = {severity: index for index, severity in enumerate(AUDIT_SEVERITIES)}
+    findings.sort(key=lambda finding: (severity_order.get(finding.severity, 99), finding.requirement.id, finding.category))
+    counts = {severity: sum(1 for finding in findings if finding.severity == severity) for severity in AUDIT_SEVERITIES}
+
+    print("Requirement Audit")
+    print("=================")
+    if args.document:
+        print(f"Document:             {args.document} -- {REQUIREMENT_FILES[args.document]}")
+    print(f"Requirements checked: {len(requirements)}")
+    print(f"Work items:           {len(model.work_items)}")
+    print(f"Traceability source:  {relative(traceability_path)}")
+    print()
+    print("Summary:")
+    for severity in AUDIT_SEVERITIES:
+        print(f"  {severity}: {counts[severity]}")
+    print()
+    print("Findings:")
+    if not findings:
+        print("  - none")
+    else:
+        printable = findings if args.limit <= 0 else findings[: args.limit]
+        for finding in printable:
+            print(f"  - {finding.format()}")
+        if args.limit > 0 and len(findings) > args.limit:
+            print(f"  - ... {len(findings) - args.limit} more")
+    print()
+    print("Scope note: this is a local heuristic audit over management files. Market fit, competitor analysis, code-semantic drift, and final requirement wording remain human PM/manager decisions.")
+
+    if args.strict and (counts["BLOCKER"] or counts["REVIEW"]):
+        return 1
+    return 0
+
+
 def cmd_verification_check(args: argparse.Namespace) -> int:
     model = load_model()
     if model.errors:
@@ -1530,6 +1792,16 @@ def build_parser() -> argparse.ArgumentParser:
     draft_plan.add_argument("--write", action="store_true", help="Append the proposed entry under Under Planning.")
     draft_plan.add_argument("--allow-existing-open", action="store_true", help="Allow --write when the requirement already has open work.")
     draft_plan.set_defaults(func=cmd_draft_plan)
+
+    audit_requirements = subparsers.add_parser(
+        "audit-requirements",
+        aliases=["audit_requirements"],
+        help="Run a heuristic audit across requirements, backlog links, and traceability.",
+    )
+    audit_requirements.add_argument("--document", choices=sorted(REQUIREMENT_FILES), help="Restrict the audit to one requirement document.")
+    audit_requirements.add_argument("--limit", type=int, default=80, help="Maximum findings to print. Use 0 for all findings.")
+    audit_requirements.add_argument("--strict", action="store_true", help="Exit non-zero when BLOCKER or REVIEW findings exist.")
+    audit_requirements.set_defaults(func=cmd_audit_requirements)
 
     verification_check = subparsers.add_parser(
         "verification-check",
