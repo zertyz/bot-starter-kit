@@ -100,6 +100,8 @@ MOTIVATION_DESCRIPTIONS = {
     "X": "experiment, prototype, R&D, or spike",
 }
 
+VALID_MOTIVATIONS = list(MOTIVATION_DESCRIPTIONS)
+
 SECTION_RE = re.compile(r'^#\s+(?P<title>.+?)\s+"(?P<abbr>[A-Za-z][A-Za-z0-9]*)"\s*$')
 REQUIREMENT_HEADING_RE = re.compile(r"^#{2,6}\s+(?P<number>\d{2})(?P<subtopics>(?:\.[a-z]+)*)\)\s+(?P<title>.+?)\s*$")
 STATE_HEADING_RE = re.compile(r'^#\s+(?P<state>"?[^"#]+"?)\s*$')
@@ -824,6 +826,10 @@ def completed_work_items(items: list[WorkItem]) -> list[WorkItem]:
     return [item for item in items if item.state in {"Merged", "Rolled Out"}]
 
 
+def open_work_items(items: list[WorkItem]) -> list[WorkItem]:
+    return [item for item in items if item.state not in {"Merged", "Rolled Out", "Rejected", "Cancelled"}]
+
+
 def issue_line(severity: str, message: str) -> str:
     return f"{severity}: {message}"
 
@@ -1098,6 +1104,136 @@ def cmd_evaluate_plan(args: argparse.Namespace) -> int:
     print()
     print(f"Verdict: {verdict}")
     print("Scope note: this command checks structural planning coherence. Product, technical, and schedule judgment remain human decisions.")
+    return 0
+
+
+def next_work_sequence(items: list[WorkItem]) -> str:
+    highest = 0
+    for item in items:
+        highest = max(highest, int(item.sequence))
+    if highest >= 999:
+        raise ValueError("no available three-digit work sequence remains for this requirement")
+    return f"{highest + 1:03d}"
+
+
+def validate_work_sequence(raw_sequence: str) -> str:
+    if not re.fullmatch(r"\d{3}", raw_sequence):
+        raise ValueError(f"invalid work sequence {raw_sequence}; expected three digits")
+    return raw_sequence
+
+
+def default_work_motivation(items: list[WorkItem]) -> str:
+    if completed_work_items(items):
+        return "R"
+    return "N"
+
+
+def default_work_title(requirement: Requirement, motivation: str) -> str:
+    if motivation == "R":
+        return f"Revisit {requirement.title}"
+    if motivation == "F":
+        return f"Fix {requirement.title}"
+    if motivation == "X":
+        return f"Explore {requirement.title}"
+    return f"Implement {requirement.title}"
+
+
+def draft_work_item_id(requirement: Requirement, motivation: str, sequence: str) -> str:
+    return f"{requirement.document}{motivation}.{requirement.section}.{requirement.number}{requirement.subtopics}-{sequence}"
+
+
+def draft_work_entry(requirement: Requirement, work_item_id: str, title: str, state_date: str, body_lines: list[str]) -> list[str]:
+    body = body_lines or [
+        f"1. Confirm the implementation boundary for `{requirement.id}`.",
+        "2. Implement the smallest coherent change that satisfies that boundary.",
+        "3. Update verification evidence and traceability before review.",
+    ]
+    return [
+        f"## {work_item_id} -- {title}",
+        *body,
+        f"==> Under Planning: {state_date};",
+    ]
+
+
+def append_under_planning_entry(path: Path, entry: list[str]) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = ensure_state_section(lines, "Under Planning")
+    insert_index = insertion_index_for_state(lines, "Under Planning")
+    entry_lines = [f"{line}\n" for line in entry]
+    lines[insert_index:insert_index] = ["\n", *entry_lines, "\n"]
+    path.write_text("".join(lines), encoding="utf-8")
+
+
+def cmd_draft_plan(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    requirement = model.requirements.get(args.requirement_id)
+    if requirement is None:
+        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
+        return 1
+
+    try:
+        state_date = validate_iso_date(args.date or date.today().isoformat())
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    existing_items = sorted(
+        [item for item in model.work_items.values() if item.requirement_id == requirement.id],
+        key=lambda item: item.id,
+    )
+    active_items = open_work_items(existing_items)
+    motivation = args.motivation or default_work_motivation(existing_items)
+    try:
+        sequence = validate_work_sequence(args.sequence) if args.sequence else next_work_sequence(existing_items)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    work_item_id = draft_work_item_id(requirement, motivation, sequence)
+    if work_item_id in model.work_items:
+        print(f"error: {work_item_id} already exists", file=sys.stderr)
+        return 1
+
+    if args.write and active_items and not args.allow_existing_open:
+        print(
+            f"error: {requirement.id} already has open work; pass --allow-existing-open if this is an intentional sibling plan",
+            file=sys.stderr,
+        )
+        return 1
+
+    title = args.title or default_work_title(requirement, motivation)
+    entry = draft_work_entry(requirement, work_item_id, title, state_date, args.body_line)
+
+    print("Draft Plan")
+    print("==========")
+    print_requirement(requirement)
+    print()
+    print("Existing work for this requirement:")
+    if existing_items:
+        for item in existing_items:
+            print(f"  - {item.id}: {item.state} -- {item.title}")
+    else:
+        print("  - none")
+    print()
+    print(f"Backlog file: {relative(MANAGEMENT_DIR / BACKLOG_FILES[requirement.document])}")
+    print(f"Motivation:  {motivation} -- {MOTIVATION_DESCRIPTIONS[motivation]}")
+    print()
+    print("Proposed backlog entry:")
+    for line in entry:
+        print(line)
+
+    if not args.write:
+        print()
+        print("Dry run: no backlog file was changed. Re-run with --write to append this entry under Under Planning.")
+        return 0
+
+    append_under_planning_entry(MANAGEMENT_DIR / BACKLOG_FILES[requirement.document], entry)
+    print()
+    print(f"Written: {work_item_id} was appended under Under Planning.")
     return 0
 
 
@@ -1379,6 +1515,21 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_plan.add_argument("ref", help="Work item id or branch name.")
     evaluate_plan.add_argument("--user", help="Current responsible user for owner validation.")
     evaluate_plan.set_defaults(func=cmd_evaluate_plan)
+
+    draft_plan = subparsers.add_parser(
+        "draft-plan",
+        aliases=["draft_plan"],
+        help="Draft an Under Planning backlog entry for a requirement.",
+    )
+    draft_plan.add_argument("requirement_id", help="Requirement id, such as E.MCP.02.b.")
+    draft_plan.add_argument("--motivation", choices=VALID_MOTIVATIONS, help="Work motivation. Defaults to N, or R when completed work already exists.")
+    draft_plan.add_argument("--sequence", help="Three-digit work sequence. Defaults to the next available sequence for the requirement.")
+    draft_plan.add_argument("--title", help="Backlog item title. Defaults to a title derived from the requirement.")
+    draft_plan.add_argument("--body-line", action="append", default=[], help="Backlog body line. May be passed more than once.")
+    draft_plan.add_argument("--date", help="Under Planning date in YYYY-MM-DD. Defaults to today.")
+    draft_plan.add_argument("--write", action="store_true", help="Append the proposed entry under Under Planning.")
+    draft_plan.add_argument("--allow-existing-open", action="store_true", help="Allow --write when the requirement already has open work.")
+    draft_plan.set_defaults(func=cmd_draft_plan)
 
     verification_check = subparsers.add_parser(
         "verification-check",

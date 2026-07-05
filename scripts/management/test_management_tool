@@ -67,6 +67,10 @@ class ManagementToolTest(unittest.TestCase):
                 ## 02.a) Common MO and MT Models
 
                 Common models exist.
+
+                ## 02.b) Platform inquiry
+
+                Platform features can be queried.
                 """
             ),
             encoding="utf-8",
@@ -117,7 +121,7 @@ class ManagementToolTest(unittest.TestCase):
 
     def test_lint_and_show_work(self) -> None:
         lint = self.tool_run("lint")
-        self.assertIn("Requirements: 4", lint.stdout)
+        self.assertIn("Requirements: 5", lint.stdout)
         self.assertIn("Work items:   2", lint.stdout)
         show = self.tool_run("show-work", "ER.MCP.02.a-001")
         self.assertIn("Requirement: E.MCP.02.a", show.stdout)
@@ -147,6 +151,28 @@ class ManagementToolTest(unittest.TestCase):
         self.assertIn("Plan Evaluation", evaluation.stdout)
         self.assertIn("Sibling work for the same requirement:", evaluation.stdout)
         self.assertIn("Verdict:", evaluation.stdout)
+
+    def test_draft_plan_dry_run_does_not_write(self) -> None:
+        draft = self.tool_run("draft-plan", "E.MCP.02.b", "--date", "2026-07-08")
+        self.assertIn("Draft Plan", draft.stdout)
+        self.assertIn("## EN.MCP.02.b-001 -- Implement Platform inquiry", draft.stdout)
+        self.assertIn("Dry run: no backlog file was changed.", draft.stdout)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertNotIn("EN.MCP.02.b-001", backlog)
+
+    def test_draft_plan_write_appends_under_planning(self) -> None:
+        draft = self.tool_run("draft-plan", "E.MCP.02.b", "--date", "2026-07-08", "--write")
+        self.assertIn("Written: EN.MCP.02.b-001 was appended under Under Planning.", draft.stdout)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertIn("# Under Planning", backlog)
+        self.assertIn("## EN.MCP.02.b-001 -- Implement Platform inquiry", backlog)
+        self.assertIn("==> Under Planning: 2026-07-08;", backlog)
+        lint = self.tool_run("lint")
+        self.assertIn("Work items:   3", lint.stdout)
+
+    def test_draft_plan_rejects_invalid_sequence(self) -> None:
+        draft = self.tool_run("draft-plan", "E.MCP.02.b", "--sequence", "1", expected=1)
+        self.assertIn("invalid work sequence 1; expected three digits", draft.stderr)
 
     def test_verification_check_reports_existing_evidence(self) -> None:
         src = self.root / "src"

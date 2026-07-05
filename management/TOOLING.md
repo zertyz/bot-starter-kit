@@ -51,6 +51,16 @@ scripts/management/evaluate_plan Luiz/ER.MCP.02.a-001 --user Luiz
 The command checks whether a proposed work item or branch is structurally coherent with the governing requirement. It reports requirement linkage, branch-owner fit, state readiness, work-item detail, motivation fit, and sibling work for the same requirement. It does not approve the plan.
 
 
+## Draft a Plan
+
+```bash
+scripts/management/draft_plan E.MCP.02.b
+scripts/management/draft_plan E.MCP.02.b --write
+```
+
+The command proposes the next syntactically valid backlog entry for a requirement and prints the existing work already tied to that requirement. By default it is a dry run; `--write` appends the entry under `Under Planning`. Use `--title`, `--motivation`, `--body-line`, `--date`, and `--allow-existing-open` when the default draft is not the intended plan.
+
+
 ## Check Verification Evidence
 
 ```bash
