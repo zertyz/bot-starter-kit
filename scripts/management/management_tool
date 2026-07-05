@@ -1,0 +1,488 @@
+#!/usr/bin/env python3
+"""Parse and validate the management requirements and backlogs."""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MANAGEMENT_DIR = REPO_ROOT / "management"
+
+REQUIREMENT_FILES = {
+    "B": "BUSINESS.md",
+    "E": "ENGINEERING.md",
+    "O": "OPERATIONS.md",
+}
+
+BACKLOG_FILES = {
+    "B": "BUSINESS.backlog.md",
+    "E": "ENGINEERING.backlog.md",
+    "O": "OPERATIONS.backlog.md",
+}
+
+SUPPORTING_FILES = [
+    "DECISIONS.md",
+    "DEFINITION_OF_READY_DONE.md",
+    "RELEASES.md",
+    "RISKS.md",
+    "INCIDENTS.md",
+    "EXPERIMENTS.md",
+    "TRACEABILITY.md",
+]
+
+VALID_STATES = [
+    "Under Planning",
+    "Planned",
+    "Started",
+    "In Code Review",
+    "Integrated",
+    "QA",
+    "Merged",
+    "Rolled Out",
+    "Rejected",
+    "Cancelled",
+]
+
+VALID_STATE_SET = set(VALID_STATES)
+
+SECTION_RE = re.compile(r'^#\s+(?P<title>.+?)\s+"(?P<abbr>[A-Za-z][A-Za-z0-9]*)"\s*$')
+REQUIREMENT_HEADING_RE = re.compile(r"^#{2,6}\s+(?P<number>\d{2})(?P<subtopics>(?:\.[a-z]+)*)\)\s+(?P<title>.+?)\s*$")
+STATE_HEADING_RE = re.compile(r'^#\s+(?P<state>"?[^"#]+"?)\s*$')
+WORK_ITEM_RE = re.compile(
+    r"^##\s+"
+    r"(?P<id>(?P<doc>[BEO])(?P<motivation>[NRFX])\."
+    r"(?P<section>[A-Za-z][A-Za-z0-9]*)\."
+    r"(?P<number>\d{2})(?P<subtopics>(?:\.[a-z]+)*)-"
+    r"(?P<sequence>\d{3}))"
+    r"\s+--\s+(?P<title>.+?)\s*$"
+)
+BRANCH_RE = re.compile(
+    r"^(?:feature/|(?P<owner>[A-Za-z0-9_.-]+)/)?"
+    r"(?P<work_id>[BEO][NRFX]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*-\d{3})$"
+)
+TIMELINE_OWNER_RE = re.compile(r"==>\s*(?P<owner>[^.]+)\.\s*(?P<trail>.+)$")
+TIMELINE_STATE_RE = re.compile(
+    r"(?P<state>Under Planning|Planned|Started|In Code Review|Integrated|QA|Merged|Rolled Out|Rejected|Cancelled|Superseded by [^:;]+)"
+    r"\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})"
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class Issue:
+    severity: str
+    path: Path
+    line: int
+    message: str
+
+    def format(self) -> str:
+        return f"{self.severity}: {relative(self.path)}:{self.line}: {self.message}"
+
+
+@dataclasses.dataclass
+class Requirement:
+    id: str
+    document: str
+    section: str
+    section_title: str
+    number: str
+    subtopics: str
+    title: str
+    path: Path
+    line: int
+    body_lines: list[str] = dataclasses.field(default_factory=list)
+
+    @property
+    def body(self) -> str:
+        return trim_blank_lines(self.body_lines)
+
+
+@dataclasses.dataclass
+class WorkItem:
+    id: str
+    requirement_id: str
+    document: str
+    motivation: str
+    section: str
+    number: str
+    subtopics: str
+    sequence: str
+    title: str
+    state: str
+    path: Path
+    line: int
+    body_lines: list[str] = dataclasses.field(default_factory=list)
+    owner: str | None = None
+    timeline: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    @property
+    def body(self) -> str:
+        return trim_blank_lines(self.body_lines)
+
+
+@dataclasses.dataclass
+class ManagementModel:
+    requirements: dict[str, Requirement] = dataclasses.field(default_factory=dict)
+    work_items: dict[str, WorkItem] = dataclasses.field(default_factory=dict)
+    errors: list[Issue] = dataclasses.field(default_factory=list)
+    warnings: list[Issue] = dataclasses.field(default_factory=list)
+
+    def error(self, path: Path, line: int, message: str) -> None:
+        self.errors.append(Issue("ERROR", path, line, message))
+
+    def warning(self, path: Path, line: int, message: str) -> None:
+        self.warnings.append(Issue("WARN", path, line, message))
+
+
+def relative(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def trim_blank_lines(lines: list[str]) -> str:
+    start = 0
+    end = len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[start:end])
+
+
+def strip_state(raw_state: str) -> str:
+    state = raw_state.strip()
+    if len(state) >= 2 and state[0] == '"' and state[-1] == '"':
+        return state[1:-1]
+    return state
+
+
+def requirement_id(document: str, section: str, number: str, subtopics: str) -> str:
+    return f"{document}.{section}.{number}{subtopics}"
+
+
+def parse_requirement_file(model: ManagementModel, document: str, path: Path) -> None:
+    if not path.exists():
+        model.error(path, 1, "missing requirement file")
+        return
+
+    section: str | None = None
+    section_title: str | None = None
+    seen_sections: dict[str, int] = {}
+    active: Requirement | None = None
+
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        section_match = SECTION_RE.match(line)
+        if section_match:
+            section = section_match.group("abbr")
+            section_title = section_match.group("title")
+            active = None
+            if section in seen_sections:
+                model.error(path, line_number, f'duplicate section abbreviation "{section}"; first used at line {seen_sections[section]}')
+            else:
+                seen_sections[section] = line_number
+            continue
+
+        heading_match = REQUIREMENT_HEADING_RE.match(line)
+        if heading_match:
+            active = None
+            if section is None or section_title is None:
+                model.error(path, line_number, "requirement heading appears before a section heading with an abbreviation")
+                continue
+
+            req_id = requirement_id(document, section, heading_match.group("number"), heading_match.group("subtopics"))
+            requirement = Requirement(
+                id=req_id,
+                document=document,
+                section=section,
+                section_title=section_title,
+                number=heading_match.group("number"),
+                subtopics=heading_match.group("subtopics"),
+                title=heading_match.group("title"),
+                path=path,
+                line=line_number,
+            )
+            if req_id in model.requirements:
+                first = model.requirements[req_id]
+                model.error(path, line_number, f"duplicate requirement id {req_id}; first used at {relative(first.path)}:{first.line}")
+            else:
+                model.requirements[req_id] = requirement
+            active = requirement
+            continue
+
+        if active is not None:
+            active.body_lines.append(line)
+
+
+def parse_backlog_file(model: ManagementModel, document: str, path: Path) -> None:
+    if not path.exists():
+        model.error(path, 1, "missing backlog file")
+        return
+
+    current_state: str | None = None
+    active: WorkItem | None = None
+
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        state_match = STATE_HEADING_RE.match(line)
+        if state_match and not line.startswith("##"):
+            current_state = strip_state(state_match.group("state"))
+            active = None
+            if current_state not in VALID_STATE_SET:
+                model.warning(path, line_number, f'unknown backlog state "{current_state}"')
+            continue
+
+        work_match = WORK_ITEM_RE.match(line)
+        if work_match:
+            active = None
+            if current_state is None:
+                model.error(path, line_number, "work item appears before a backlog state heading")
+                continue
+            work_document = work_match.group("doc")
+            if work_document != document:
+                model.error(path, line_number, f"work item belongs to {work_document}, but is listed in {path.name}")
+
+            req_id = requirement_id(work_document, work_match.group("section"), work_match.group("number"), work_match.group("subtopics"))
+            item = WorkItem(
+                id=work_match.group("id"),
+                requirement_id=req_id,
+                document=work_document,
+                motivation=work_match.group("motivation"),
+                section=work_match.group("section"),
+                number=work_match.group("number"),
+                subtopics=work_match.group("subtopics"),
+                sequence=work_match.group("sequence"),
+                title=work_match.group("title"),
+                state=current_state,
+                path=path,
+                line=line_number,
+            )
+            if item.id in model.work_items:
+                first = model.work_items[item.id]
+                model.error(path, line_number, f"duplicate work item id {item.id}; first used at {relative(first.path)}:{first.line}")
+            else:
+                model.work_items[item.id] = item
+            active = item
+            continue
+
+        if line.startswith("## "):
+            model.error(path, line_number, "invalid work item heading; expected `## <ID> -- <title>`")
+            active = None
+            continue
+
+        if active is not None:
+            active.body_lines.append(line)
+
+    for item in [work for work in model.work_items.values() if work.path == path]:
+        parse_work_timeline(model, item)
+
+
+def parse_work_timeline(model: ManagementModel, item: WorkItem) -> None:
+    for body_line in item.body_lines:
+        owner_match = TIMELINE_OWNER_RE.search(body_line)
+        if not owner_match:
+            continue
+        item.owner = owner_match.group("owner").strip()
+        for state_match in TIMELINE_STATE_RE.finditer(owner_match.group("trail")):
+            item.timeline[state_match.group("state")] = state_match.group("date")
+
+    if item.state in VALID_STATE_SET and item.state not in item.timeline:
+        model.warning(item.path, item.line, f"{item.id} is in state {item.state}, but has no dated `{item.state}: YYYY-MM-DD` status trail")
+
+
+def load_model() -> ManagementModel:
+    model = ManagementModel()
+
+    for document, name in REQUIREMENT_FILES.items():
+        parse_requirement_file(model, document, MANAGEMENT_DIR / name)
+
+    for document, name in BACKLOG_FILES.items():
+        parse_backlog_file(model, document, MANAGEMENT_DIR / name)
+
+    for name in SUPPORTING_FILES:
+        path = MANAGEMENT_DIR / name
+        if not path.exists():
+            model.error(path, 1, "missing supporting management file")
+
+    for item in model.work_items.values():
+        if item.requirement_id not in model.requirements:
+            model.error(item.path, item.line, f"{item.id} references missing requirement {item.requirement_id}")
+
+    return model
+
+
+def current_branch() -> str:
+    result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=REPO_ROOT,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "failed to read current git branch")
+    branch = result.stdout.strip()
+    if not branch:
+        raise RuntimeError("git is in detached HEAD; pass a branch or work item explicitly")
+    return branch
+
+
+def parse_branch_or_work_ref(raw_ref: str) -> tuple[str | None, str]:
+    match = BRANCH_RE.match(raw_ref)
+    if not match:
+        raise ValueError(f"invalid branch or work item reference: {raw_ref}")
+    return match.group("owner"), match.group("work_id")
+
+
+def resolve_work_item(model: ManagementModel, raw_ref: str | None) -> tuple[str, WorkItem]:
+    ref = raw_ref if raw_ref else current_branch()
+    _owner, work_id = parse_branch_or_work_ref(ref)
+    if work_id not in model.work_items:
+        raise KeyError(f"{work_id} was not found in any backlog")
+    return ref, model.work_items[work_id]
+
+
+def print_requirement(requirement: Requirement) -> None:
+    print(f"Requirement: {requirement.id} -- {requirement.title}")
+    print(f"Source:      {relative(requirement.path)}:{requirement.line}")
+    print(f"Section:     {requirement.section_title} \"{requirement.section}\"")
+    if requirement.body:
+        print()
+        print(requirement.body)
+
+
+def print_work_item(model: ManagementModel, item: WorkItem) -> None:
+    print(f"Work Item:   {item.id} -- {item.title}")
+    print(f"State:       {item.state}")
+    print(f"Source:      {relative(item.path)}:{item.line}")
+    print(f"Requirement: {item.requirement_id}")
+    if item.owner:
+        print(f"Owner:       {item.owner}")
+    if item.timeline:
+        timeline = "; ".join(f"{state}: {date}" for state, date in item.timeline.items())
+        print(f"Timeline:    {timeline}")
+    if item.body:
+        print()
+        print(item.body)
+
+    requirement = model.requirements.get(item.requirement_id)
+    if requirement:
+        print()
+        print_requirement(requirement)
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    model = load_model()
+
+    print("Checking management requirements and backlogs")
+    print(f"Requirements: {len(model.requirements)}")
+    print(f"Work items:   {len(model.work_items)}")
+    sys.stdout.flush()
+
+    for issue in model.errors:
+        print(issue.format(), file=sys.stderr)
+    for issue in model.warnings:
+        print(issue.format(), file=sys.stderr)
+
+    if model.errors:
+        return 1
+    if args.strict and model.warnings:
+        return 1
+    return 0
+
+
+def cmd_show_requirement(args: argparse.Namespace) -> int:
+    model = load_model()
+    requirement = model.requirements.get(args.requirement_id)
+    if requirement is None:
+        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
+        return 1
+    print_requirement(requirement)
+    return 0
+
+
+def cmd_show_work(args: argparse.Namespace) -> int:
+    model = load_model()
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+    if args.chat_prompt:
+        print()
+        print("Discussion prompt:")
+        print(f"Use {item.id} and {item.requirement_id} as the management context. Review the requirement, the work-item description, existing code, and likely verification evidence before proposing implementation changes.")
+    return 0
+
+
+def cmd_verify_branch(args: argparse.Namespace) -> int:
+    model = load_model()
+    try:
+        raw_ref, item = resolve_work_item(model, args.branch)
+        owner, _work_id = parse_branch_or_work_ref(raw_ref)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    errors: list[str] = []
+    if item.requirement_id not in model.requirements:
+        errors.append(f"{item.id} references missing requirement {item.requirement_id}")
+    if item.state != "Started":
+        errors.append(f"{item.id} is in state {item.state}; engineering work branches must reference a Started work item")
+    if item.owner and owner and owner.lower() != item.owner.lower():
+        errors.append(f"branch owner {owner} does not match backlog owner {item.owner}")
+
+    print_work_item(model, item)
+    if errors:
+        print()
+        for error in errors:
+            print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+    print()
+    print("Branch context is valid.")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Management requirements and backlog helper.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    lint = subparsers.add_parser("lint", help="Validate management file structure and links.")
+    lint.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
+    lint.set_defaults(func=cmd_lint)
+
+    show_requirement = subparsers.add_parser("show-requirement", help="Print one requirement by id.")
+    show_requirement.add_argument("requirement_id")
+    show_requirement.set_defaults(func=cmd_show_requirement)
+
+    show_work = subparsers.add_parser("show-work", help="Print one work item and its requirement. Defaults to the current branch.")
+    show_work.add_argument("ref", nargs="?", help="Work item id or branch name.")
+    show_work.add_argument("--chat-prompt", action="store_true", help="Append a short prompt for discussing the work with an AI assistant.")
+    show_work.set_defaults(func=cmd_show_work)
+
+    verify_branch = subparsers.add_parser("verify-branch", help="Validate that a branch references a Started work item.")
+    verify_branch.add_argument("branch", nargs="?", help="Branch name. Defaults to the current branch.")
+    verify_branch.set_defaults(func=cmd_verify_branch)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
