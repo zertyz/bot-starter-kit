@@ -25,15 +25,15 @@ This project is conducted under a formal management procedure. The top-level rul
    debt classified as "release-blocking" may enter `main`. Non-blocking debt must be explicitly documented as a new entry in the "Engineering" or "Operational" requirements file,
    with justification and deadline for improvement. This is more important for design decisions, APIs, and models that may be used as foundation for future code.
 7) Each Work Item must be associated with its formal branch, with the following rules:
-   * Naming the branches should always be in the form of either: "<developer_username>/RM.DDD.rr.ss-ttt" for task, bugs, or story branches; "feature/RM.DDD.rr.ss-ttt" for feature branches, where:
+   * Naming the branches should always be in the form of either: "<developer_username>/RM.HHH.rr.ss-ttt" for task, bugs, or story branches; "feature/RM.HHH.rr.ss-ttt" for feature branches, where:
      - 'R' stands for the (R)equirements document – either 'B', 'E', or 'O';
      - 'M' stands for the (M)otivation of the change – either a (N)ew requirement, a (R)evisit of an already implemented requirement which changed or which needed a different
        implementation approach, a (F)ix for a faulty or buggy implementation of a requirement, or even an e(X)perimental branch, a prototype, R&D, or spike which should never be
        merged to `main`;
-     - 'DDD' is the abbreviated (D)eployment name as described on the requirements document – for now we only have "BOT";
+     - 'HHH' is the abbreviated (H)eader section as described on the requirements document. Each header have their abbreviation (with a more or less, 3 letters) inside quotes, on their title;
      - A special name is "GEN" – for "general" requirements that do not fall into any deployment; Sometimes, requirements may be made for libs such as "HLC" (high level crates)
        or "LLC" (low level crates);
-     - 'rr' is the requirement number within that deployment name;
+     - 'rr' is the requirement number within that header name;
      - 'ss' is the requirement sub-topic -- letters: a, b, c, ... z, aa, ab, ...;
      - 'ttt' is a zero-padded sequential number – counting Work Items to the same requirement subtopic – and avoids both branch and backlog collision.
 8) CI/CD: Every commit to `main` will be rolled out to a `staging` environment -- except if it only touches documentation or files that don't change the deployables;
