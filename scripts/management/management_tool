@@ -67,6 +67,14 @@ STATE_HEADINGS = {
     "Integrated": '# "Integrated"',
 }
 
+VERIFICATION_COMMANDS = [
+    "scripts/ci/enforce_management_rules",
+    "scripts/ci/enforce_code_guidelines",
+    "cargo fmt --all -- --check",
+    "cargo clippy --all-targets --all-features -- -D warnings",
+    "cargo test --verbose",
+]
+
 SECTION_RE = re.compile(r'^#\s+(?P<title>.+?)\s+"(?P<abbr>[A-Za-z][A-Za-z0-9]*)"\s*$')
 REQUIREMENT_HEADING_RE = re.compile(r"^#{2,6}\s+(?P<number>\d{2})(?P<subtopics>(?:\.[a-z]+)*)\)\s+(?P<title>.+?)\s*$")
 STATE_HEADING_RE = re.compile(r'^#\s+(?P<state>"?[^"#]+"?)\s*$')
@@ -380,6 +388,133 @@ def git_branch_exists(branch: str) -> bool:
 
 def git_worktree_is_dirty() -> bool:
     return bool(git_output(["status", "--porcelain"]))
+
+
+def git_name_list(args: list[str]) -> set[str]:
+    result = git_result(args)
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def changed_files(base_ref: str | None) -> tuple[list[str], list[str]]:
+    files: set[str] = set()
+    notes: list[str] = []
+    if base_ref:
+        if git_ref_exists(base_ref):
+            files.update(git_name_list(["diff", "--name-only", "--diff-filter=ACMRTUXB", f"{base_ref}...HEAD"]))
+        else:
+            notes.append(f"Base ref {base_ref} does not exist locally; committed branch diff was skipped.")
+    files.update(git_name_list(["diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD"]))
+    files.update(git_name_list(["diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB"]))
+
+    status = git_output(["status", "--porcelain"])
+    for line in status.splitlines():
+        if len(line) < 4:
+            continue
+        if line.startswith("?? "):
+            files.add(line[3:])
+        elif " -> " in line:
+            files.add(line.split(" -> ", maxsplit=1)[1])
+        else:
+            files.add(line[3:])
+    tracked = set(tracked_files())
+    current_files = [
+        path
+        for path in files
+        if path
+        and "__pycache__/" not in path
+        and (path in tracked or (REPO_ROOT / path).exists())
+    ]
+    return sorted(current_files), notes
+
+
+def tracked_files() -> list[str]:
+    return sorted(git_name_list(["ls-files"]))
+
+
+def read_repo_file(path: str) -> str:
+    full_path = REPO_ROOT / path
+    if not full_path.is_file():
+        return ""
+    try:
+        return full_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def file_contains_any(path: str, patterns: list[str]) -> bool:
+    content = read_repo_file(path)
+    return any(pattern in content for pattern in patterns)
+
+
+def rust_source_file(path: str) -> bool:
+    return path.startswith("src/") and path.endswith(".rs")
+
+
+def test_evidence_file(path: str) -> bool:
+    return (
+        path.startswith("tests/")
+        or Path(path).name.startswith("test_")
+        or path.endswith("_test.rs")
+        or (path.endswith(".rs") and file_contains_any(path, ["#[test]", "#[tokio::test]", "#[async_std::test]", "#[cfg(test)]"]))
+    )
+
+
+def benchmark_evidence_file(path: str) -> bool:
+    return path.startswith("benches/") or "benchmark" in path.lower() or (path.endswith(".rs") and file_contains_any(path, ["criterion_group!", "Criterion"]))
+
+
+def operations_evidence_file(path: str) -> bool:
+    return path.startswith(".github/") or path.startswith("scripts/operations/") or path in {
+        "management/OPERATIONS.md",
+        "management/OPERATIONS.backlog.md",
+        "management/RELEASES.md",
+        "management/INCIDENTS.md",
+        "management/RISKS.md",
+    }
+
+
+def security_evidence_file(path: str) -> bool:
+    lowered = path.lower()
+    return (
+        "security" in lowered
+        or "secret" in lowered
+        or "tls" in lowered
+        or path in {"management/RISKS.md", "management/INCIDENTS.md"}
+        or path.startswith("scripts/operations/")
+    )
+
+
+def recovery_evidence_file(path: str) -> bool:
+    lowered = path.lower()
+    return (
+        "recovery" in lowered
+        or "rollback" in lowered
+        or "backup" in lowered
+        or path in {"management/RELEASES.md", "management/INCIDENTS.md", "management/OPERATIONS.md"}
+    )
+
+
+def product_evidence_file(path: str) -> bool:
+    return path in {"management/BUSINESS.md", "management/BUSINESS.backlog.md"} or path.startswith("README")
+
+
+def print_evidence_line(title: str, evidence: list[str], status_if_missing: str, reason: str) -> None:
+    if evidence:
+        print(f"{title}: FOUND")
+        for path in evidence:
+            print(f"  - {path}")
+        return
+    print(f"{title}: {status_if_missing}")
+    print(f"  - {reason}")
+
+
+def limited(paths: list[str], limit: int = 8) -> list[str]:
+    if len(paths) <= limit:
+        return paths
+    remaining = len(paths) - limit
+    return [*paths[:limit], f"... {remaining} more"]
 
 
 def parse_branch_or_work_ref(raw_ref: str) -> tuple[str | None, str]:
@@ -805,6 +940,85 @@ def cmd_start_work(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verification_check(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    base_ref = args.base or "origin/main"
+    files, notes = changed_files(base_ref)
+    all_files = sorted(set(tracked_files()) | set(files))
+    changed_rust_sources = [path for path in files if rust_source_file(path)]
+    changed_tests = [path for path in files if test_evidence_file(path)]
+    existing_tests = [path for path in all_files if test_evidence_file(path)]
+    changed_benchmarks = [path for path in files if benchmark_evidence_file(path)]
+    existing_benchmarks = [path for path in all_files if benchmark_evidence_file(path)]
+    operations_files = [path for path in files if operations_evidence_file(path)]
+    security_files = [path for path in files if security_evidence_file(path)]
+    recovery_files = [path for path in files if recovery_evidence_file(path)]
+    product_files = [path for path in files if product_evidence_file(path)]
+
+    print("Verification Check")
+    print("==================")
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+    print()
+    print(f"Diff base: {base_ref}")
+    for note in notes:
+        print(f"Note: {note}")
+    if files:
+        print("Changed files:")
+        for path in limited(files, args.limit):
+            print(f"  - {path}")
+    else:
+        print("Changed files: none detected")
+    print()
+    print("Evidence inventory:")
+    print_evidence_line(
+        "Functional behavior",
+        limited(changed_tests, args.limit),
+        "REVIEW",
+        "No changed test evidence detected. Existing tests may still cover the behavior." if existing_tests else "No project test evidence detected.",
+    )
+    if not changed_tests and existing_tests:
+        print("  Existing test inventory:")
+        for path in limited(existing_tests, args.limit):
+            print(f"    - {path}")
+
+    performance_reason = "No benchmark or benchmark-related changed file detected."
+    if any(path.startswith(("src/db/", "src/messaging/", "src/plot/")) for path in changed_rust_sources):
+        performance_reason = "Performance-sensitive Rust modules changed; benchmark or load-test evidence should be considered."
+    print_evidence_line("Performance", limited(changed_benchmarks, args.limit), "REVIEW", performance_reason)
+    if not changed_benchmarks and existing_benchmarks:
+        print("  Existing benchmark inventory:")
+        for path in limited(existing_benchmarks, args.limit):
+            print(f"    - {path}")
+
+    print_evidence_line("Security", limited(security_files, args.limit), "REVIEW", "No security-specific evidence detected in changed files.")
+    print_evidence_line("Operations", limited(operations_files, args.limit), "REVIEW", "No operations-specific evidence detected in changed files.")
+    print_evidence_line("Maintainability", [], "CHECK COMMANDS", "Run the static and test commands listed below before review or merge.")
+    print_evidence_line("Disaster recovery", limited(recovery_files, args.limit), "REVIEW", "No rollback, backup, restore, or incident evidence detected in changed files.")
+    print_evidence_line("UX or product behavior", limited(product_files, args.limit), "REVIEW", "No business requirement, product, README, or acceptance evidence detected in changed files.")
+    print()
+    print("Suggested verification commands:")
+    for command in VERIFICATION_COMMANDS:
+        print(f"  - {command}")
+    if changed_benchmarks or any(path.startswith(("src/db/", "src/messaging/", "src/plot/")) for path in changed_rust_sources):
+        print("  - cargo bench --benches")
+    print()
+    print("Scope note: this command inventories evidence. Acceptance still requires human review against the requirement and work item.")
+    return 0
+
+
 def cmd_advance_state(args: argparse.Namespace) -> int:
     model = load_model()
     if model.errors:
@@ -908,6 +1122,16 @@ def build_parser() -> argparse.ArgumentParser:
     start_work.add_argument("--allow-dirty", action="store_true", help="Allow actual branch switching with uncommitted worktree changes.")
     start_work.add_argument("--dry-run", action="store_true", help="Print validation and git commands without switching branches.")
     start_work.set_defaults(func=cmd_start_work)
+
+    verification_check = subparsers.add_parser(
+        "verification-check",
+        aliases=["verification_check"],
+        help="Inventory verification evidence for a work item or branch.",
+    )
+    verification_check.add_argument("ref", nargs="?", help="Work item id or branch name. Defaults to the current branch.")
+    verification_check.add_argument("--base", help="Base git ref for changed-file detection. Default: origin/main.")
+    verification_check.add_argument("--limit", type=int, default=8, help="Maximum evidence paths to print per section. Default: 8.")
+    verification_check.set_defaults(func=cmd_verification_check)
 
     return parser
 

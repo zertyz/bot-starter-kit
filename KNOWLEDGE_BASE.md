@@ -18,3 +18,4 @@
 15. Inside `management`, file `INCIDENTS.md` records operational, security, data, release, and staging incidents.
 16. Inside `management`, file `EXPERIMENTS.md` records spikes, prototypes, and experimental branches.
 17. Inside `management`, file `TRACEABILITY.md` records requirement-to-evidence links.
+18. Inside `management`, file `TOOLING.md` explains the repo-local management helper commands.

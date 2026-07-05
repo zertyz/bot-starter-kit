@@ -117,3 +117,4 @@ This project is conducted under a formal management procedure. The top-level rul
     * `INCIDENTS.md` records operational, security, data, release, and staging incidents.
     * `EXPERIMENTS.md` records spikes, prototypes, and `X` branches.
     * `TRACEABILITY.md` connects requirements, work items, implementation, and verification evidence.
+    * `TOOLING.md` explains the repo-local management helper commands.

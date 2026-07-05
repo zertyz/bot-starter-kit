@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Tests for scripts/management/management_tool."""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+
+SOURCE_TOOL = Path(__file__).resolve().parent / "management_tool"
+SUPPORTING_FILES = [
+    "DECISIONS.md",
+    "DEFINITION_OF_READY_DONE.md",
+    "RELEASES.md",
+    "RISKS.md",
+    "INCIDENTS.md",
+    "EXPERIMENTS.md",
+    "TRACEABILITY.md",
+]
+
+
+def run(cwd: Path, args: list[str], expected: int = 0) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(args, cwd=cwd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != expected:
+        raise AssertionError(
+            f"expected exit {expected}, got {result.returncode}\n"
+            f"command: {' '.join(args)}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    return result
+
+
+class ManagementToolTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.tool = self.root / "scripts" / "management" / "management_tool"
+        self.management = self.root / "management"
+        (self.root / "scripts" / "management").mkdir(parents=True)
+        self.management.mkdir()
+        shutil.copy2(SOURCE_TOOL, self.tool)
+        self.tool.chmod(0o755)
+        self.write_management_files()
+        self.init_git()
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def write_management_files(self) -> None:
+        (self.management / "BUSINESS.md").write_text('# Business "Biz"\n\n## 01) Business Requirement\n\nBusiness behavior.\n', encoding="utf-8")
+        (self.management / "OPERATIONS.md").write_text('# Operations "Ops"\n\n## 01) Operational Requirement\n\nOperational behavior.\n', encoding="utf-8")
+        (self.management / "ENGINEERING.md").write_text(
+            textwrap.dedent(
+                """\
+                # Messaging Communications Paradigm "MCP"
+
+                ## 01) Per User Routing
+
+                One stream per user.
+
+                ## 02.a) Common MO and MT Models
+
+                Common models exist.
+                """
+            ),
+            encoding="utf-8",
+        )
+        (self.management / "BUSINESS.backlog.md").write_text("# Planned\n\n# Started\n\n# Merged\n", encoding="utf-8")
+        (self.management / "OPERATIONS.backlog.md").write_text("# Planned\n\n# Started\n\n# Merged\n", encoding="utf-8")
+        (self.management / "ENGINEERING.backlog.md").write_text(
+            textwrap.dedent(
+                """\
+                # Planned
+
+                ## ER.MCP.02.a-001 -- Planned model update
+                1. Update models.
+                ==> Planned: 2026-07-05;
+
+
+                # Started
+
+                ## EN.MCP.01-001 -- Started routing work
+                1. Route per user.
+                ==> Luiz. Planned: 2026-07-05; Started: 2026-07-05;
+
+
+                # "In Code Review"
+
+
+                # QA
+
+
+                # Merged
+                """
+            ),
+            encoding="utf-8",
+        )
+        for name in SUPPORTING_FILES:
+            (self.management / name).write_text(f"# {name}\n", encoding="utf-8")
+
+    def init_git(self) -> None:
+        run(self.root, ["git", "init", "-b", "main"])
+        run(self.root, ["git", "config", "user.email", "test@example.invalid"])
+        run(self.root, ["git", "config", "user.name", "Test User"])
+        run(self.root, ["git", "add", "."])
+        run(self.root, ["git", "commit", "-m", "initial management state"])
+        run(self.root, ["git", "update-ref", "refs/remotes/origin/main", "HEAD"])
+
+    def tool_run(self, *args: str, expected: int = 0) -> subprocess.CompletedProcess[str]:
+        return run(self.root, [str(self.tool), *args], expected=expected)
+
+    def test_lint_and_show_work(self) -> None:
+        lint = self.tool_run("lint")
+        self.assertIn("Requirements: 4", lint.stdout)
+        self.assertIn("Work items:   2", lint.stdout)
+        show = self.tool_run("show-work", "ER.MCP.02.a-001")
+        self.assertIn("Requirement: E.MCP.02.a", show.stdout)
+
+    def test_advance_state_moves_item_and_extends_timeline(self) -> None:
+        result = self.tool_run("advance-state", "Luiz/EN.MCP.01-001", "--to", "In Code Review", "--date", "2026-07-06")
+        self.assertIn("After:", result.stdout)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertIn('# "In Code Review"', backlog)
+        self.assertIn("## EN.MCP.01-001 -- Started routing work", backlog)
+        self.assertIn("In Code Review: 2026-07-06", backlog)
+
+    def test_same_state_normalization_is_noop_when_date_exists(self) -> None:
+        result = self.tool_run("advance-state", "ER.MCP.02.a-001", "--to", "Planned", "--date", "2026-07-07")
+        self.assertIn("already has Planned: 2026-07-05", result.stdout)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertNotIn("2026-07-07", backlog)
+
+    def test_start_work_dry_run_requires_started_owner(self) -> None:
+        started = self.tool_run("start-work", "Luiz/EN.MCP.01-001", "--dry-run")
+        self.assertIn("$ git switch -c Luiz/EN.MCP.01-001 origin/main", started.stdout)
+        planned = self.tool_run("start-work", "Luiz/ER.MCP.02.a-001", "--dry-run", expected=1)
+        self.assertIn("engineering work branches must reference a Started work item", planned.stderr)
+
+    def test_verification_check_reports_existing_evidence(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text("#[cfg(test)]\nmod tests { #[test] fn it_works() {} }\n", encoding="utf-8")
+        run(self.root, ["git", "add", "src/lib.rs"])
+        check = self.tool_run("verification-check", "Luiz/EN.MCP.01-001")
+        self.assertIn("Verification Check", check.stdout)
+        self.assertIn("Functional behavior: FOUND", check.stdout)
+        self.assertIn("src/lib.rs", check.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
