@@ -25,6 +25,7 @@
       <button class="nav-item" data-view="work" type="button">Work</button>
       <button class="nav-item" data-view="workflows" type="button">Workflows</button>
       <button class="nav-item" data-view="ledgers" type="button">Ledgers</button>
+      <button class="nav-item" data-view="tech-debt" type="button">Tech Debt</button>
       <button class="nav-item" data-view="diagrams" type="button">Diagrams</button>
     </nav>
 
@@ -60,6 +61,7 @@
               <tr>
                 <th>ID</th>
                 <th>Title</th>
+                <th>Audit</th>
                 <th>Work</th>
                 <th>Trace</th>
                 <th>Actions</th>
@@ -84,6 +86,7 @@
                 <th>State</th>
                 <th>Owner</th>
                 <th>Title</th>
+                <th>Attention</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -218,6 +221,14 @@
 
       <section class="view" id="view-ledgers">
         <div class="ledger-grid" id="ledger-grid"></div>
+      </section>
+
+      <section class="view" id="view-tech-debt">
+        <div class="toolbar">
+          <input id="tech-debt-filter" type="search" placeholder="Filter tech debt">
+          <button type="button" data-action="chase-techdebts">Refresh Leads</button>
+        </div>
+        <div class="ledger-grid" id="tech-debt-grid"></div>
       </section>
 
       <section class="view" id="view-diagrams">

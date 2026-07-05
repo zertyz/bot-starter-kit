@@ -254,6 +254,25 @@ td.actions {
   white-space: nowrap;
 }
 
+tr.row-blocker td {
+  background: #fff6f5;
+}
+
+tr.row-review td {
+  background: #fffbeb;
+}
+
+button.warn {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+
+button.danger {
+  border-color: var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+}
+
 .pill {
   display: inline-flex;
   align-items: center;

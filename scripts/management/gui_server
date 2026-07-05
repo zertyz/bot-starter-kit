@@ -58,9 +58,118 @@ def issue_payload(issue) -> dict[str, object]:
     }
 
 
-def requirement_payload(model, requirement, links) -> dict[str, object]:
+def audit_finding_payload(finding) -> dict[str, object]:
+    return {
+        "severity": finding.severity,
+        "requirement_id": finding.requirement.id,
+        "category": finding.category,
+        "message": finding.message,
+        "path": path_text(finding.requirement.path),
+        "line": finding.requirement.line,
+        "edit_hint": f"{path_text(finding.requirement.path)}:{finding.requirement.line}",
+    }
+
+
+def tech_debt_payload(finding) -> dict[str, object]:
+    return {
+        "category": finding.category,
+        "severity": finding.severity,
+        "path": finding.path,
+        "line": finding.line,
+        "message": finding.message,
+        "edit_hint": f"{finding.path}:{finding.line}",
+    }
+
+
+def audit_findings(model, traceability_text: str) -> list[object]:
+    requirements = sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+    duplicate_titles = tool.duplicate_requirement_groups(requirements, lambda requirement: " ".join(tool.words_in(requirement.title)))
+    duplicate_bodies = tool.duplicate_requirement_groups(requirements, lambda requirement: " ".join(tool.words_in(requirement.body)))
+    findings = []
+    for requirement in requirements:
+        findings.extend(tool.audit_requirement(model, requirement, traceability_text, duplicate_titles, duplicate_bodies))
+    severity_order = {severity: index for index, severity in enumerate(tool.AUDIT_SEVERITIES)}
+    findings.sort(key=lambda finding: (severity_order.get(finding.severity, 99), finding.requirement.id, finding.category))
+    return findings
+
+
+def traceability_reason(requirement, links: list[object], traceability_text: str) -> dict[str, object]:
+    status = tool.traceability_status(requirement, traceability_text)
+    direct_links = tool.traceability_links_for(requirement, links)
+    if status == "direct":
+        detail = "Direct traceability row present."
+    elif status == "child":
+        detail = "A child requirement has traceability; this parent still needs an explicit acceptance decision when scope is complete."
+    elif status == "area":
+        detail = "Only an area-level wildcard is present in TRACEABILITY.md. Add direct evidence when real work exists."
+    else:
+        detail = "No traceability row found. Add evidence with link_evidence or update TRACEABILITY.md after work exists."
+    return {
+        "status": status,
+        "detail": detail,
+        "lines": [link.line for link in direct_links],
+    }
+
+
+def work_attention(item, model, audit_by_requirement: dict[str, list[object]], links: list[object]) -> list[dict[str, object]]:
+    signals: list[dict[str, object]] = []
+    requirement = model.requirements.get(item.requirement_id)
+    if requirement is None:
+        signals.append({"severity": "BLOCKER", "message": f"Missing requirement {item.requirement_id}", "edit_hint": f"{path_text(item.path)}:{item.line}"})
+    else:
+        requirement_findings = audit_by_requirement.get(requirement.id, [])
+        if any(finding.severity == "BLOCKER" for finding in requirement_findings):
+            signals.append({"severity": "BLOCKER", "message": "Governing requirement has audit blockers", "edit_hint": f"{path_text(requirement.path)}:{requirement.line}"})
+        elif any(finding.severity == "REVIEW" for finding in requirement_findings):
+            signals.append({"severity": "REVIEW", "message": "Governing requirement has audit review findings", "edit_hint": f"{path_text(requirement.path)}:{requirement.line}"})
+        if not tool.traceability_links_for(requirement, links):
+            signals.append({"severity": "REVIEW", "message": "No direct traceability evidence for the governing requirement", "edit_hint": "management/TRACEABILITY.md"})
+
+    if item.state == "Planned":
+        signals.append({"severity": "INFO", "message": "Evaluate the plan before moving this item to Started", "edit_hint": f"{path_text(item.path)}:{item.line}"})
+    if item.state in {"Started", "In Code Review", "Integrated", "QA"} and not item.owner:
+        signals.append({"severity": "BLOCKER", "message": "Active work item has no owner", "edit_hint": f"{path_text(item.path)}:{item.line}"})
+    return signals
+
+
+def confirmed_tech_debt_payload(model) -> list[dict[str, object]]:
+    terms = ("tech debt", "technical debt", "debt", "refactor", "shortcut", "follow-up")
+    confirmed: list[dict[str, object]] = []
+    for requirement in sorted(model.requirements.values(), key=lambda candidate: candidate.id):
+        text = f"{requirement.title}\n{requirement.body}".lower()
+        if any(term in text for term in terms):
+            confirmed.append(
+                {
+                    "kind": "requirement",
+                    "id": requirement.id,
+                    "title": requirement.title,
+                    "state": "",
+                    "path": path_text(requirement.path),
+                    "line": requirement.line,
+                    "edit_hint": f"{path_text(requirement.path)}:{requirement.line}",
+                }
+            )
+    for item in sorted(model.work_items.values(), key=lambda candidate: candidate.id):
+        text = f"{item.title}\n{item.body}".lower()
+        if any(term in text for term in terms):
+            confirmed.append(
+                {
+                    "kind": "work_item",
+                    "id": item.id,
+                    "title": item.title,
+                    "state": item.state,
+                    "path": path_text(item.path),
+                    "line": item.line,
+                    "edit_hint": f"{path_text(item.path)}:{item.line}",
+                }
+            )
+    return confirmed
+
+
+def requirement_payload(model, requirement, links, traceability_text: str, findings: list[object]) -> dict[str, object]:
     work_items = tool.requirement_work_items(model, requirement)
     requirement_links = tool.traceability_links_for(requirement, links)
+    traceability = traceability_reason(requirement, links, traceability_text)
     return {
         "id": requirement.id,
         "document": requirement.document,
@@ -74,10 +183,15 @@ def requirement_payload(model, requirement, links) -> dict[str, object]:
         "body": requirement.body,
         "work_items": [item.id for item in work_items],
         "traceability": [link.line for link in requirement_links],
+        "traceability_status": traceability["status"],
+        "traceability_detail": traceability["detail"],
+        "traceability_lines": traceability["lines"],
+        "audit_findings": [audit_finding_payload(finding) for finding in findings],
+        "edit_hint": f"{path_text(requirement.path)}:{requirement.line}",
     }
 
 
-def work_item_payload(item) -> dict[str, object]:
+def work_item_payload(item, model, audit_by_requirement: dict[str, list[object]], links: list[object]) -> dict[str, object]:
     return {
         "id": item.id,
         "requirement_id": item.requirement_id,
@@ -94,6 +208,8 @@ def work_item_payload(item) -> dict[str, object]:
         "body": item.body,
         "owner": item.owner,
         "timeline": item.timeline,
+        "attention": work_attention(item, model, audit_by_requirement, links),
+        "edit_hint": f"{path_text(item.path)}:{item.line}",
     }
 
 
@@ -133,6 +249,14 @@ def stale_payload(item) -> dict[str, object]:
 def model_payload(stale_days: int = DEFAULT_STALE_DAYS) -> dict[str, object]:
     model = tool.load_model()
     links = tool.traceability_links()
+    traceability_path = tool.MANAGEMENT_DIR / "TRACEABILITY.md"
+    traceability_text = traceability_path.read_text(encoding="utf-8") if traceability_path.exists() else ""
+    audit = audit_findings(model, traceability_text) if not model.errors else []
+    audit_by_requirement: dict[str, list[object]] = {}
+    for finding in audit:
+        audit_by_requirement.setdefault(finding.requirement.id, []).append(finding)
+    tech_debt = tool.chase_tech_debts(0, 500)
+    confirmed_tech_debt = confirmed_tech_debt_payload(model)
     risks = tool.open_ledger_entries(tool.MANAGEMENT_DIR / "RISKS.md")
     incidents = tool.open_ledger_entries(tool.MANAGEMENT_DIR / "INCIDENTS.md")
     experiments = tool.open_ledger_entries(tool.MANAGEMENT_DIR / "EXPERIMENTS.md")
@@ -156,14 +280,19 @@ def model_payload(stale_days: int = DEFAULT_STALE_DAYS) -> dict[str, object]:
             "open_risks": len(risks),
             "open_incidents": len(incidents),
             "active_experiments": len(experiments),
+            "audit_blockers": sum(1 for finding in audit if finding.severity == "BLOCKER"),
+            "audit_reviews": sum(1 for finding in audit if finding.severity == "REVIEW"),
+            "tech_debt_findings": len(tech_debt),
+            "confirmed_tech_debts": len(confirmed_tech_debt),
         },
         "state_counts": counts,
+        "audit_findings": [audit_finding_payload(finding) for finding in audit],
         "requirements": [
-            requirement_payload(model, requirement, links)
+            requirement_payload(model, requirement, links, traceability_text, audit_by_requirement.get(requirement.id, []))
             for requirement in sorted(model.requirements.values(), key=lambda candidate: candidate.id)
         ],
         "work_items": [
-            work_item_payload(item)
+            work_item_payload(item, model, audit_by_requirement, links)
             for item in sorted(model.work_items.values(), key=lambda candidate: candidate.id)
         ],
         "traceability": [traceability_payload(link) for link in links],
@@ -175,6 +304,14 @@ def model_payload(stale_days: int = DEFAULT_STALE_DAYS) -> dict[str, object]:
             "risks": [ledger_payload(entry) for entry in risks],
             "incidents": [ledger_payload(entry) for entry in incidents],
             "experiments": [ledger_payload(entry) for entry in experiments],
+            "tech_debts": {
+                "auto_detected": [tech_debt_payload(finding) for finding in tech_debt],
+                "confirmed": confirmed_tech_debt,
+            },
+        },
+        "tech_debts": {
+            "auto_detected": [tech_debt_payload(finding) for finding in tech_debt],
+            "confirmed": confirmed_tech_debt,
         },
         "diagrams": {
             "architecture_real": "/diagrams/architecture-real.svg",
