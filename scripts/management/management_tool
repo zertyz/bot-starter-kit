@@ -142,6 +142,14 @@ class WorkItem:
         return trim_blank_lines(self.body_lines)
 
 
+@dataclasses.dataclass(frozen=True)
+class BranchRef:
+    raw: str
+    work_id: str
+    owner: str | None
+    is_feature: bool
+
+
 @dataclasses.dataclass
 class ManagementModel:
     requirements: dict[str, Requirement] = dataclasses.field(default_factory=dict)
@@ -337,27 +345,58 @@ def load_model() -> ManagementModel:
 
 
 def current_branch() -> str:
-    result = subprocess.run(
-        ["git", "branch", "--show-current"],
+    branch = git_output(["branch", "--show-current"])
+    if not branch:
+        raise RuntimeError("git is in detached HEAD; pass a branch or work item explicitly")
+    return branch
+
+
+def git_result(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
         cwd=REPO_ROOT,
         check=False,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+
+
+def git_output(args: list[str]) -> str:
+    result = git_result(args)
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "failed to read current git branch")
-    branch = result.stdout.strip()
-    if not branch:
-        raise RuntimeError("git is in detached HEAD; pass a branch or work item explicitly")
-    return branch
+        detail = result.stderr.strip() or result.stdout.strip() or f"git {' '.join(args)} failed"
+        raise RuntimeError(detail)
+    return result.stdout.strip()
+
+
+def git_ref_exists(ref: str) -> bool:
+    return git_result(["rev-parse", "--verify", "--quiet", ref]).returncode == 0
+
+
+def git_branch_exists(branch: str) -> bool:
+    return git_ref_exists(f"refs/heads/{branch}")
+
+
+def git_worktree_is_dirty() -> bool:
+    return bool(git_output(["status", "--porcelain"]))
 
 
 def parse_branch_or_work_ref(raw_ref: str) -> tuple[str | None, str]:
+    branch_ref = parse_branch_ref(raw_ref)
+    return branch_ref.owner, branch_ref.work_id
+
+
+def parse_branch_ref(raw_ref: str) -> BranchRef:
     match = BRANCH_RE.match(raw_ref)
     if not match:
         raise ValueError(f"invalid branch or work item reference: {raw_ref}")
-    return match.group("owner"), match.group("work_id")
+    return BranchRef(
+        raw=raw_ref,
+        work_id=match.group("work_id"),
+        owner=match.group("owner"),
+        is_feature=raw_ref.startswith("feature/"),
+    )
 
 
 def resolve_work_item(model: ManagementModel, raw_ref: str | None) -> tuple[str, WorkItem]:
@@ -567,6 +606,74 @@ def print_work_item(model: ManagementModel, item: WorkItem) -> None:
         print_requirement(requirement)
 
 
+def branch_owner_errors(item: WorkItem, branch_ref: BranchRef, explicit_user: str | None = None) -> list[str]:
+    errors: list[str] = []
+    if not branch_ref.is_feature and branch_ref.owner is None:
+        errors.append("ordinary work branches must use `<developer_username>/<work item id>`")
+    if branch_ref.is_feature:
+        if explicit_user and item.owner and explicit_user.lower() != item.owner.lower():
+            errors.append(f"--user {explicit_user} does not match backlog owner {item.owner}")
+        return errors
+    if item.owner is None:
+        errors.append(f"{item.id} has no backlog owner")
+    elif branch_ref.owner and branch_ref.owner.lower() != item.owner.lower():
+        errors.append(f"branch owner {branch_ref.owner} does not match backlog owner {item.owner}")
+    if explicit_user and item.owner and explicit_user.lower() != item.owner.lower():
+        errors.append(f"--user {explicit_user} does not match backlog owner {item.owner}")
+    return errors
+
+
+def started_work_errors(model: ManagementModel, item: WorkItem, branch_ref: BranchRef, explicit_user: str | None = None) -> list[str]:
+    errors: list[str] = []
+    if item.requirement_id not in model.requirements:
+        errors.append(f"{item.id} references missing requirement {item.requirement_id}")
+    if item.state != "Started":
+        errors.append(f"{item.id} is in state {item.state}; engineering work branches must reference a Started work item")
+    errors.extend(branch_owner_errors(item, branch_ref, explicit_user))
+    return errors
+
+
+def run_git(args: list[str], dry_run: bool) -> None:
+    print(f"$ git {' '.join(args)}")
+    if not dry_run:
+        git_output(args)
+
+
+def remote_branch_ref(branch: str) -> str:
+    return f"origin/{branch}"
+
+
+def remote_branch_exists(branch: str) -> bool:
+    return git_ref_exists(f"refs/remotes/{remote_branch_ref(branch)}")
+
+
+def ensure_ref_exists(ref: str) -> None:
+    if not git_ref_exists(ref):
+        raise RuntimeError(f"git ref {ref} does not exist; pass --base or update local refs first")
+
+
+def create_or_switch_branch(branch: str, base_ref: str, dry_run: bool, assume_base_ref_exists: bool = False) -> None:
+    if git_branch_exists(branch):
+        run_git(["switch", branch], dry_run)
+        return
+    if remote_branch_exists(branch):
+        run_git(["switch", "-c", branch, remote_branch_ref(branch)], dry_run)
+        return
+    if not assume_base_ref_exists:
+        ensure_ref_exists(base_ref)
+    run_git(["switch", "-c", branch, base_ref], dry_run)
+
+
+def ensure_feature_branch(feature_branch: str, base_ref: str, dry_run: bool) -> None:
+    if git_branch_exists(feature_branch):
+        return
+    if remote_branch_exists(feature_branch):
+        run_git(["switch", "-c", feature_branch, remote_branch_ref(feature_branch)], dry_run)
+        return
+    ensure_ref_exists(base_ref)
+    run_git(["switch", "-c", feature_branch, base_ref], dry_run)
+
+
 def cmd_lint(args: argparse.Namespace) -> int:
     model = load_model()
 
@@ -615,32 +722,86 @@ def cmd_show_work(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chat_about(args: argparse.Namespace) -> int:
+    args.chat_prompt = True
+    return cmd_show_work(args)
+
+
 def cmd_verify_branch(args: argparse.Namespace) -> int:
     model = load_model()
     try:
         raw_ref, item = resolve_work_item(model, args.branch)
-        owner, _work_id = parse_branch_or_work_ref(raw_ref)
+        branch_ref = parse_branch_ref(raw_ref)
     except (KeyError, RuntimeError, ValueError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
 
-    errors: list[str] = []
-    if item.requirement_id not in model.requirements:
-        errors.append(f"{item.id} references missing requirement {item.requirement_id}")
-    if item.state != "Started":
-        errors.append(f"{item.id} is in state {item.state}; engineering work branches must reference a Started work item")
-    if item.owner and owner and owner.lower() != item.owner.lower():
-        errors.append(f"branch owner {owner} does not match backlog owner {item.owner}")
+    errors = started_work_errors(model, item, branch_ref)
 
     print_work_item(model, item)
     if errors:
         print()
+        sys.stdout.flush()
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
     print()
     print("Branch context is valid.")
+    return 0
+
+
+def cmd_start_work(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        branch_ref = parse_branch_ref(args.branch)
+        item = model.work_items[branch_ref.work_id]
+    except (KeyError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    errors = started_work_errors(model, item, branch_ref, args.user)
+    if errors:
+        print_work_item(model, item)
+        print()
+        sys.stdout.flush()
+        for error in errors:
+            print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+    if not args.dry_run and not args.allow_dirty and git_worktree_is_dirty():
+        print("error: worktree has uncommitted changes; use --allow-dirty only if you intentionally want to carry them", file=sys.stderr)
+        return 1
+
+    base_ref = args.base or "origin/main"
+    print_work_item(model, item)
+    print()
+    print("Branch operations:")
+
+    try:
+        if branch_ref.is_feature:
+            create_or_switch_branch(branch_ref.raw, base_ref, args.dry_run)
+        elif args.from_feature:
+            feature_branch = args.feature_branch or f"feature/{branch_ref.work_id}"
+            ensure_feature_branch(feature_branch, base_ref, args.dry_run)
+            create_or_switch_branch(branch_ref.raw, feature_branch, args.dry_run, assume_base_ref_exists=args.dry_run)
+        else:
+            create_or_switch_branch(branch_ref.raw, base_ref, args.dry_run)
+    except RuntimeError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    print()
+    if args.dry_run:
+        print(f"Dry run: {branch_ref.raw} is valid and can be started.")
+    else:
+        print(f"Started work on {branch_ref.raw}.")
+    print(f"Run `scripts/management/management_tool chat-about {branch_ref.raw}` to discuss the work context.")
     return 0
 
 
@@ -710,6 +871,14 @@ def build_parser() -> argparse.ArgumentParser:
     show_work.add_argument("--chat-prompt", action="store_true", help="Append a short prompt for discussing the work with an AI assistant.")
     show_work.set_defaults(func=cmd_show_work)
 
+    chat_about = subparsers.add_parser(
+        "chat-about",
+        aliases=["chat_about"],
+        help="Print the current work item, requirement, and AI discussion prompt.",
+    )
+    chat_about.add_argument("ref", nargs="?", help="Work item id or branch name. Defaults to the current branch.")
+    chat_about.set_defaults(func=cmd_chat_about)
+
     verify_branch = subparsers.add_parser("verify-branch", help="Validate that a branch references a Started work item.")
     verify_branch.add_argument("branch", nargs="?", help="Branch name. Defaults to the current branch.")
     verify_branch.set_defaults(func=cmd_verify_branch)
@@ -725,6 +894,20 @@ def build_parser() -> argparse.ArgumentParser:
     advance_state.add_argument("--engineer", help="Responsible engineer, required for Planned to Started when the item has no owner.")
     advance_state.add_argument("--dry-run", action="store_true", help="Print the intended transition without editing the backlog.")
     advance_state.set_defaults(func=cmd_advance_state)
+
+    start_work = subparsers.add_parser(
+        "start-work",
+        aliases=["start_work"],
+        help="Validate a Started work item and create or switch to its branch.",
+    )
+    start_work.add_argument("branch", help="Branch name, such as `<developer>/EN.MCP.01-001` or `feature/EN.MCP.01-001`.")
+    start_work.add_argument("--base", help="Base git ref for new branches. Default: origin/main.")
+    start_work.add_argument("--user", help="Current responsible user for owner validation.")
+    start_work.add_argument("--from-feature", action="store_true", help="Create an ordinary work branch from `feature/<work item id>` instead of the base ref.")
+    start_work.add_argument("--feature-branch", help="Feature branch to use with --from-feature. Default: feature/<work item id>.")
+    start_work.add_argument("--allow-dirty", action="store_true", help="Allow actual branch switching with uncommitted worktree changes.")
+    start_work.add_argument("--dry-run", action="store_true", help="Print validation and git commands without switching branches.")
+    start_work.set_defaults(func=cmd_start_work)
 
     return parser
 
