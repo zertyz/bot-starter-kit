@@ -8,6 +8,7 @@ import dataclasses
 import re
 import subprocess
 import sys
+from datetime import date, datetime
 from pathlib import Path
 
 
@@ -51,6 +52,21 @@ VALID_STATES = [
 
 VALID_STATE_SET = set(VALID_STATES)
 
+STATE_FLOW = {
+    "Under Planning": "Planned",
+    "Planned": "Started",
+    "Started": "In Code Review",
+    "In Code Review": "QA",
+    "Integrated": "QA",
+    "QA": "Merged",
+    "Merged": "Rolled Out",
+}
+
+STATE_HEADINGS = {
+    "In Code Review": '# "In Code Review"',
+    "Integrated": '# "Integrated"',
+}
+
 SECTION_RE = re.compile(r'^#\s+(?P<title>.+?)\s+"(?P<abbr>[A-Za-z][A-Za-z0-9]*)"\s*$')
 REQUIREMENT_HEADING_RE = re.compile(r"^#{2,6}\s+(?P<number>\d{2})(?P<subtopics>(?:\.[a-z]+)*)\)\s+(?P<title>.+?)\s*$")
 STATE_HEADING_RE = re.compile(r'^#\s+(?P<state>"?[^"#]+"?)\s*$')
@@ -66,7 +82,8 @@ BRANCH_RE = re.compile(
     r"^(?:feature/|(?P<owner>[A-Za-z0-9_.-]+)/)?"
     r"(?P<work_id>[BEO][NRFX]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*-\d{3})$"
 )
-TIMELINE_OWNER_RE = re.compile(r"==>\s*(?P<owner>[^.]+)\.\s*(?P<trail>.+)$")
+TIMELINE_MARKER_RE = re.compile(r"==>\s*(?P<trail>.+)$")
+TIMELINE_OWNER_RE = re.compile(r"^(?P<owner>[^.:;]+)\.\s+")
 TIMELINE_STATE_RE = re.compile(
     r"(?P<state>Under Planning|Planned|Started|In Code Review|Integrated|QA|Merged|Rolled Out|Rejected|Cancelled|Superseded by [^:;]+)"
     r"\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})"
@@ -284,11 +301,14 @@ def parse_backlog_file(model: ManagementModel, document: str, path: Path) -> Non
 
 def parse_work_timeline(model: ManagementModel, item: WorkItem) -> None:
     for body_line in item.body_lines:
-        owner_match = TIMELINE_OWNER_RE.search(body_line)
-        if not owner_match:
+        marker_match = TIMELINE_MARKER_RE.search(body_line)
+        if not marker_match:
             continue
-        item.owner = owner_match.group("owner").strip()
-        for state_match in TIMELINE_STATE_RE.finditer(owner_match.group("trail")):
+        trail = marker_match.group("trail")
+        owner_match = TIMELINE_OWNER_RE.match(trail)
+        if owner_match and TIMELINE_STATE_RE.search(trail[owner_match.end() :]):
+            item.owner = owner_match.group("owner").strip()
+        for state_match in TIMELINE_STATE_RE.finditer(trail):
             item.timeline[state_match.group("state")] = state_match.group("date")
 
     if item.state in VALID_STATE_SET and item.state not in item.timeline:
@@ -346,6 +366,176 @@ def resolve_work_item(model: ManagementModel, raw_ref: str | None) -> tuple[str,
     if work_id not in model.work_items:
         raise KeyError(f"{work_id} was not found in any backlog")
     return ref, model.work_items[work_id]
+
+
+def validate_iso_date(raw_date: str) -> str:
+    try:
+        datetime.strptime(raw_date, "%Y-%m-%d")
+    except ValueError as err:
+        raise ValueError(f"invalid date {raw_date}; expected YYYY-MM-DD") from err
+    return raw_date
+
+
+def target_state_for(item: WorkItem, raw_state: str | None) -> str:
+    if raw_state:
+        state = strip_state(raw_state)
+        if state not in VALID_STATE_SET:
+            valid = ", ".join(VALID_STATES)
+            raise ValueError(f"invalid target state {raw_state}; expected one of: {valid}")
+        return state
+
+    state = STATE_FLOW.get(item.state)
+    if state is None:
+        raise ValueError(f"{item.id} is in state {item.state}; no default next state is defined")
+    return state
+
+
+def state_heading(state: str) -> str:
+    return STATE_HEADINGS.get(state, f"# {state}")
+
+
+def backlog_sections(lines: list[str]) -> list[tuple[str, int, int]]:
+    starts: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        match = STATE_HEADING_RE.match(line.rstrip("\n"))
+        if match and not line.startswith("##"):
+            starts.append((strip_state(match.group("state")), index))
+
+    sections: list[tuple[str, int, int]] = []
+    for index, (state, start) in enumerate(starts):
+        end = starts[index + 1][1] if index + 1 < len(starts) else len(lines)
+        sections.append((state, start, end))
+    return sections
+
+
+def find_work_block(lines: list[str], work_item_id: str) -> tuple[int, int]:
+    start: int | None = None
+    for index, line in enumerate(lines):
+        match = WORK_ITEM_RE.match(line.rstrip("\n"))
+        if match and match.group("id") == work_item_id:
+            start = index
+            break
+    if start is None:
+        raise ValueError(f"{work_item_id} was not found in its backlog file")
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("# ") or line.startswith("## "):
+            end = index
+            break
+    return start, end
+
+
+def timeline_entries(item: WorkItem, target_state: str, state_date: str) -> list[tuple[str, str]]:
+    entries = list(item.timeline.items())
+    if target_state not in item.timeline:
+        entries.append((target_state, state_date))
+    return entries
+
+
+def timeline_line(item: WorkItem, target_state: str, state_date: str, engineer: str | None, indent: str = "") -> str:
+    owner = engineer or item.owner
+    prefix = f"{indent}==> "
+    if owner:
+        prefix += f"{owner}. "
+    states = "; ".join(f"{state}: {entered_at}" for state, entered_at in timeline_entries(item, target_state, state_date))
+    return f"{prefix}{states};\n"
+
+
+def update_work_block_timeline(block: list[str], item: WorkItem, target_state: str, state_date: str, engineer: str | None) -> list[str]:
+    updated = list(block)
+    timeline_index: int | None = None
+    indent = ""
+
+    for index, line in enumerate(updated):
+        marker_match = TIMELINE_MARKER_RE.search(line)
+        if marker_match:
+            timeline_index = index
+            indent = line[: marker_match.start()]
+
+    if timeline_index is None:
+        insert_index = len(updated)
+        while insert_index > 0 and not updated[insert_index - 1].strip():
+            insert_index -= 1
+        updated.insert(insert_index, timeline_line(item, target_state, state_date, engineer))
+        return updated
+
+    updated[timeline_index] = timeline_line(item, target_state, state_date, engineer, indent)
+    return updated
+
+
+def ensure_state_section(lines: list[str], state: str) -> list[str]:
+    if any(section_state == state for section_state, _start, _end in backlog_sections(lines)):
+        return lines
+
+    heading = f"{state_heading(state)}\n"
+    state_order = {value: index for index, value in enumerate(VALID_STATES)}
+    target_order = state_order[state]
+
+    insert_index = len(lines)
+    for section_state, start, _end in backlog_sections(lines):
+        if state_order.get(section_state, 999) > target_order:
+            insert_index = start
+            break
+
+    section_lines = [heading, "\n"]
+    if insert_index == len(lines):
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if lines:
+            lines.extend(["\n", "\n", *section_lines])
+        else:
+            lines.extend(section_lines)
+        return lines
+
+    if insert_index > 0 and lines[insert_index - 1].strip():
+        section_lines.insert(0, "\n")
+    lines[insert_index:insert_index] = section_lines
+    return lines
+
+
+def insertion_index_for_state(lines: list[str], state: str) -> int:
+    for section_state, start, end in backlog_sections(lines):
+        if section_state != state:
+            continue
+        insert_index = end
+        while insert_index > start + 1 and not lines[insert_index - 1].strip():
+            insert_index -= 1
+        return insert_index
+    raise ValueError(f"missing state section {state}")
+
+
+def normalize_moved_block(block: list[str]) -> list[str]:
+    start = 0
+    end = len(block)
+    while start < end and not block[start].strip():
+        start += 1
+    while end > start and not block[end - 1].strip():
+        end -= 1
+    normalized = block[start:end]
+    if normalized and not normalized[-1].endswith("\n"):
+        normalized[-1] += "\n"
+    return normalized
+
+
+def replace_or_move_work_item(item: WorkItem, target_state: str, state_date: str, engineer: str | None) -> None:
+    lines = item.path.read_text(encoding="utf-8").splitlines(keepends=True)
+    start, end = find_work_block(lines, item.id)
+    block = update_work_block_timeline(lines[start:end], item, target_state, state_date, engineer)
+
+    if target_state == item.state:
+        lines[start:end] = block
+        item.path.write_text("".join(lines), encoding="utf-8")
+        return
+
+    del lines[start:end]
+    lines = ensure_state_section(lines, target_state)
+    insert_index = insertion_index_for_state(lines, target_state)
+    normalized_block = normalize_moved_block(block)
+    insertion = ["\n", *normalized_block, "\n"]
+    lines[insert_index:insert_index] = insertion
+    item.path.write_text("".join(lines), encoding="utf-8")
 
 
 def print_requirement(requirement: Requirement) -> None:
@@ -454,6 +644,55 @@ def cmd_verify_branch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_advance_state(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+        target_state = target_state_for(item, args.to)
+        state_date = validate_iso_date(args.date or date.today().isoformat())
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    engineer = args.engineer
+    if item.state == "Planned" and target_state == "Started" and not (engineer or item.owner):
+        print("error: --engineer is required when moving Planned to Started", file=sys.stderr)
+        return 1
+
+    print("Before:")
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+
+    if target_state == item.state and target_state in item.timeline:
+        print()
+        print(f"No change: {item.id} already has {target_state}: {item.timeline[target_state]}")
+        return 0
+
+    if args.dry_run:
+        print()
+        print(f"Dry run: would move {item.id} from {item.state} to {target_state} using date {state_date}.")
+        return 0
+
+    try:
+        replace_or_move_work_item(item, target_state, state_date, engineer)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    updated_model = load_model()
+    updated_item = updated_model.work_items[item.id]
+    print()
+    print("After:")
+    print_work_item(updated_model, updated_item)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Management requirements and backlog helper.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -474,6 +713,18 @@ def build_parser() -> argparse.ArgumentParser:
     verify_branch = subparsers.add_parser("verify-branch", help="Validate that a branch references a Started work item.")
     verify_branch.add_argument("branch", nargs="?", help="Branch name. Defaults to the current branch.")
     verify_branch.set_defaults(func=cmd_verify_branch)
+
+    advance_state = subparsers.add_parser(
+        "advance-state",
+        aliases=["advance_state"],
+        help="Move a backlog work item to its next state or an explicit target state.",
+    )
+    advance_state.add_argument("ref", help="Work item id or branch name.")
+    advance_state.add_argument("--to", help="Target state. Defaults to the next happy-path state.")
+    advance_state.add_argument("--date", help="State-entry date in YYYY-MM-DD. Defaults to today.")
+    advance_state.add_argument("--engineer", help="Responsible engineer, required for Planned to Started when the item has no owner.")
+    advance_state.add_argument("--dry-run", action="store_true", help="Print the intended transition without editing the backlog.")
+    advance_state.set_defaults(func=cmd_advance_state)
 
     return parser
 
