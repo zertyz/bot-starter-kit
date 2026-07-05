@@ -12,6 +12,16 @@ scripts/ci/enforce_management_rules
 This runs the management linter and the management-tool test suite.
 
 
+## Management Dashboard
+
+```bash
+scripts/management/management_status
+scripts/management/management_status --html public/management
+```
+
+The command prints a project-management status summary and can render a static HTML dashboard. GitHub Pages publishes the dashboard next to Rust docs, coverage, and benchmark reports.
+
+
 ## Advance Backlog State
 
 ```bash
@@ -89,6 +99,53 @@ scripts/management/sync_requirement E.MCP.01 --strict
 ```
 
 The command checks one requirement against mapped backlog work, `TRACEABILITY.md`, evidence paths, and source mentions. It reports drift signals and a local coherence verdict; it does not prove runtime behavior satisfies the requirement.
+
+
+## Trace and Link Evidence
+
+```bash
+scripts/management/trace_requirement E.MCP.01
+scripts/management/link_evidence E.MCP.01 EN.MCP.01-001 src/messaging/user_router.rs
+```
+
+Evidence is a concrete artifact that supports a requirement or work item: code, tests, benchmarks, review notes, release notes, operational logs, incident follow-up, or documentation. `trace_requirement` shows the current knowledge base for one requirement. `link_evidence` updates `TRACEABILITY.md` after validating the requirement, work item, and evidence paths.
+
+
+## Release Commands
+
+```bash
+scripts/management/prepare_release 1.2.3-rc.1
+scripts/management/create_release_tag 1.2.3-rc.1
+scripts/management/create_release_tag 1.2.3-rc.1 --execute
+```
+
+`prepare_release` prints a release decision packet and never creates tags. `create_release_tag` validates the tag format and clean worktree; it is a dry run unless `--execute` is passed.
+
+
+## Supporting Ledgers
+
+```bash
+scripts/management/record_decision "Use gateway-owned routing" --context "..." --decision "..." --consequence "..."
+scripts/management/record_risk "Feature drift" --owner "Product Manager" --risk "..." --impact "..." --mitigation "..."
+scripts/management/close_risk RISK-0001 --evidence "..."
+scripts/management/record_incident "Webhook outage" --environment Staging --impact "..." --timeline "..." --mitigation "..."
+scripts/management/close_incident INCIDENT-0001 --evidence "..."
+scripts/management/record_experiment "Try platform feature cache" --branch Luiz/EX.MCP.02.b-001 --hypothesis "..." --expires 2026-08-01 --success "..." --failure "..."
+scripts/management/close_experiment EXP-0001 --status Adopted --result "..."
+```
+
+A decision is an accepted project choice that constrains future work; it should record context, the decision, consequences, and related requirements or work. A risk is a known possible future problem with owner, impact, mitigation, and review date. An incident is a production, staging, data, security, or release failure that teaches the project something operationally useful. An experiment is a time-boxed `X` branch, spike, prototype, or research effort with hypothesis, expiration, criteria, and result.
+
+
+## Meeting and Acceptance Packets
+
+```bash
+scripts/management/stale_work
+scripts/management/meeting_packet
+scripts/management/acceptance_packet EN.MCP.01-001
+```
+
+`stale_work` lists active work older than the configured threshold. `meeting_packet` prints a manager/PM/engineering sync packet. `acceptance_packet` gathers requirement, definition-of-done, traceability, and verification context for human acceptance.
 
 
 ## Chase Technical Debts

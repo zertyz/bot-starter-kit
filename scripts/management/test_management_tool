@@ -230,6 +230,112 @@ class ManagementToolTest(unittest.TestCase):
         self.assertIn("Tech Debt Chase", debts.stdout)
         self.assertIn("Findings:", debts.stdout)
 
+    def test_management_status_renders_dashboard(self) -> None:
+        dashboard_dir = self.root / "public" / "management"
+        status = self.tool_run("management-status", "--html", str(dashboard_dir), "--stale-days", "0")
+        self.assertIn("Management Status", status.stdout)
+        self.assertIn("HTML dashboard:", status.stdout)
+        dashboard = (dashboard_dir / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Management Dashboard", dashboard)
+        self.assertIn("Traceability Gaps", dashboard)
+
+    def test_trace_requirement_and_link_evidence(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text("pub fn route() {}\n", encoding="utf-8")
+        link = self.tool_run("link-evidence", "E.MCP.01", "EN.MCP.01-001", "src/lib.rs")
+        self.assertIn("Evidence Link", link.stdout)
+        traceability = (self.management / "TRACEABILITY.md").read_text(encoding="utf-8")
+        self.assertIn("| `E.MCP.01` | `EN.MCP.01-001` | Started | `src/lib.rs` |", traceability)
+        trace = self.tool_run("trace-requirement", "E.MCP.01")
+        self.assertIn("Requirement Trace", trace.stdout)
+        self.assertIn("src/lib.rs", trace.stdout)
+
+    def test_prepare_release_and_tag_dry_run(self) -> None:
+        release = self.tool_run("prepare-release", "1.2.3-rc.1")
+        self.assertIn("Release Packet", release.stdout)
+        self.assertIn("release candidate", release.stdout)
+        tag = self.tool_run("create-release-tag", "1.2.3-rc.1")
+        self.assertIn("Release Tag", tag.stdout)
+        self.assertIn("Dry run:", tag.stdout)
+
+    def test_record_and_close_supporting_ledgers(self) -> None:
+        decision = self.tool_run(
+            "record-decision",
+            "Use dashboard",
+            "--context",
+            "Management needs shared status.",
+            "--decision",
+            "Generate a static dashboard.",
+            "--consequence",
+            "Pages carries management status.",
+            "--related",
+            "management/TOOLING.md",
+            "--date",
+            "2026-07-08",
+        )
+        self.assertIn("Recorded decision DEC-0001", decision.stdout)
+        risk = self.tool_run(
+            "record-risk",
+            "Dashboard drift",
+            "--owner",
+            "Manager",
+            "--risk",
+            "Dashboard can lag source files.",
+            "--impact",
+            "Humans may read stale status.",
+            "--mitigation",
+            "Regenerate on Pages.",
+            "--review-date",
+            "2026-08-01",
+        )
+        self.assertIn("Recorded risk RISK-0001", risk.stdout)
+        close_risk = self.tool_run("close-risk", "RISK-0001", "--evidence", "Dashboard generation verified.", "--date", "2026-07-09")
+        self.assertIn("Closed risk RISK-0001", close_risk.stdout)
+        incident = self.tool_run(
+            "record-incident",
+            "Staging failure",
+            "--environment",
+            "Staging",
+            "--impact",
+            "Deploy failed.",
+            "--timeline",
+            "CI reported failure.",
+            "--mitigation",
+            "Rollback deployment.",
+        )
+        self.assertIn("Recorded incident INCIDENT-0001", incident.stdout)
+        close_incident = self.tool_run("close-incident", "INCIDENT-0001", "--evidence", "Rollback completed.")
+        self.assertIn("Closed incident INCIDENT-0001", close_incident.stdout)
+        experiment = self.tool_run(
+            "record-experiment",
+            "Try cache",
+            "--branch",
+            "Luiz/EX.MCP.02.b-001",
+            "--hypothesis",
+            "A cache helps platform inquiry.",
+            "--expires",
+            "2026-08-01",
+            "--success",
+            "Latency improves.",
+            "--failure",
+            "Complexity increases.",
+        )
+        self.assertIn("Recorded experiment EXP-0001", experiment.stdout)
+        close_experiment = self.tool_run("close-experiment", "EXP-0001", "--status", "Rejected", "--result", "Complexity was not worth it.")
+        self.assertIn("Closed experiment EXP-0001 as Rejected", close_experiment.stdout)
+
+    def test_stale_meeting_and_acceptance_packets(self) -> None:
+        stale = self.tool_run("stale-work", "--days", "0")
+        self.assertIn("Stale Work", stale.stdout)
+        self.assertIn("ER.MCP.02.a-001", stale.stdout)
+        meeting = self.tool_run("meeting-packet", "--stale-days", "0")
+        self.assertIn("Meeting Packet", meeting.stdout)
+        self.assertIn("Suggested agenda:", meeting.stdout)
+        acceptance = self.tool_run("acceptance-packet", "EN.MCP.01-001")
+        self.assertIn("Acceptance Packet", acceptance.stdout)
+        self.assertIn("Acceptance checklist:", acceptance.stdout)
+
     def test_verification_check_reports_existing_evidence(self) -> None:
         src = self.root / "src"
         src.mkdir()

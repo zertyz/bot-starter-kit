@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import html
 import re
 import subprocess
 import sys
@@ -180,6 +181,7 @@ ESTIMATE_HOUR_BANDS = [
 TECH_DEBT_MARKERS = ["TODO", "FIXME", "HACK", "XXX"]
 SENSITIVE_TERMS = ["api_key", "credential", "password", "private_key", "secret", "token"]
 RISKY_RUST_SHORTCUTS = ["panic!(", ".unwrap()", ".expect("]
+RELEASE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-rc\.\d+)?$")
 
 SECTION_RE = re.compile(r'^#\s+(?P<title>.+?)\s+"(?P<abbr>[A-Za-z][A-Za-z0-9]*)"\s*$')
 REQUIREMENT_HEADING_RE = re.compile(r"^#{2,6}\s+(?P<number>\d{2})(?P<subtopics>(?:\.[a-z]+)*)\)\s+(?P<title>.+?)\s*$")
@@ -202,6 +204,7 @@ TIMELINE_STATE_RE = re.compile(
     r"(?P<state>Under Planning|Planned|Started|In Code Review|Integrated|QA|Merged|Rolled Out|Rejected|Cancelled|Superseded by [^:;]+)"
     r"\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})"
 )
+LEDGER_HEADING_RE = re.compile(r"^#{2,3}\s+(?P<id>[A-Z]+-\d{4}|`?[^`\s]+`?)\s+--\s+(?P<title>.+?)\s*$")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -308,6 +311,24 @@ class TechDebtFinding:
 
     def format(self) -> str:
         return f"{self.severity}: {self.category}: {self.path}:{self.line}: {self.message}"
+
+
+@dataclasses.dataclass(frozen=True)
+class LedgerEntry:
+    id: str
+    title: str
+    status: str | None
+    path: Path
+    line: int
+    body: str
+
+
+@dataclasses.dataclass(frozen=True)
+class StaleWorkItem:
+    item: WorkItem
+    state_date: str | None
+    age_days: int | None
+    reason: str
 
 
 def relative(path: Path) -> str:
@@ -1312,6 +1333,325 @@ def chase_tech_debts(limit: int, long_file_lines: int) -> list[TechDebtFinding]:
     return findings if limit <= 0 else findings[:limit]
 
 
+def ledger_entries(path: Path) -> list[LedgerEntry]:
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    starts: list[tuple[int, re.Match[str]]] = []
+    for index, line in enumerate(lines):
+        match = LEDGER_HEADING_RE.match(line)
+        if match:
+            starts.append((index, match))
+
+    entries: list[LedgerEntry] = []
+    for position, (start, match) in enumerate(starts):
+        if "<" in match.group("title"):
+            continue
+        end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
+        body_lines = lines[start + 1 : end]
+        body = "\n".join(body_lines).strip()
+        status_match = re.search(r"^Status:\s*(?P<status>.+?)\s*$", body, flags=re.MULTILINE)
+        raw_id = match.group("id").strip("`")
+        entries.append(
+            LedgerEntry(
+                id=raw_id,
+                title=match.group("title"),
+                status=status_match.group("status").strip("` ") if status_match else None,
+                path=path,
+                line=start + 1,
+                body=body,
+            )
+        )
+    return entries
+
+
+def next_ledger_id(entries: list[LedgerEntry], prefix: str) -> str:
+    highest = 0
+    for entry in entries:
+        match = re.fullmatch(rf"{re.escape(prefix)}-(\d{{4}})", entry.id)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"{prefix}-{highest + 1:04d}"
+
+
+def append_markdown_entry(path: Path, entry: str) -> None:
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    separator = "\n\n" if content.rstrip() else ""
+    path.write_text(f"{content.rstrip()}{separator}{entry.rstrip()}\n", encoding="utf-8")
+
+
+def insert_markdown_entry_before(path: Path, marker: str, entry: str) -> None:
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    marker_index = content.find(marker)
+    if marker_index < 0:
+        append_markdown_entry(path, entry)
+        return
+    before = content[:marker_index].rstrip()
+    after = content[marker_index:].lstrip("\n")
+    path.write_text(f"{before}\n\n{entry.rstrip()}\n\n{after}", encoding="utf-8")
+
+
+def replace_ledger_entry(path: Path, entry_id: str, replacement_body: str) -> bool:
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    start: int | None = None
+    for index, line in enumerate(lines):
+        match = LEDGER_HEADING_RE.match(line.rstrip("\n"))
+        if match and match.group("id").strip("`") == entry_id:
+            start = index
+            break
+    if start is None:
+        return False
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if LEDGER_HEADING_RE.match(lines[index].rstrip("\n")):
+            end = index
+            break
+    replacement_lines = [line if line.endswith("\n") else f"{line}\n" for line in replacement_body.rstrip().splitlines()]
+    lines[start:end] = [*replacement_lines, "\n"]
+    path.write_text("".join(lines), encoding="utf-8")
+    return True
+
+
+def update_ledger_status(entry: LedgerEntry, status: str, closure_lines: list[str]) -> None:
+    lines = [f"### {entry.id} -- {entry.title}", *entry.body.splitlines()]
+    updated: list[str] = []
+    replaced = False
+    for line in lines:
+        if line.startswith("Status:"):
+            updated.append(f"Status: {status}")
+            replaced = True
+        else:
+            updated.append(line)
+    if not replaced:
+        updated.insert(1, f"Status: {status}")
+    if closure_lines:
+        updated.extend(["", *closure_lines])
+    if not replace_ledger_entry(entry.path, entry.id, "\n".join(updated)):
+        raise ValueError(f"{entry.id} was not found in {relative(entry.path)}")
+
+
+def ledger_entry_by_id(path: Path, entry_id: str) -> LedgerEntry:
+    for entry in ledger_entries(path):
+        if entry.id == entry_id:
+            return entry
+    raise ValueError(f"{entry_id} was not found in {relative(path)}")
+
+
+def state_counts(model: ManagementModel) -> dict[str, int]:
+    counts = {state: 0 for state in VALID_STATES}
+    for item in model.work_items.values():
+        counts[item.state] = counts.get(item.state, 0) + 1
+    return counts
+
+
+def last_state_date(item: WorkItem) -> str | None:
+    if item.state in item.timeline:
+        return item.timeline[item.state]
+    if item.timeline:
+        return list(item.timeline.values())[-1]
+    return None
+
+
+def stale_work_items(model: ManagementModel, threshold_days: int) -> list[StaleWorkItem]:
+    today = date.today()
+    stale_states = {"Under Planning", "Planned", "Started", "In Code Review", "Integrated", "QA"}
+    stale: list[StaleWorkItem] = []
+    for item in sorted(model.work_items.values(), key=lambda candidate: candidate.id):
+        if item.state not in stale_states:
+            continue
+        state_date = last_state_date(item)
+        if not state_date:
+            stale.append(StaleWorkItem(item, None, None, "missing dated state trail"))
+            continue
+        try:
+            age_days = (today - datetime.strptime(state_date, "%Y-%m-%d").date()).days
+        except ValueError:
+            stale.append(StaleWorkItem(item, state_date, None, "invalid state date"))
+            continue
+        if age_days >= threshold_days:
+            stale.append(StaleWorkItem(item, state_date, age_days, f"{age_days} days in or since current state"))
+    return stale
+
+
+def open_ledger_entries(path: Path) -> list[LedgerEntry]:
+    closed_statuses = {"Closed", "Adopted", "Rejected", "Expired", "Released", "Rolled back"}
+    return [entry for entry in ledger_entries(path) if (entry.status or "Open") not in closed_statuses]
+
+
+def traceability_gaps(model: ManagementModel) -> list[Requirement]:
+    links = traceability_links()
+    return [
+        requirement
+        for requirement in sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+        if not traceability_links_for(requirement, links)
+    ]
+
+
+def unmapped_requirements(model: ManagementModel) -> list[Requirement]:
+    return [
+        requirement
+        for requirement in sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+        if not requirement_work_items(model, requirement)
+    ]
+
+
+def html_page(title: str, body: str) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <style>
+    body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17202a; }}
+    main {{ max-width: 1180px; margin: 0 auto; }}
+    h1, h2 {{ margin-bottom: 0.4rem; }}
+    section {{ border-top: 1px solid #d8dee4; padding-top: 1rem; margin-top: 1.5rem; }}
+    table {{ border-collapse: collapse; width: 100%; margin-top: 0.75rem; }}
+    th, td {{ border: 1px solid #d8dee4; padding: 0.45rem 0.55rem; text-align: left; vertical-align: top; }}
+    th {{ background: #f6f8fa; }}
+    code {{ background: #f6f8fa; padding: 0.1rem 0.25rem; border-radius: 3px; }}
+    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; }}
+    .card {{ border: 1px solid #d8dee4; border-radius: 6px; padding: 0.75rem; }}
+    .metric {{ font-size: 1.8rem; font-weight: 700; }}
+    .muted {{ color: #57606a; }}
+  </style>
+</head>
+<body>
+<main>
+{body}
+</main>
+</body>
+</html>
+"""
+
+
+def html_table(headers: list[str], rows: list[list[str]]) -> str:
+    header_html = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
+    if not rows:
+        return f"<table><thead><tr>{header_html}</tr></thead><tbody><tr><td colspan=\"{len(headers)}\">None</td></tr></tbody></table>"
+    row_html = []
+    for row in rows:
+        row_html.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>")
+    return f"<table><thead><tr>{header_html}</tr></thead><tbody>{''.join(row_html)}</tbody></table>"
+
+
+def render_management_dashboard(output_dir: Path, model: ManagementModel, stale_days: int) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    risks = open_ledger_entries(MANAGEMENT_DIR / "RISKS.md")
+    incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
+    experiments = open_ledger_entries(MANAGEMENT_DIR / "EXPERIMENTS.md")
+    decisions = ledger_entries(MANAGEMENT_DIR / "DECISIONS.md")[-5:]
+    gaps = traceability_gaps(model)
+    unmapped = unmapped_requirements(model)
+    stale = stale_work_items(model, stale_days)
+    counts = state_counts(model)
+    debt_findings = chase_tech_debts(10, 500)
+
+    cards = [
+        ("Requirements", str(len(model.requirements))),
+        ("Work Items", str(len(model.work_items))),
+        ("Trace Gaps", str(len(gaps))),
+        ("Unmapped", str(len(unmapped))),
+        ("Stale Work", str(len(stale))),
+        ("Open Risks", str(len(risks))),
+        ("Open Incidents", str(len(incidents))),
+        ("Experiments", str(len(experiments))),
+    ]
+    card_html = "".join(
+        f"<div class=\"card\"><div class=\"metric\">{html.escape(value)}</div><div>{html.escape(label)}</div></div>"
+        for label, value in cards
+    )
+    state_rows = [[html.escape(state), str(count)] for state, count in counts.items() if count]
+    stale_rows = [
+        [
+            f"<code>{html.escape(item.item.id)}</code>",
+            html.escape(item.item.state),
+            html.escape(item.item.owner or ""),
+            html.escape(item.state_date or ""),
+            html.escape(str(item.age_days) if item.age_days is not None else ""),
+            html.escape(item.reason),
+        ]
+        for item in stale
+    ]
+    trace_rows = [
+        [f"<code>{html.escape(requirement.id)}</code>", html.escape(requirement.title), html.escape(relative(requirement.path))]
+        for requirement in gaps[:30]
+    ]
+    risk_rows = [[f"<code>{html.escape(entry.id)}</code>", html.escape(entry.title), html.escape(entry.status or "")] for entry in risks]
+    incident_rows = [[f"<code>{html.escape(entry.id)}</code>", html.escape(entry.title), html.escape(entry.status or "")] for entry in incidents]
+    experiment_rows = [[f"<code>{html.escape(entry.id)}</code>", html.escape(entry.title), html.escape(entry.status or "")] for entry in experiments]
+    decision_rows = [[f"<code>{html.escape(entry.id)}</code>", html.escape(entry.title), html.escape(entry.status or "")] for entry in decisions]
+    debt_rows = [[html.escape(finding.category), html.escape(finding.path), str(finding.line), html.escape(finding.message)] for finding in debt_findings]
+
+    body = f"""
+<h1>Management Dashboard</h1>
+<p class="muted">Generated from git-controlled management files. This dashboard reports status and evidence links; it does not replace human acceptance.</p>
+<div class="cards">{card_html}</div>
+<section><h2>Work by State</h2>{html_table(["State", "Count"], state_rows)}</section>
+<section><h2>Stale Work</h2>{html_table(["Work Item", "State", "Owner", "Date", "Age", "Reason"], stale_rows)}</section>
+<section><h2>Traceability Gaps</h2>{html_table(["Requirement", "Title", "Source"], trace_rows)}</section>
+<section><h2>Risks</h2>{html_table(["Risk", "Title", "Status"], risk_rows)}</section>
+<section><h2>Incidents</h2>{html_table(["Incident", "Title", "Status"], incident_rows)}</section>
+<section><h2>Experiments</h2>{html_table(["Experiment", "Title", "Status"], experiment_rows)}</section>
+<section><h2>Recent Decisions</h2>{html_table(["Decision", "Title", "Status"], decision_rows)}</section>
+<section><h2>Tech Debt Leads</h2>{html_table(["Category", "Path", "Line", "Message"], debt_rows)}</section>
+"""
+    target = output_dir / "index.html"
+    target.write_text(html_page("Management Dashboard", body), encoding="utf-8")
+    return target
+
+
+def traceability_evidence_text(paths: list[str], note: str | None) -> str:
+    pieces = [f"`{path}`" for path in paths]
+    if note:
+        pieces.append(note)
+    return "; ".join(pieces)
+
+
+def append_or_update_traceability(requirement_id_value: str, work_item: WorkItem, paths: list[str], note: str | None, state: str | None) -> str:
+    path = MANAGEMENT_DIR / "TRACEABILITY.md"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    new_evidence = traceability_evidence_text(paths, note)
+    row_state = state or work_item.state
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("| `"):
+            continue
+        columns = [column.strip() for column in stripped.strip("|").split("|")]
+        if len(columns) < 4:
+            continue
+        if columns[0].strip("`") == requirement_id_value and columns[1].strip("`") == work_item.id:
+            existing_evidence = columns[3]
+            evidence = existing_evidence
+            if new_evidence and new_evidence not in existing_evidence:
+                evidence = f"{existing_evidence}; {new_evidence}" if existing_evidence else new_evidence
+            lines[index] = f"| `{requirement_id_value}` | `{work_item.id}` | {row_state} | {evidence} |"
+            path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            return "updated"
+
+    insert_index = len(lines)
+    for index, line in enumerate(lines):
+        if line.startswith("## Unmapped Requirement Areas"):
+            insert_index = index
+            break
+    while insert_index > 0 and not lines[insert_index - 1].strip():
+        insert_index -= 1
+    row = f"| `{requirement_id_value}` | `{work_item.id}` | {row_state} | {new_evidence} |"
+    lines[insert_index:insert_index] = [row, ""]
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return "appended"
+
+
+def validate_evidence_paths(paths: list[str], allow_missing: bool) -> list[str]:
+    missing = [path for path in paths if not (REPO_ROOT / path).exists()]
+    if missing and not allow_missing:
+        raise ValueError(f"evidence paths do not exist: {', '.join(missing)}")
+    return missing
+
+
 def issue_line(severity: str, message: str) -> str:
     return f"{severity}: {message}"
 
@@ -1939,6 +2279,542 @@ def cmd_chase_techdebts(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_management_status(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    risks = open_ledger_entries(MANAGEMENT_DIR / "RISKS.md")
+    incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
+    experiments = open_ledger_entries(MANAGEMENT_DIR / "EXPERIMENTS.md")
+    gaps = traceability_gaps(model)
+    unmapped = unmapped_requirements(model)
+    stale = stale_work_items(model, args.stale_days)
+    counts = state_counts(model)
+
+    print("Management Status")
+    print("=================")
+    print(f"Requirements:       {len(model.requirements)}")
+    print(f"Work items:         {len(model.work_items)}")
+    print(f"Traceability gaps:  {len(gaps)}")
+    print(f"Unmapped reqs:      {len(unmapped)}")
+    print(f"Stale work:         {len(stale)}")
+    print(f"Open risks:         {len(risks)}")
+    print(f"Open incidents:     {len(incidents)}")
+    print(f"Active experiments: {len(experiments)}")
+    print()
+    print("Work by state:")
+    for state, count in counts.items():
+        if count:
+            print(f"  - {state}: {count}")
+    print()
+    print("Stale work:")
+    if stale:
+        for stale_item in stale[: args.limit]:
+            age = f"{stale_item.age_days} days" if stale_item.age_days is not None else "unknown age"
+            print(f"  - {stale_item.item.id}: {stale_item.item.state}; {age}; {stale_item.reason}")
+    else:
+        print("  - none")
+    print()
+    print("Dashboard sections: work state, stale work, traceability gaps, risks, incidents, experiments, decisions, tech debt leads.")
+
+    if args.html:
+        target = render_management_dashboard(Path(args.html), model, args.stale_days)
+        print(f"HTML dashboard: {relative(target)}")
+    return 0
+
+
+def cmd_trace_requirement(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    requirement = model.requirements.get(args.requirement_id)
+    if requirement is None:
+        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
+        return 1
+
+    links = traceability_links_for(requirement, traceability_links())
+    work_items = requirement_work_items(model, requirement)
+    paths = sorted({path for link in links for path in evidence_paths(link)})
+    mentions = source_files_mentioning(requirement_source_terms(requirement), args.limit, implementation_only=True)
+    all_requirements = sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+    duplicate_titles = duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.title)))
+    duplicate_bodies = duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.body)))
+    traceability_text = (MANAGEMENT_DIR / "TRACEABILITY.md").read_text(encoding="utf-8") if (MANAGEMENT_DIR / "TRACEABILITY.md").exists() else ""
+    findings = audit_requirement(model, requirement, traceability_text, duplicate_titles, duplicate_bodies)
+
+    print("Requirement Trace")
+    print("=================")
+    print_requirement(requirement)
+    print()
+    print("Mapped work:")
+    if work_items:
+        for item in work_items:
+            print(f"  - {item.id}: {item.state} -- {item.title}")
+    else:
+        print("  - none")
+    print()
+    print("Traceability links:")
+    if links:
+        for link in links:
+            print(f"  - line {link.line}: {link.requirement_id} -> {link.work_item_id}: {link.state}; {link.evidence}")
+    else:
+        print("  - none")
+    print()
+    print("Evidence paths:")
+    statuses = evidence_path_statuses(paths)
+    if statuses:
+        for path, status in statuses:
+            print(f"  - {path}: {status}")
+    else:
+        print("  - none")
+    print()
+    print("Source mentions:")
+    if mentions:
+        for path in mentions:
+            print(f"  - {path}")
+    else:
+        print("  - none")
+    print()
+    print("Audit signals:")
+    if findings:
+        for finding in findings:
+            print(f"  - {finding.severity}: {finding.category}: {finding.message}")
+    else:
+        print("  - none")
+    print()
+    print("Scope note: trace output is a knowledge-base view. It helps humans and AI navigate evidence; it does not prove behavior.")
+    return 0
+
+
+def cmd_link_evidence(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    requirement = model.requirements.get(args.requirement_id)
+    if requirement is None:
+        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
+        return 1
+    work_item = model.work_items.get(args.work_item_id)
+    if work_item is None:
+        print(f"unknown work item: {args.work_item_id}", file=sys.stderr)
+        return 1
+    if not requirement_matches_id(requirement, work_item.requirement_id):
+        print(f"error: {work_item.id} maps to {work_item.requirement_id}, not {requirement.id}", file=sys.stderr)
+        return 1
+    try:
+        missing = validate_evidence_paths(args.path, args.allow_missing)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    action = append_or_update_traceability(requirement.id, work_item, args.path, args.note, args.state)
+    print("Evidence Link")
+    print("=============")
+    print(f"Requirement: {requirement.id}")
+    print(f"Work item:   {work_item.id}")
+    print(f"Action:      {action}")
+    print("Evidence:")
+    for path in args.path:
+        print(f"  - {path}")
+    if missing:
+        print("Missing paths allowed:")
+        for path in missing:
+            print(f"  - {path}")
+    print("Source:      management/TRACEABILITY.md")
+    return 0
+
+
+def validate_release_version(version: str) -> str:
+    if not RELEASE_VERSION_RE.fullmatch(version):
+        raise ValueError(f"invalid release version {version}; expected semver like 1.2.3 or 1.2.3-rc.1")
+    return version
+
+
+def release_candidate(version: str) -> bool:
+    return "-rc." in version
+
+
+def cmd_prepare_release(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        version = validate_release_version(args.version)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    included = sorted(
+        [item for item in model.work_items.values() if item.state in {"Merged", "Rolled Out"}],
+        key=lambda item: item.id,
+    )
+    open_incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
+    open_risks = open_ledger_entries(MANAGEMENT_DIR / "RISKS.md")
+    gaps = traceability_gaps(model)
+    stale = stale_work_items(model, args.stale_days)
+    blockers: list[str] = []
+    reviews: list[str] = []
+    if open_incidents:
+        blockers.append(f"{len(open_incidents)} open incident(s)")
+    if gaps:
+        reviews.append(f"{len(gaps)} requirement(s) without traceability")
+    if stale:
+        reviews.append(f"{len(stale)} stale work item(s)")
+    if open_risks:
+        reviews.append(f"{len(open_risks)} open risk(s) require release-owner review")
+
+    verdict = "BLOCKED" if blockers else "NEEDS REVIEW" if reviews else "READY TO TAG"
+
+    print("Release Packet")
+    print("==============")
+    print(f"Version:          {version}")
+    print(f"Type:             {'release candidate' if release_candidate(version) else 'production release'}")
+    print(f"Verdict:          {verdict}")
+    print()
+    print("Included merged work:")
+    if included:
+        for item in included:
+            print(f"  - {item.id}: {item.state} -- {item.title}")
+    else:
+        print("  - none")
+    print()
+    print("Blockers:")
+    if blockers:
+        for blocker in blockers:
+            print(f"  - {blocker}")
+    else:
+        print("  - none")
+    print()
+    print("Review items:")
+    if reviews:
+        for review_item in reviews:
+            print(f"  - {review_item}")
+    else:
+        print("  - none")
+    print()
+    print("Required checks:")
+    for command in VERIFICATION_COMMANDS:
+        print(f"  - {command}")
+    print("  - scripts/management/management_status")
+    print()
+    print("Tag command:")
+    print(f"  scripts/management/create_release_tag {version} --execute")
+    print("Scope note: this packet prepares a release decision. It does not create or push tags.")
+    return 1 if args.strict and blockers else 0
+
+
+def cmd_create_release_tag(args: argparse.Namespace) -> int:
+    try:
+        version = validate_release_version(args.version)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    if git_ref_exists(f"refs/tags/{version}"):
+        print(f"error: tag {version} already exists", file=sys.stderr)
+        return 1
+    if git_worktree_is_dirty():
+        print("error: worktree has uncommitted changes; release tags require a clean tree", file=sys.stderr)
+        return 1
+
+    message = args.message or f"Release {version}"
+    command = ["tag", "-a", version, "-m", message]
+    print("Release Tag")
+    print("===========")
+    print(f"Version: {version}")
+    print(f"Type:    {'release candidate' if release_candidate(version) else 'production release'}")
+    print(f"Command: git {' '.join(command)}")
+    if not args.execute:
+        print("Dry run: pass --execute to create the local tag.")
+        return 0
+    try:
+        git_output(command)
+    except RuntimeError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    print(f"Created tag {version}. Push it intentionally when the release owner approves.")
+    return 0
+
+
+def cmd_record_decision(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "DECISIONS.md"
+    decision_id = next_ledger_id(ledger_entries(path), "DEC")
+    decision_date = validate_iso_date(args.date or date.today().isoformat())
+    related = "\n".join(f"`{item}`" for item in args.related) if args.related else "None"
+    entry = f"""## {decision_id} -- {args.title}
+
+Status: {args.status}
+Date: {decision_date}
+
+Context:
+{args.context}
+
+Decision:
+{args.decision}
+
+Consequences:
+{args.consequence}
+
+Related:
+{related}
+"""
+    append_markdown_entry(path, entry)
+    print(f"Recorded decision {decision_id} in {relative(path)}")
+    return 0
+
+
+def cmd_record_risk(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "RISKS.md"
+    risk_id = next_ledger_id(ledger_entries(path), "RISK")
+    related = ", ".join(f"`{item}`" for item in args.related) if args.related else "None"
+    entry = f"""### {risk_id} -- {args.title}
+
+Status: Open
+Owner: {args.owner}
+Related: {related}
+
+Risk:
+{args.risk}
+
+Impact:
+{args.impact}
+
+Mitigation:
+{args.mitigation}
+
+Review date:
+{args.review_date or "Not set"}
+"""
+    insert_markdown_entry_before(path, "\n## Closed Risks", entry)
+    print(f"Recorded risk {risk_id} in {relative(path)}")
+    return 0
+
+
+def cmd_close_risk(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "RISKS.md"
+    try:
+        entry = ledger_entry_by_id(path, args.risk_id)
+        closed_date = validate_iso_date(args.date or date.today().isoformat())
+        update_ledger_status(entry, "Closed", ["Closed:", closed_date, "", "Closure evidence:", args.evidence])
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    print(f"Closed risk {args.risk_id}")
+    return 0
+
+
+def cmd_record_incident(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "INCIDENTS.md"
+    incident_id = next_ledger_id(ledger_entries(path), "INCIDENT")
+    detected = args.detected or f"{datetime.now().strftime('%Y-%m-%d %H:%M')} local"
+    entry = f"""### {incident_id} -- {args.title}
+
+Status: Open
+
+Detected:
+{detected}
+
+Affected environment:
+{args.environment}
+
+Impact:
+{args.impact}
+
+Timeline:
+1. {detected} -- {args.timeline}
+
+Root cause:
+Under investigation
+
+Mitigation:
+{args.mitigation}
+
+Follow-up work:
+1. Not assigned yet
+
+Requirement or decision changes:
+1. None recorded yet
+"""
+    insert_markdown_entry_before(path, "\n## Incident Entry Format", entry)
+    print(f"Recorded incident {incident_id} in {relative(path)}")
+    return 0
+
+
+def cmd_close_incident(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "INCIDENTS.md"
+    try:
+        entry = ledger_entry_by_id(path, args.incident_id)
+        update_ledger_status(entry, "Closed", ["Closed:", args.closed or f"{datetime.now().strftime('%Y-%m-%d %H:%M')} local", "", "Closure evidence:", args.evidence])
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    print(f"Closed incident {args.incident_id}")
+    return 0
+
+
+def cmd_record_experiment(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "EXPERIMENTS.md"
+    experiment_id = next_ledger_id(ledger_entries(path), "EXP")
+    expires = validate_iso_date(args.expires)
+    follow_up = "\n".join(f"1. `{item}`" for item in args.follow_up) if args.follow_up else "1. None yet"
+    entry = f"""### {experiment_id} -- {args.title}
+
+Status: Active
+
+Branch:
+`{args.branch}`
+
+Hypothesis:
+{args.hypothesis}
+
+Expires:
+{expires}
+
+Success criteria:
+1. {args.success}
+
+Failure criteria:
+1. {args.failure}
+
+Result:
+Not concluded yet
+
+Follow-up:
+{follow_up}
+"""
+    insert_markdown_entry_before(path, "\n## Experiment Rules", entry)
+    print(f"Recorded experiment {experiment_id} in {relative(path)}")
+    return 0
+
+
+def cmd_close_experiment(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "EXPERIMENTS.md"
+    try:
+        entry = ledger_entry_by_id(path, args.experiment_id)
+        update_ledger_status(entry, args.status, ["Closed:", validate_iso_date(args.date or date.today().isoformat()), "", "Result:", args.result])
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    print(f"Closed experiment {args.experiment_id} as {args.status}")
+    return 0
+
+
+def cmd_stale_work(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+    stale = stale_work_items(model, args.days)
+    print("Stale Work")
+    print("==========")
+    print(f"Threshold: {args.days} days")
+    if stale:
+        for stale_item in stale:
+            age = f"{stale_item.age_days} days" if stale_item.age_days is not None else "unknown age"
+            owner = f"; owner {stale_item.item.owner}" if stale_item.item.owner else ""
+            print(f"- {stale_item.item.id}: {stale_item.item.state}; {age}{owner}; {stale_item.reason}")
+    else:
+        print("- none")
+    return 1 if args.strict and stale else 0
+
+
+def cmd_meeting_packet(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+    stale = stale_work_items(model, args.stale_days)
+    risks = open_ledger_entries(MANAGEMENT_DIR / "RISKS.md")
+    incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
+    experiments = open_ledger_entries(MANAGEMENT_DIR / "EXPERIMENTS.md")
+    gaps = traceability_gaps(model)
+    counts = state_counts(model)
+
+    print("Meeting Packet")
+    print("==============")
+    print(f"Date: {date.today().isoformat()}")
+    print()
+    print("Work state:")
+    for state, count in counts.items():
+        if count:
+            print(f"  - {state}: {count}")
+    print()
+    print("Needs attention:")
+    print(f"  - Stale work: {len(stale)}")
+    print(f"  - Traceability gaps: {len(gaps)}")
+    print(f"  - Open risks: {len(risks)}")
+    print(f"  - Open incidents: {len(incidents)}")
+    print(f"  - Active experiments: {len(experiments)}")
+    print()
+    print("Suggested agenda:")
+    print("  - Confirm blocked or stale work owners and next actions.")
+    print("  - Review requirement traceability gaps before accepting new work.")
+    print("  - Review open incidents and release-impacting risks.")
+    print("  - Decide whether active experiments continue, close, or become requirement-backed work.")
+    print("  - Confirm release readiness if a tag is planned.")
+    return 0
+
+
+def cmd_acceptance_packet(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    requirement = model.requirements.get(item.requirement_id)
+    links = traceability_links_for(requirement, traceability_links()) if requirement else []
+
+    print("Acceptance Packet")
+    print("=================")
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+    print()
+    print("Definition references:")
+    print("  - management/DEFINITION_OF_READY_DONE.md")
+    print("  - management/TRACEABILITY.md")
+    print()
+    print("Traceability:")
+    if links:
+        for link in links:
+            print(f"  - {link.requirement_id} -> {link.work_item_id}: {link.state}; {link.evidence}")
+    else:
+        print("  - no traceability row found")
+    print()
+    print("Acceptance checklist:")
+    print("  - Requirement wording still represents the desired behavior.")
+    print("  - Work-item scope matches the completed change.")
+    print("  - Verification evidence is linked or explicitly documented.")
+    print("  - New non-blocking debt is recorded with justification and deadline.")
+    print("  - Release, risk, incident, or experiment records are updated when applicable.")
+    print()
+    print("Suggested commands:")
+    for command in VERIFICATION_COMMANDS:
+        print(f"  - {command}")
+    print(f"  - scripts/management/sync_requirement {item.requirement_id}")
+    print("Scope note: this packet prepares human acceptance. It does not approve the work.")
+    return 0
+
+
 def cmd_audit_requirements(args: argparse.Namespace) -> int:
     model = load_model()
     if model.errors:
@@ -2296,6 +3172,50 @@ def build_parser() -> argparse.ArgumentParser:
     audit_requirements.add_argument("--strict", action="store_true", help="Exit non-zero when BLOCKER or REVIEW findings exist.")
     audit_requirements.set_defaults(func=cmd_audit_requirements)
 
+    management_status = subparsers.add_parser(
+        "management-status",
+        aliases=["management_status"],
+        help="Print management status and optionally render the static dashboard.",
+    )
+    management_status.add_argument("--html", help="Output directory for static HTML dashboard.")
+    management_status.add_argument("--stale-days", type=int, default=14, help="Age threshold for stale work. Default: 14.")
+    management_status.add_argument("--limit", type=int, default=20, help="Maximum stale work rows to print. Default: 20.")
+    management_status.set_defaults(func=cmd_management_status)
+
+    trace_requirement = subparsers.add_parser(
+        "trace-requirement",
+        aliases=["trace_requirement"],
+        help="Print requirement, work, evidence, and source traceability.",
+    )
+    trace_requirement.add_argument("requirement_id")
+    trace_requirement.add_argument("--limit", type=int, default=8, help="Maximum source mention paths to print. Default: 8.")
+    trace_requirement.set_defaults(func=cmd_trace_requirement)
+
+    link_evidence = subparsers.add_parser(
+        "link-evidence",
+        aliases=["link_evidence"],
+        help="Append or update TRACEABILITY.md evidence for a requirement and work item.",
+    )
+    link_evidence.add_argument("requirement_id")
+    link_evidence.add_argument("work_item_id")
+    link_evidence.add_argument("path", nargs="+", help="Evidence path(s) to link.")
+    link_evidence.add_argument("--note", help="Additional evidence note.")
+    link_evidence.add_argument("--state", help="Traceability state. Defaults to the backlog work-item state.")
+    link_evidence.add_argument("--allow-missing", action="store_true", help="Allow evidence paths that do not currently exist.")
+    link_evidence.set_defaults(func=cmd_link_evidence)
+
+    prepare_release = subparsers.add_parser("prepare-release", aliases=["prepare_release"], help="Prepare a release decision packet.")
+    prepare_release.add_argument("version")
+    prepare_release.add_argument("--stale-days", type=int, default=14, help="Age threshold for stale work. Default: 14.")
+    prepare_release.add_argument("--strict", action="store_true", help="Exit non-zero when release blockers exist.")
+    prepare_release.set_defaults(func=cmd_prepare_release)
+
+    create_release_tag = subparsers.add_parser("create-release-tag", aliases=["create_release_tag"], help="Create a local release tag after explicit confirmation.")
+    create_release_tag.add_argument("version")
+    create_release_tag.add_argument("--message", help="Annotated tag message. Default: Release <version>.")
+    create_release_tag.add_argument("--execute", action="store_true", help="Create the tag. Without this flag the command is a dry run.")
+    create_release_tag.set_defaults(func=cmd_create_release_tag)
+
     estimate_requirement = subparsers.add_parser(
         "estimate-requirement",
         aliases=["estimate_requirement"],
@@ -2323,6 +3243,77 @@ def build_parser() -> argparse.ArgumentParser:
     chase_techdebts.add_argument("--long-file-lines", type=int, default=500, help="Line count threshold for large-file findings. Use 0 to disable.")
     chase_techdebts.add_argument("--strict", action="store_true", help="Exit non-zero when any findings exist.")
     chase_techdebts.set_defaults(func=cmd_chase_techdebts)
+
+    record_decision = subparsers.add_parser("record-decision", aliases=["record_decision"], help="Append a structured decision entry.")
+    record_decision.add_argument("title")
+    record_decision.add_argument("--context", required=True)
+    record_decision.add_argument("--decision", required=True)
+    record_decision.add_argument("--consequence", required=True)
+    record_decision.add_argument("--related", action="append", default=[])
+    record_decision.add_argument("--status", default="Accepted")
+    record_decision.add_argument("--date")
+    record_decision.set_defaults(func=cmd_record_decision)
+
+    record_risk = subparsers.add_parser("record-risk", aliases=["record_risk"], help="Append an open risk entry.")
+    record_risk.add_argument("title")
+    record_risk.add_argument("--owner", required=True)
+    record_risk.add_argument("--risk", required=True)
+    record_risk.add_argument("--impact", required=True)
+    record_risk.add_argument("--mitigation", required=True)
+    record_risk.add_argument("--related", action="append", default=[])
+    record_risk.add_argument("--review-date")
+    record_risk.set_defaults(func=cmd_record_risk)
+
+    close_risk = subparsers.add_parser("close-risk", aliases=["close_risk"], help="Close a risk with evidence.")
+    close_risk.add_argument("risk_id")
+    close_risk.add_argument("--evidence", required=True)
+    close_risk.add_argument("--date")
+    close_risk.set_defaults(func=cmd_close_risk)
+
+    record_incident = subparsers.add_parser("record-incident", aliases=["record_incident"], help="Append an open incident entry.")
+    record_incident.add_argument("title")
+    record_incident.add_argument("--environment", required=True)
+    record_incident.add_argument("--impact", required=True)
+    record_incident.add_argument("--timeline", required=True)
+    record_incident.add_argument("--mitigation", required=True)
+    record_incident.add_argument("--detected")
+    record_incident.set_defaults(func=cmd_record_incident)
+
+    close_incident = subparsers.add_parser("close-incident", aliases=["close_incident"], help="Close an incident with evidence.")
+    close_incident.add_argument("incident_id")
+    close_incident.add_argument("--evidence", required=True)
+    close_incident.add_argument("--closed")
+    close_incident.set_defaults(func=cmd_close_incident)
+
+    record_experiment = subparsers.add_parser("record-experiment", aliases=["record_experiment"], help="Append an active experiment entry.")
+    record_experiment.add_argument("title")
+    record_experiment.add_argument("--branch", required=True)
+    record_experiment.add_argument("--hypothesis", required=True)
+    record_experiment.add_argument("--expires", required=True)
+    record_experiment.add_argument("--success", required=True)
+    record_experiment.add_argument("--failure", required=True)
+    record_experiment.add_argument("--follow-up", action="append", default=[])
+    record_experiment.set_defaults(func=cmd_record_experiment)
+
+    close_experiment = subparsers.add_parser("close-experiment", aliases=["close_experiment"], help="Close an experiment with a result.")
+    close_experiment.add_argument("experiment_id")
+    close_experiment.add_argument("--status", choices=["Adopted", "Rejected", "Expired"], required=True)
+    close_experiment.add_argument("--result", required=True)
+    close_experiment.add_argument("--date")
+    close_experiment.set_defaults(func=cmd_close_experiment)
+
+    stale_work = subparsers.add_parser("stale-work", aliases=["stale_work"], help="List work items stale in active states.")
+    stale_work.add_argument("--days", type=int, default=14, help="Age threshold. Default: 14.")
+    stale_work.add_argument("--strict", action="store_true", help="Exit non-zero when stale work exists.")
+    stale_work.set_defaults(func=cmd_stale_work)
+
+    meeting_packet = subparsers.add_parser("meeting-packet", aliases=["meeting_packet"], help="Print a manager/PM/engineering meeting packet.")
+    meeting_packet.add_argument("--stale-days", type=int, default=14, help="Age threshold for stale work. Default: 14.")
+    meeting_packet.set_defaults(func=cmd_meeting_packet)
+
+    acceptance_packet = subparsers.add_parser("acceptance-packet", aliases=["acceptance_packet"], help="Print a PM/manager acceptance packet for a work item.")
+    acceptance_packet.add_argument("ref", help="Work item id or branch name.")
+    acceptance_packet.set_defaults(func=cmd_acceptance_packet)
 
     verification_check = subparsers.add_parser(
         "verification-check",
