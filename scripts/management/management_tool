@@ -93,6 +93,13 @@ REVIEW_CHECKLIST = [
     "Does the backlog state match the real review phase?",
 ]
 
+MOTIVATION_DESCRIPTIONS = {
+    "N": "new requirement work",
+    "R": "revisit or changed implementation approach",
+    "F": "fix for faulty or buggy implementation",
+    "X": "experiment, prototype, R&D, or spike",
+}
+
 SECTION_RE = re.compile(r'^#\s+(?P<title>.+?)\s+"(?P<abbr>[A-Za-z][A-Za-z0-9]*)"\s*$')
 REQUIREMENT_HEADING_RE = re.compile(r"^#{2,6}\s+(?P<number>\d{2})(?P<subtopics>(?:\.[a-z]+)*)\)\s+(?P<title>.+?)\s*$")
 STATE_HEADING_RE = re.compile(r'^#\s+(?P<state>"?[^"#]+"?)\s*$')
@@ -806,6 +813,25 @@ def started_work_errors(model: ManagementModel, item: WorkItem, branch_ref: Bran
     return errors
 
 
+def same_requirement_items(model: ManagementModel, item: WorkItem) -> list[WorkItem]:
+    return sorted(
+        [candidate for candidate in model.work_items.values() if candidate.requirement_id == item.requirement_id and candidate.id != item.id],
+        key=lambda candidate: candidate.id,
+    )
+
+
+def completed_work_items(items: list[WorkItem]) -> list[WorkItem]:
+    return [item for item in items if item.state in {"Merged", "Rolled Out"}]
+
+
+def issue_line(severity: str, message: str) -> str:
+    return f"{severity}: {message}"
+
+
+def branch_reference_is_plain_work_item(branch_ref: BranchRef) -> bool:
+    return branch_ref.raw == branch_ref.work_id
+
+
 def run_git(args: list[str], dry_run: bool) -> None:
     print(f"$ git {' '.join(args)}")
     if not dry_run:
@@ -975,6 +1001,103 @@ def cmd_start_work(args: argparse.Namespace) -> int:
     else:
         print(f"Started work on {branch_ref.raw}.")
     print(f"Run `scripts/management/management_tool chat-about {branch_ref.raw}` to discuss the work context.")
+    return 0
+
+
+def cmd_evaluate_plan(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        branch_ref = parse_branch_ref(args.ref)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    item = model.work_items.get(branch_ref.work_id)
+    if item is None:
+        print(f"error: {branch_ref.work_id} was not found in any backlog", file=sys.stderr)
+        return 1
+
+    requirement = model.requirements.get(item.requirement_id)
+    siblings = same_requirement_items(model, item)
+    completed_siblings = completed_work_items(siblings)
+    findings: list[str] = []
+
+    if requirement is None:
+        findings.append(issue_line("BLOCKER", f"{item.id} references missing requirement {item.requirement_id}"))
+    elif not requirement.body or requirement.body.strip().lower() == "tbd":
+        findings.append(issue_line("REVIEW", f"{item.requirement_id} has little or no requirement detail"))
+    else:
+        findings.append(issue_line("OK", f"{item.id} references existing requirement {item.requirement_id}"))
+
+    if branch_reference_is_plain_work_item(branch_ref):
+        findings.append(issue_line("OK", "evaluating by work item id; branch owner is not applicable"))
+    elif branch_ref.is_feature:
+        findings.append(issue_line("OK", "feature branch syntax is valid"))
+    else:
+        owner_issues = branch_owner_errors(item, branch_ref, args.user)
+        if owner_issues:
+            findings.extend(issue_line("REVIEW", issue) for issue in owner_issues)
+        else:
+            findings.append(issue_line("OK", "ordinary branch owner matches the backlog owner"))
+
+    if item.state in {"Under Planning", "Planned"}:
+        findings.append(issue_line("OK", f"{item.state} is a normal planning state"))
+    elif item.state in {"Rejected", "Cancelled"}:
+        findings.append(issue_line("BLOCKER", f"{item.id} is {item.state}"))
+    else:
+        findings.append(issue_line("REVIEW", f"{item.id} is already {item.state}; confirm this is still a plan evaluation"))
+
+    if item.state in VALID_STATE_SET and item.state not in item.timeline:
+        findings.append(issue_line("REVIEW", f"{item.id} has no dated state trail for {item.state}"))
+
+    if not item.body:
+        findings.append(issue_line("REVIEW", f"{item.id} has no work-item description beyond its title"))
+    else:
+        findings.append(issue_line("OK", f"{item.id} has a work-item description"))
+
+    motivation_description = MOTIVATION_DESCRIPTIONS.get(item.motivation, "unknown motivation")
+    if item.motivation == "N" and completed_siblings:
+        findings.append(issue_line("REVIEW", "motivation N is marked as new work, but this requirement already has completed work"))
+    elif item.motivation in {"R", "F"} and not completed_siblings:
+        findings.append(issue_line("REVIEW", f"motivation {item.motivation} usually expects prior completed work for the requirement"))
+    elif item.motivation == "X":
+        findings.append(issue_line("REVIEW", "experimental work must stay out of main unless converted to normal requirement-backed work"))
+    else:
+        findings.append(issue_line("OK", f"motivation {item.motivation} means {motivation_description}"))
+
+    blocker_count = sum(1 for finding in findings if finding.startswith("BLOCKER:"))
+    review_count = sum(1 for finding in findings if finding.startswith("REVIEW:"))
+    if blocker_count:
+        verdict = "BLOCKED"
+    elif review_count:
+        verdict = "NEEDS HUMAN REVIEW"
+    else:
+        verdict = "STRUCTURALLY SOUND"
+
+    print("Plan Evaluation")
+    print("===============")
+    if branch_ref.raw != item.id:
+        print(f"Reference:   {branch_ref.raw}")
+    print_work_item(model, item)
+    print()
+    print("Sibling work for the same requirement:")
+    if siblings:
+        for sibling in siblings:
+            print(f"  - {sibling.id}: {sibling.state} -- {sibling.title}")
+    else:
+        print("  - none")
+    print()
+    print("Findings:")
+    for finding in findings:
+        print(f"  - {finding}")
+    print()
+    print(f"Verdict: {verdict}")
+    print("Scope note: this command checks structural planning coherence. Product, technical, and schedule judgment remain human decisions.")
     return 0
 
 
@@ -1247,6 +1370,15 @@ def build_parser() -> argparse.ArgumentParser:
     start_work.add_argument("--allow-dirty", action="store_true", help="Allow actual branch switching with uncommitted worktree changes.")
     start_work.add_argument("--dry-run", action="store_true", help="Print validation and git commands without switching branches.")
     start_work.set_defaults(func=cmd_start_work)
+
+    evaluate_plan = subparsers.add_parser(
+        "evaluate-plan",
+        aliases=["evaluate_plan"],
+        help="Evaluate structural planning coherence for a backlog item or branch.",
+    )
+    evaluate_plan.add_argument("ref", help="Work item id or branch name.")
+    evaluate_plan.add_argument("--user", help="Current responsible user for owner validation.")
+    evaluate_plan.set_defaults(func=cmd_evaluate_plan)
 
     verification_check = subparsers.add_parser(
         "verification-check",

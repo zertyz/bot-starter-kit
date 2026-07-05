@@ -41,6 +41,16 @@ scripts/management/chat_about Luiz/ER.MCP.02.a-001
 The command prints the work item, the governing requirement, and a short prompt for discussing implementation with an AI assistant.
 
 
+## Evaluate a Plan
+
+```bash
+scripts/management/evaluate_plan ER.MCP.02.a-001
+scripts/management/evaluate_plan Luiz/ER.MCP.02.a-001 --user Luiz
+```
+
+The command checks whether a proposed work item or branch is structurally coherent with the governing requirement. It reports requirement linkage, branch-owner fit, state readiness, work-item detail, motivation fit, and sibling work for the same requirement. It does not approve the plan.
+
+
 ## Check Verification Evidence
 
 ```bash

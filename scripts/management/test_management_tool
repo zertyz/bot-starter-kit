@@ -142,6 +142,12 @@ class ManagementToolTest(unittest.TestCase):
         planned = self.tool_run("start-work", "Luiz/ER.MCP.02.a-001", "--dry-run", expected=1)
         self.assertIn("engineering work branches must reference a Started work item", planned.stderr)
 
+    def test_evaluate_plan_reports_findings_and_verdict(self) -> None:
+        evaluation = self.tool_run("evaluate-plan", "ER.MCP.02.a-001")
+        self.assertIn("Plan Evaluation", evaluation.stdout)
+        self.assertIn("Sibling work for the same requirement:", evaluation.stdout)
+        self.assertIn("Verdict:", evaluation.stdout)
+
     def test_verification_check_reports_existing_evidence(self) -> None:
         src = self.root / "src"
         src.mkdir()
