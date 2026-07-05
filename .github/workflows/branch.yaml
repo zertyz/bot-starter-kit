@@ -24,6 +24,8 @@ jobs:
       run: rustup component add rustfmt clippy
     - name: Check code guidelines
       run: scripts/ci/enforce_code_guidelines
+    - name: Check management rules
+      run: scripts/ci/enforce_management_rules
     - name: Check formatting
       run: cargo fmt --all -- --check
     - name: Check lints

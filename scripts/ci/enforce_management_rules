@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+scripts/management/management_tool lint
+scripts/management/test_management_tool
+scripts/management/test_gui_server

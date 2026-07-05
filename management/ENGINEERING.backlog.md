@@ -2,11 +2,13 @@
 # Planned
 
 ## EN.Demo.02-001 -- Do the first Whatsapp Demoscene version
+==> Planned: 2026-07-05;
 
 ## ER.MCP.02.a-001 -- Update `Mo`, `Mt`, `Party` for their final versions
 1. Use the existing Telegram and Whatsapp demoscenes for the refactorings
 2. Update those demoscenes to use the new abstractions
 3. Check they work exactly as before
+==> Planned: 2026-07-05;
 
 
 # Started

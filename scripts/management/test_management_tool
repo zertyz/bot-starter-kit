@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""Tests for scripts/management/management_tool."""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+
+SOURCE_TOOL = Path(__file__).resolve().parent / "management_tool"
+SUPPORTING_FILES = [
+    "DECISIONS.md",
+    "DEFINITION_OF_READY_DONE.md",
+    "RELEASES.md",
+    "RISKS.md",
+    "INCIDENTS.md",
+    "EXPERIMENTS.md",
+    "TRACEABILITY.md",
+    "TOOLING.md",
+]
+
+
+def run(cwd: Path, args: list[str], expected: int = 0) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(args, cwd=cwd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != expected:
+        raise AssertionError(
+            f"expected exit {expected}, got {result.returncode}\n"
+            f"command: {' '.join(args)}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    return result
+
+
+class ManagementToolTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.tool = self.root / "scripts" / "management" / "management_tool"
+        self.management = self.root / "management"
+        (self.root / "scripts" / "management").mkdir(parents=True)
+        self.management.mkdir()
+        shutil.copy2(SOURCE_TOOL, self.tool)
+        self.tool.chmod(0o755)
+        self.write_management_files()
+        self.init_git()
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def write_management_files(self) -> None:
+        (self.management / "BUSINESS.md").write_text('# Business "Biz"\n\n## 01) Business Requirement\n\nBusiness behavior.\n', encoding="utf-8")
+        (self.management / "OPERATIONS.md").write_text('# Operations "Ops"\n\n## 01) Operational Requirement\n\nOperational behavior.\n', encoding="utf-8")
+        (self.management / "ENGINEERING.md").write_text(
+            textwrap.dedent(
+                """\
+                # Messaging Communications Paradigm "MCP"
+
+                ## 01) Per User Routing
+
+                One stream per user.
+
+                ## 02.a) Common MO and MT Models
+
+                Common models exist.
+
+                ## 02.b) Platform inquiry
+
+                Platform features can be queried.
+                """
+            ),
+            encoding="utf-8",
+        )
+        (self.management / "BUSINESS.backlog.md").write_text("# Planned\n\n# Started\n\n# Merged\n", encoding="utf-8")
+        (self.management / "OPERATIONS.backlog.md").write_text("# Planned\n\n# Started\n\n# Merged\n", encoding="utf-8")
+        (self.management / "ENGINEERING.backlog.md").write_text(
+            textwrap.dedent(
+                """\
+                # Planned
+
+                ## ER.MCP.02.a-001 -- Planned model update
+                1. Update models.
+                ==> Planned: 2026-07-05;
+
+
+                # Started
+
+                ## EN.MCP.01-001 -- Started routing work
+                1. Route per user.
+                ==> Luiz. Planned: 2026-07-05; Started: 2026-07-05;
+
+
+                # "In Code Review"
+
+
+                # QA
+
+
+                # Merged
+                """
+            ),
+            encoding="utf-8",
+        )
+        for name in SUPPORTING_FILES:
+            (self.management / name).write_text(f"# {name}\n", encoding="utf-8")
+
+    def write_rust_architecture_files(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "bot-starter-kit"\nversion = "0.1.0"\n\n[lib]\nname = "bot_starter_kit"\n',
+            encoding="utf-8",
+        )
+        src = self.root / "src"
+        (src / "bin").mkdir(parents=True)
+        (src / "logic").mkdir(parents=True)
+        (src / "messaging").mkdir(parents=True)
+        (src / "models").mkdir(parents=True)
+        (src / "bin" / "bot_starter_kit.rs").write_text(
+            "use bot_starter_kit::{logic::telegram_demoscene::run, models::config::Config};\nfn main() {}\n",
+            encoding="utf-8",
+        )
+        (src / "lib.rs").write_text(
+            "pub mod logic;\npub mod messaging;\npub mod models;\n",
+            encoding="utf-8",
+        )
+        (src / "logic" / "mod.rs").write_text("pub mod telegram_demoscene;\n", encoding="utf-8")
+        (src / "logic" / "telegram_demoscene.rs").write_text(
+            "use crate::messaging::user_router;\nuse crate::models::config;\npub fn run() {}\n",
+            encoding="utf-8",
+        )
+        (src / "messaging" / "mod.rs").write_text("pub mod user_router;\n", encoding="utf-8")
+        (src / "messaging" / "user_router.rs").write_text(
+            "use crate::models::config;\npub fn route() {}\n",
+            encoding="utf-8",
+        )
+        (src / "models" / "mod.rs").write_text("pub mod config;\n", encoding="utf-8")
+        (src / "models" / "config.rs").write_text("pub struct Config;\n", encoding="utf-8")
+
+    def init_git(self) -> None:
+        run(self.root, ["git", "init", "-b", "main"])
+        run(self.root, ["git", "config", "user.email", "test@example.invalid"])
+        run(self.root, ["git", "config", "user.name", "Test User"])
+        run(self.root, ["git", "add", "."])
+        run(self.root, ["git", "commit", "-m", "initial management state"])
+        run(self.root, ["git", "update-ref", "refs/remotes/origin/main", "HEAD"])
+
+    def tool_run(self, *args: str, expected: int = 0) -> subprocess.CompletedProcess[str]:
+        return run(self.root, [str(self.tool), *args], expected=expected)
+
+    def test_lint_and_show_work(self) -> None:
+        lint = self.tool_run("lint")
+        self.assertIn("Requirements: 5", lint.stdout)
+        self.assertIn("Work items:   2", lint.stdout)
+        show = self.tool_run("show-work", "ER.MCP.02.a-001")
+        self.assertIn("Requirement: E.MCP.02.a", show.stdout)
+
+    def test_advance_state_moves_item_and_extends_timeline(self) -> None:
+        result = self.tool_run("advance-state", "Luiz/EN.MCP.01-001", "--to", "In Code Review", "--date", "2026-07-06")
+        self.assertIn("After:", result.stdout)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertIn('# "In Code Review"', backlog)
+        self.assertIn("## EN.MCP.01-001 -- Started routing work", backlog)
+        self.assertIn("In Code Review: 2026-07-06", backlog)
+
+    def test_same_state_normalization_is_noop_when_date_exists(self) -> None:
+        result = self.tool_run("advance-state", "ER.MCP.02.a-001", "--to", "Planned", "--date", "2026-07-07")
+        self.assertIn("already has Planned: 2026-07-05", result.stdout)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertNotIn("2026-07-07", backlog)
+
+    def test_start_work_dry_run_requires_started_owner(self) -> None:
+        started = self.tool_run("start-work", "Luiz/EN.MCP.01-001", "--dry-run")
+        self.assertIn("$ git switch -c Luiz/EN.MCP.01-001 origin/main", started.stdout)
+        planned = self.tool_run("start-work", "Luiz/ER.MCP.02.a-001", "--dry-run", expected=1)
+        self.assertIn("engineering work branches must reference a Started work item", planned.stderr)
+
+    def test_evaluate_plan_reports_findings_and_verdict(self) -> None:
+        evaluation = self.tool_run("evaluate-plan", "ER.MCP.02.a-001")
+        self.assertIn("Plan Evaluation", evaluation.stdout)
+        self.assertIn("Sibling work for the same requirement:", evaluation.stdout)
+        self.assertIn("Verdict:", evaluation.stdout)
+
+    def test_draft_plan_dry_run_does_not_write(self) -> None:
+        draft = self.tool_run("draft-plan", "E.MCP.02.b", "--date", "2026-07-08")
+        self.assertIn("Draft Plan", draft.stdout)
+        self.assertIn("## EN.MCP.02.b-001 -- Implement Platform inquiry", draft.stdout)
+        self.assertIn("Dry run: no backlog file was changed.", draft.stdout)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertNotIn("EN.MCP.02.b-001", backlog)
+
+    def test_draft_plan_write_appends_under_planning(self) -> None:
+        draft = self.tool_run("draft-plan", "E.MCP.02.b", "--date", "2026-07-08", "--write")
+        self.assertIn("Written: EN.MCP.02.b-001 was appended under Under Planning.", draft.stdout)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertIn("# Under Planning", backlog)
+        self.assertIn("## EN.MCP.02.b-001 -- Implement Platform inquiry", backlog)
+        self.assertIn("==> Under Planning: 2026-07-08;", backlog)
+        lint = self.tool_run("lint")
+        self.assertIn("Work items:   3", lint.stdout)
+
+    def test_draft_plan_rejects_invalid_sequence(self) -> None:
+        draft = self.tool_run("draft-plan", "E.MCP.02.b", "--sequence", "1", expected=1)
+        self.assertIn("invalid work sequence 1; expected three digits", draft.stderr)
+
+    def test_audit_requirements_reports_findings(self) -> None:
+        audit = self.tool_run("audit-requirements", "--document", "E", "--limit", "0")
+        self.assertIn("Requirement Audit", audit.stdout)
+        self.assertIn("Requirements checked: 3", audit.stdout)
+        self.assertIn("E.MCP.02.b", audit.stdout)
+        self.assertIn("no backlog work item maps to this requirement", audit.stdout)
+        self.assertIn("Scope note:", audit.stdout)
+
+    def test_audit_requirements_strict_fails_on_review_findings(self) -> None:
+        audit = self.tool_run("audit-requirements", "--document", "E", "--strict", expected=1)
+        self.assertIn("Requirement Audit", audit.stdout)
+        self.assertIn("REVIEW:", audit.stdout)
+
+    def test_estimate_requirement_prints_planning_packet(self) -> None:
+        estimate = self.tool_run("estimate-requirement", "E.MCP.02.b")
+        self.assertIn("Requirement Estimate", estimate.stdout)
+        self.assertIn("Readiness:", estimate.stdout)
+        self.assertIn("Estimated effort:", estimate.stdout)
+        self.assertIn("Dependency signals:", estimate.stdout)
+        self.assertIn("Planning prompt:", estimate.stdout)
+
+    def test_sync_requirement_prints_traceability_packet(self) -> None:
+        sync = self.tool_run("sync-requirement", "E.MCP.01")
+        self.assertIn("Requirement Sync", sync.stdout)
+        self.assertIn("Mapped work:", sync.stdout)
+        self.assertIn("EN.MCP.01-001", sync.stdout)
+        self.assertIn("Signals:", sync.stdout)
+        self.assertIn("Verdict:", sync.stdout)
+
+    def test_sync_requirement_strict_fails_on_review_signals(self) -> None:
+        sync = self.tool_run("sync-requirement", "E.MCP.02.b", "--strict", expected=1)
+        self.assertIn("Requirement Sync", sync.stdout)
+        self.assertIn("REVIEW:", sync.stdout)
+
+    def test_chase_techdebts_reports_review_leads(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text(
+            "pub fn risky(value: Option<u8>) -> u8 {\n    // TODO: replace shortcut\n    value.unwrap()\n}\n",
+            encoding="utf-8",
+        )
+        run(self.root, ["git", "add", "src/lib.rs"])
+        debts = self.tool_run("chase-techdebts", "--limit", "0")
+        self.assertIn("Tech Debt Chase", debts.stdout)
+        self.assertIn("TODO marker is present", debts.stdout)
+        self.assertIn("Rust shortcut `.unwrap()` needs review outside tests", debts.stdout)
+
+    def test_chase_techdebts_strict_fails_on_findings(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text("// FIXME: tighten this\n", encoding="utf-8")
+        run(self.root, ["git", "add", "src/lib.rs"])
+        debts = self.tool_run("chase-techdebts", "--strict", expected=1)
+        self.assertIn("Tech Debt Chase", debts.stdout)
+        self.assertIn("Findings:", debts.stdout)
+
+    def test_management_status_renders_dashboard(self) -> None:
+        dashboard_dir = self.root / "public" / "management"
+        status = self.tool_run("management-status", "--html", str(dashboard_dir), "--stale-days", "0")
+        self.assertIn("Management Status", status.stdout)
+        self.assertIn("HTML dashboard:", status.stdout)
+        dashboard = (dashboard_dir / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Management Dashboard", dashboard)
+        self.assertIn("Architecture Diagrams", dashboard)
+        self.assertIn("Traceability Gaps", dashboard)
+
+    def test_diagram_commands_render_static_svg(self) -> None:
+        self.write_rust_architecture_files()
+        diagram_dir = self.root / "public" / "management" / "diagrams"
+        real = self.tool_run("diagram-architecture-real", "--html", str(diagram_dir))
+        planned = self.tool_run("diagram-architecture-planned", "--html", str(diagram_dir))
+        dependencies = self.tool_run("diagram-module-dependencies", "--html", str(diagram_dir))
+
+        self.assertIn("Current Architecture Diagram", real.stdout)
+        self.assertIn("Planned Architecture Diagram", planned.stdout)
+        self.assertIn("Module Dependencies Diagram", dependencies.stdout)
+
+        real_svg = (diagram_dir / "architecture-real.svg").read_text(encoding="utf-8")
+        planned_svg = (diagram_dir / "architecture-planned.svg").read_text(encoding="utf-8")
+        dependency_svg = (diagram_dir / "module-dependencies.svg").read_text(encoding="utf-8")
+        index_html = (diagram_dir / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("Current Architecture", real_svg)
+        self.assertIn("Messaging Layer", real_svg)
+        self.assertIn("EN.MCP.01-001", planned_svg)
+        self.assertIn("E.MCP.02.b", planned_svg)
+        self.assertIn("bin::bot_starter_kit", dependency_svg)
+        self.assertIn("crate::logic::telegram_demoscene", dependency_svg)
+        self.assertIn("crate::messaging::user_router", dependency_svg)
+        self.assertIn("Current architecture", index_html)
+
+    def test_trace_requirement_and_link_evidence(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text("pub fn route() {}\n", encoding="utf-8")
+        link = self.tool_run("link-evidence", "E.MCP.01", "EN.MCP.01-001", "src/lib.rs")
+        self.assertIn("Evidence Link", link.stdout)
+        traceability = (self.management / "TRACEABILITY.md").read_text(encoding="utf-8")
+        self.assertIn("| `E.MCP.01` | `EN.MCP.01-001` | Started | `src/lib.rs` |", traceability)
+        trace = self.tool_run("trace-requirement", "E.MCP.01")
+        self.assertIn("Requirement Trace", trace.stdout)
+        self.assertIn("src/lib.rs", trace.stdout)
+
+    def test_prepare_release_and_tag_dry_run(self) -> None:
+        release = self.tool_run("prepare-release", "1.2.3-rc.1")
+        self.assertIn("Release Packet", release.stdout)
+        self.assertIn("release candidate", release.stdout)
+        tag = self.tool_run("create-release-tag", "1.2.3-rc.1")
+        self.assertIn("Release Tag", tag.stdout)
+        self.assertIn("Dry run:", tag.stdout)
+
+    def test_record_and_close_supporting_ledgers(self) -> None:
+        decision = self.tool_run(
+            "record-decision",
+            "Use dashboard",
+            "--context",
+            "Management needs shared status.",
+            "--decision",
+            "Generate a static dashboard.",
+            "--consequence",
+            "Pages carries management status.",
+            "--related",
+            "management/TOOLING.md",
+            "--date",
+            "2026-07-08",
+        )
+        self.assertIn("Recorded decision DEC-0001", decision.stdout)
+        risk = self.tool_run(
+            "record-risk",
+            "Dashboard drift",
+            "--owner",
+            "Manager",
+            "--risk",
+            "Dashboard can lag source files.",
+            "--impact",
+            "Humans may read stale status.",
+            "--mitigation",
+            "Regenerate on Pages.",
+            "--review-date",
+            "2026-08-01",
+        )
+        self.assertIn("Recorded risk RISK-0001", risk.stdout)
+        close_risk = self.tool_run("close-risk", "RISK-0001", "--evidence", "Dashboard generation verified.", "--date", "2026-07-09")
+        self.assertIn("Closed risk RISK-0001", close_risk.stdout)
+        incident = self.tool_run(
+            "record-incident",
+            "Staging failure",
+            "--environment",
+            "Staging",
+            "--impact",
+            "Deploy failed.",
+            "--timeline",
+            "CI reported failure.",
+            "--mitigation",
+            "Rollback deployment.",
+        )
+        self.assertIn("Recorded incident INCIDENT-0001", incident.stdout)
+        close_incident = self.tool_run("close-incident", "INCIDENT-0001", "--evidence", "Rollback completed.")
+        self.assertIn("Closed incident INCIDENT-0001", close_incident.stdout)
+        experiment = self.tool_run(
+            "record-experiment",
+            "Try cache",
+            "--branch",
+            "Luiz/EX.MCP.02.b-001",
+            "--hypothesis",
+            "A cache helps platform inquiry.",
+            "--expires",
+            "2026-08-01",
+            "--success",
+            "Latency improves.",
+            "--failure",
+            "Complexity increases.",
+        )
+        self.assertIn("Recorded experiment EXP-0001", experiment.stdout)
+        close_experiment = self.tool_run("close-experiment", "EXP-0001", "--status", "Rejected", "--result", "Complexity was not worth it.")
+        self.assertIn("Closed experiment EXP-0001 as Rejected", close_experiment.stdout)
+
+    def test_stale_meeting_and_acceptance_packets(self) -> None:
+        stale = self.tool_run("stale-work", "--days", "0")
+        self.assertIn("Stale Work", stale.stdout)
+        self.assertIn("ER.MCP.02.a-001", stale.stdout)
+        meeting = self.tool_run("meeting-packet", "--stale-days", "0")
+        self.assertIn("Meeting Packet", meeting.stdout)
+        self.assertIn("Suggested agenda:", meeting.stdout)
+        acceptance = self.tool_run("acceptance-packet", "EN.MCP.01-001")
+        self.assertIn("Acceptance Packet", acceptance.stdout)
+        self.assertIn("Acceptance checklist:", acceptance.stdout)
+
+    def test_verification_check_reports_existing_evidence(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text("#[cfg(test)]\nmod tests { #[test] fn it_works() {} }\n", encoding="utf-8")
+        run(self.root, ["git", "add", "src/lib.rs"])
+        check = self.tool_run("verification-check", "Luiz/EN.MCP.01-001")
+        self.assertIn("Verification Check", check.stdout)
+        self.assertIn("Functional behavior: FOUND", check.stdout)
+        self.assertIn("src/lib.rs", check.stdout)
+
+    def test_review_prints_packet_and_checklist(self) -> None:
+        review = self.tool_run("review", "Luiz/EN.MCP.01-001")
+        self.assertIn("Review Packet", review.stdout)
+        self.assertIn("Review checklist:", review.stdout)
+        self.assertIn("AI review prompt:", review.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -1,0 +1,625 @@
+#!/usr/bin/env python3
+"""Local browser GUI for the repo management tooling."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import mimetypes
+import subprocess
+import sys
+import tempfile
+import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parents[1]
+MANAGEMENT_TOOL = SCRIPT_DIR / "management_tool"
+STATIC_DIR = SCRIPT_DIR / "gui_static"
+DIAGRAM_DIR = Path(tempfile.gettempdir()) / "bot-starter-kit-management-gui" / "diagrams"
+DEFAULT_STALE_DAYS = 14
+COMMAND_TIMEOUT_SECONDS = 180
+
+
+def load_management_tool():
+    loader = importlib.machinery.SourceFileLoader("management_tool_runtime", str(MANAGEMENT_TOOL))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError("cannot load management_tool")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+tool = load_management_tool()
+
+
+class ClientError(ValueError):
+    pass
+
+
+def path_text(path: Path) -> str:
+    return tool.relative(path)
+
+
+def issue_payload(issue) -> dict[str, object]:
+    return {
+        "severity": issue.severity,
+        "path": path_text(issue.path),
+        "line": issue.line,
+        "message": issue.message,
+    }
+
+
+def requirement_payload(model, requirement, links) -> dict[str, object]:
+    work_items = tool.requirement_work_items(model, requirement)
+    requirement_links = tool.traceability_links_for(requirement, links)
+    return {
+        "id": requirement.id,
+        "document": requirement.document,
+        "section": requirement.section,
+        "section_title": requirement.section_title,
+        "number": requirement.number,
+        "subtopics": requirement.subtopics,
+        "title": requirement.title,
+        "path": path_text(requirement.path),
+        "line": requirement.line,
+        "body": requirement.body,
+        "work_items": [item.id for item in work_items],
+        "traceability": [link.line for link in requirement_links],
+    }
+
+
+def work_item_payload(item) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "requirement_id": item.requirement_id,
+        "document": item.document,
+        "motivation": item.motivation,
+        "section": item.section,
+        "number": item.number,
+        "subtopics": item.subtopics,
+        "sequence": item.sequence,
+        "title": item.title,
+        "state": item.state,
+        "path": path_text(item.path),
+        "line": item.line,
+        "body": item.body,
+        "owner": item.owner,
+        "timeline": item.timeline,
+    }
+
+
+def traceability_payload(link) -> dict[str, object]:
+    return {
+        "requirement_id": link.requirement_id,
+        "work_item_id": link.work_item_id,
+        "state": link.state,
+        "evidence": link.evidence,
+        "line": link.line,
+    }
+
+
+def ledger_payload(entry) -> dict[str, object]:
+    return {
+        "id": entry.id,
+        "title": entry.title,
+        "status": entry.status,
+        "path": path_text(entry.path),
+        "line": entry.line,
+        "body": entry.body,
+    }
+
+
+def stale_payload(item) -> dict[str, object]:
+    return {
+        "id": item.item.id,
+        "title": item.item.title,
+        "state": item.item.state,
+        "owner": item.item.owner,
+        "state_date": item.state_date,
+        "age_days": item.age_days,
+        "reason": item.reason,
+    }
+
+
+def model_payload(stale_days: int = DEFAULT_STALE_DAYS) -> dict[str, object]:
+    model = tool.load_model()
+    links = tool.traceability_links()
+    risks = tool.open_ledger_entries(tool.MANAGEMENT_DIR / "RISKS.md")
+    incidents = tool.open_ledger_entries(tool.MANAGEMENT_DIR / "INCIDENTS.md")
+    experiments = tool.open_ledger_entries(tool.MANAGEMENT_DIR / "EXPERIMENTS.md")
+    decisions = tool.ledger_entries(tool.MANAGEMENT_DIR / "DECISIONS.md")[-10:]
+    gaps = tool.traceability_gaps(model) if not model.errors else []
+    unmapped = tool.unmapped_requirements(model) if not model.errors else []
+    stale = tool.stale_work_items(model, stale_days) if not model.errors else []
+    counts = tool.state_counts(model)
+
+    return {
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "repo_root": str(REPO_ROOT),
+        "errors": [issue_payload(issue) for issue in model.errors],
+        "warnings": [issue_payload(issue) for issue in model.warnings],
+        "counts": {
+            "requirements": len(model.requirements),
+            "work_items": len(model.work_items),
+            "traceability_gaps": len(gaps),
+            "unmapped_requirements": len(unmapped),
+            "stale_work": len(stale),
+            "open_risks": len(risks),
+            "open_incidents": len(incidents),
+            "active_experiments": len(experiments),
+        },
+        "state_counts": counts,
+        "requirements": [
+            requirement_payload(model, requirement, links)
+            for requirement in sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+        ],
+        "work_items": [
+            work_item_payload(item)
+            for item in sorted(model.work_items.values(), key=lambda candidate: candidate.id)
+        ],
+        "traceability": [traceability_payload(link) for link in links],
+        "traceability_gaps": [requirement.id for requirement in gaps],
+        "unmapped_requirements": [requirement.id for requirement in unmapped],
+        "stale_work": [stale_payload(item) for item in stale],
+        "ledgers": {
+            "decisions": [ledger_payload(entry) for entry in decisions],
+            "risks": [ledger_payload(entry) for entry in risks],
+            "incidents": [ledger_payload(entry) for entry in incidents],
+            "experiments": [ledger_payload(entry) for entry in experiments],
+        },
+        "diagrams": {
+            "architecture_real": "/diagrams/architecture-real.svg",
+            "architecture_planned": "/diagrams/architecture-planned.svg",
+            "module_dependencies": "/diagrams/module-dependencies.svg",
+        },
+    }
+
+
+def ensure_diagrams() -> None:
+    model = tool.load_model()
+    real_nodes, real_edges = tool.real_architecture_graph()
+    planned_nodes, planned_edges = tool.planned_architecture_graph(model)
+    module_nodes, module_edges = tool.module_dependency_graph()
+    tool.write_diagram(
+        DIAGRAM_DIR,
+        "architecture-real.svg",
+        "Current Architecture",
+        real_nodes,
+        real_edges,
+        [tool.GraphNode("legend:source", "Current source module", "", "#f6f8fa", "#57606a")],
+    )
+    tool.write_diagram(
+        DIAGRAM_DIR,
+        "architecture-planned.svg",
+        "Architecture Plan Overlay",
+        planned_nodes,
+        planned_edges,
+        [
+            tool.GraphNode("legend:source", "Current source module", "", "#f6f8fa", "#57606a"),
+            tool.GraphNode("legend:work", "Planned or ongoing work", "", "#dbeafe", "#2563eb"),
+            tool.GraphNode("legend:unplanned", "Unplanned requirement", "", "#fff7ed", "#ea580c"),
+        ],
+    )
+    tool.write_diagram(
+        DIAGRAM_DIR,
+        "module-dependencies.svg",
+        "Rust Module Dependencies",
+        module_nodes,
+        module_edges,
+        [
+            tool.GraphNode("legend:bin", "Executable", "", "#fef3c7", "#92400e"),
+            tool.GraphNode("legend:logic", "Logic", "", "#dcfce7", "#15803d"),
+            tool.GraphNode("legend:messaging", "Messaging", "", "#dbeafe", "#1d4ed8"),
+            tool.GraphNode("legend:db", "Persistence", "", "#ede9fe", "#6d28d9"),
+        ],
+    )
+
+
+def required(payload: dict[str, object], name: str) -> str:
+    value = str(payload.get(name, "")).strip()
+    if not value:
+        raise ClientError(f"{name} is required")
+    return value
+
+
+def optional(payload: dict[str, object], name: str) -> str | None:
+    value = str(payload.get(name, "")).strip()
+    return value or None
+
+
+def flag(payload: dict[str, object], name: str) -> bool:
+    return bool(payload.get(name))
+
+
+def list_value(payload: dict[str, object], name: str) -> list[str]:
+    raw = payload.get(name, [])
+    if isinstance(raw, list):
+        values = [str(item).strip() for item in raw]
+    else:
+        values = [item.strip() for item in str(raw).replace(",", "\n").splitlines()]
+    return [item for item in values if item]
+
+
+def add_option(args: list[str], name: str | None, value: str | None) -> None:
+    if value:
+        args.extend([name, value])
+
+
+def build_management_command(action: str, payload: dict[str, object]) -> list[str]:
+    args: list[str]
+    if action == "lint":
+        args = ["lint"]
+        if flag(payload, "strict"):
+            args.append("--strict")
+    elif action == "management-status":
+        args = ["management-status"]
+        add_option(args, "--stale-days", optional(payload, "stale_days"))
+    elif action == "show-requirement":
+        args = ["show-requirement", required(payload, "requirement_id")]
+    elif action == "show-work":
+        args = ["show-work", required(payload, "ref")]
+        if flag(payload, "chat_prompt"):
+            args.append("--chat-prompt")
+    elif action == "chat-about":
+        args = ["chat-about"]
+        add_option(args, None, optional(payload, "ref"))
+    elif action == "verify-branch":
+        args = ["verify-branch"]
+        add_option(args, None, optional(payload, "branch"))
+    elif action == "evaluate-plan":
+        args = ["evaluate-plan", required(payload, "ref")]
+        add_option(args, "--user", optional(payload, "user"))
+    elif action == "draft-plan":
+        args = ["draft-plan", required(payload, "requirement_id")]
+        add_option(args, "--motivation", optional(payload, "motivation"))
+        add_option(args, "--sequence", optional(payload, "sequence"))
+        add_option(args, "--title", optional(payload, "title"))
+        add_option(args, "--date", optional(payload, "date"))
+        for body_line in list_value(payload, "body_lines"):
+            args.extend(["--body-line", body_line])
+        if flag(payload, "write"):
+            args.append("--write")
+        if flag(payload, "allow_existing_open"):
+            args.append("--allow-existing-open")
+    elif action == "advance-state":
+        args = ["advance-state", required(payload, "ref")]
+        add_option(args, "--to", optional(payload, "to"))
+        add_option(args, "--date", optional(payload, "date"))
+        add_option(args, "--engineer", optional(payload, "engineer"))
+        if flag(payload, "dry_run"):
+            args.append("--dry-run")
+    elif action == "start-work":
+        args = ["start-work", required(payload, "branch")]
+        add_option(args, "--base", optional(payload, "base"))
+        add_option(args, "--user", optional(payload, "user"))
+        add_option(args, "--feature-branch", optional(payload, "feature_branch"))
+        if flag(payload, "from_feature"):
+            args.append("--from-feature")
+        if flag(payload, "allow_dirty"):
+            args.append("--allow-dirty")
+        if flag(payload, "dry_run"):
+            args.append("--dry-run")
+    elif action == "audit-requirements":
+        args = ["audit-requirements"]
+        add_option(args, "--document", optional(payload, "document"))
+        add_option(args, "--limit", optional(payload, "limit"))
+        if flag(payload, "strict"):
+            args.append("--strict")
+    elif action == "estimate-requirement":
+        args = ["estimate-requirement", required(payload, "requirement_id")]
+    elif action == "sync-requirement":
+        args = ["sync-requirement", required(payload, "requirement_id")]
+        add_option(args, "--limit", optional(payload, "limit"))
+        if flag(payload, "strict"):
+            args.append("--strict")
+    elif action == "trace-requirement":
+        args = ["trace-requirement", required(payload, "requirement_id")]
+        add_option(args, "--limit", optional(payload, "limit"))
+    elif action == "link-evidence":
+        args = ["link-evidence", required(payload, "requirement_id"), required(payload, "work_item_id")]
+        paths = list_value(payload, "paths")
+        if not paths:
+            raise ClientError("paths is required")
+        args.extend(paths)
+        add_option(args, "--note", optional(payload, "note"))
+        add_option(args, "--state", optional(payload, "state"))
+        if flag(payload, "allow_missing"):
+            args.append("--allow-missing")
+    elif action == "prepare-release":
+        args = ["prepare-release", required(payload, "version")]
+        add_option(args, "--stale-days", optional(payload, "stale_days"))
+        if flag(payload, "strict"):
+            args.append("--strict")
+    elif action == "create-release-tag":
+        version = required(payload, "version")
+        args = ["create-release-tag", version]
+        add_option(args, "--message", optional(payload, "message"))
+        if flag(payload, "execute"):
+            if optional(payload, "confirm") != version:
+                raise ClientError("confirm must match the release version before creating a tag")
+            args.append("--execute")
+    elif action == "chase-techdebts":
+        args = ["chase-techdebts"]
+        add_option(args, "--limit", optional(payload, "limit"))
+        add_option(args, "--long-file-lines", optional(payload, "long_file_lines"))
+        if flag(payload, "strict"):
+            args.append("--strict")
+    elif action == "record-decision":
+        args = [
+            "record-decision",
+            required(payload, "title"),
+            "--context",
+            required(payload, "context"),
+            "--decision",
+            required(payload, "decision"),
+            "--consequence",
+            required(payload, "consequence"),
+        ]
+        add_option(args, "--status", optional(payload, "status"))
+        add_option(args, "--date", optional(payload, "date"))
+        for related in list_value(payload, "related"):
+            args.extend(["--related", related])
+    elif action == "record-risk":
+        args = [
+            "record-risk",
+            required(payload, "title"),
+            "--owner",
+            required(payload, "owner"),
+            "--risk",
+            required(payload, "risk"),
+            "--impact",
+            required(payload, "impact"),
+            "--mitigation",
+            required(payload, "mitigation"),
+        ]
+        add_option(args, "--review-date", optional(payload, "review_date"))
+        for related in list_value(payload, "related"):
+            args.extend(["--related", related])
+    elif action == "close-risk":
+        args = ["close-risk", required(payload, "risk_id"), "--evidence", required(payload, "evidence")]
+        add_option(args, "--date", optional(payload, "date"))
+    elif action == "record-incident":
+        args = [
+            "record-incident",
+            required(payload, "title"),
+            "--environment",
+            required(payload, "environment"),
+            "--impact",
+            required(payload, "impact"),
+            "--timeline",
+            required(payload, "timeline"),
+            "--mitigation",
+            required(payload, "mitigation"),
+        ]
+        add_option(args, "--detected", optional(payload, "detected"))
+    elif action == "close-incident":
+        args = ["close-incident", required(payload, "incident_id"), "--evidence", required(payload, "evidence")]
+        add_option(args, "--closed", optional(payload, "closed"))
+    elif action == "record-experiment":
+        args = [
+            "record-experiment",
+            required(payload, "title"),
+            "--branch",
+            required(payload, "branch"),
+            "--hypothesis",
+            required(payload, "hypothesis"),
+            "--expires",
+            required(payload, "expires"),
+            "--success",
+            required(payload, "success"),
+            "--failure",
+            required(payload, "failure"),
+        ]
+        for follow_up in list_value(payload, "follow_up"):
+            args.extend(["--follow-up", follow_up])
+    elif action == "close-experiment":
+        args = [
+            "close-experiment",
+            required(payload, "experiment_id"),
+            "--status",
+            required(payload, "status"),
+            "--result",
+            required(payload, "result"),
+        ]
+        add_option(args, "--date", optional(payload, "date"))
+    elif action == "stale-work":
+        args = ["stale-work"]
+        add_option(args, "--days", optional(payload, "days"))
+        if flag(payload, "strict"):
+            args.append("--strict")
+    elif action == "meeting-packet":
+        args = ["meeting-packet"]
+        add_option(args, "--stale-days", optional(payload, "stale_days"))
+    elif action == "acceptance-packet":
+        args = ["acceptance-packet", required(payload, "ref")]
+    elif action == "verification-check":
+        args = ["verification-check"]
+        add_option(args, None, optional(payload, "ref"))
+        add_option(args, "--base", optional(payload, "base"))
+        add_option(args, "--limit", optional(payload, "limit"))
+    elif action == "review":
+        args = ["review"]
+        add_option(args, None, optional(payload, "ref"))
+        add_option(args, "--base", optional(payload, "base"))
+        add_option(args, "--limit", optional(payload, "limit"))
+    elif action == "diagram-architecture-real":
+        args = ["diagram-architecture-real", "--html", str(DIAGRAM_DIR)]
+    elif action == "diagram-architecture-planned":
+        args = ["diagram-architecture-planned", "--html", str(DIAGRAM_DIR)]
+    elif action == "diagram-module-dependencies":
+        args = ["diagram-module-dependencies", "--html", str(DIAGRAM_DIR)]
+        add_option(args, "--scope", optional(payload, "scope"))
+        if flag(payload, "include_tests"):
+            args.append("--include-tests")
+    else:
+        raise ClientError(f"unknown action: {action}")
+    return [part for part in args if part is not None]
+
+
+def run_management_command(args: list[str]) -> dict[str, object]:
+    command = [sys.executable, str(MANAGEMENT_TOOL), *args]
+    result = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=COMMAND_TIMEOUT_SECONDS,
+    )
+    return {
+        "command": " ".join(["scripts/management/management_tool", *args]),
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def execute_action(request: dict[str, object]) -> dict[str, object]:
+    action = str(request.get("action", "")).strip()
+    payload = request.get("payload", {})
+    if not isinstance(payload, dict):
+        raise ClientError("payload must be an object")
+    args = build_management_command(action, payload)
+    return run_management_command(args)
+
+
+def json_bytes(payload: object) -> bytes:
+    return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+
+
+class ManagementGuiHandler(BaseHTTPRequestHandler):
+    server_version = "ManagementGui/1.0"
+
+    def log_message(self, format: str, *args) -> None:
+        if not getattr(self.server, "quiet", False):
+            super().log_message(format, *args)
+
+    def send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_json(self, status: int, payload: object) -> None:
+        self.send_bytes(status, json_bytes(payload), "application/json; charset=utf-8")
+
+    def send_error_json(self, status: int, message: str) -> None:
+        self.send_json(status, {"error": message})
+
+    def serve_static(self, path: Path) -> None:
+        if not path.is_file():
+            self.send_error_json(404, "not found")
+            return
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        self.send_bytes(200, path.read_bytes(), content_type)
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/":
+            self.serve_static(STATIC_DIR / "index.html")
+            return
+        if parsed.path.startswith("/assets/"):
+            requested = (STATIC_DIR / parsed.path.removeprefix("/assets/")).resolve()
+            if STATIC_DIR.resolve() not in requested.parents:
+                self.send_error_json(403, "forbidden")
+                return
+            self.serve_static(requested)
+            return
+        if parsed.path == "/api/model":
+            query = parse_qs(parsed.query)
+            stale_days = int(query.get("stale_days", [str(DEFAULT_STALE_DAYS)])[0])
+            self.send_json(200, model_payload(stale_days))
+            return
+        if parsed.path.startswith("/diagrams/"):
+            try:
+                ensure_diagrams()
+            except Exception as err:  # noqa: BLE001
+                self.send_error_json(500, str(err))
+                return
+            requested = (DIAGRAM_DIR / parsed.path.removeprefix("/diagrams/")).resolve()
+            if DIAGRAM_DIR.resolve() not in requested.parents:
+                self.send_error_json(403, "forbidden")
+                return
+            self.serve_static(requested)
+            return
+        self.send_error_json(404, "not found")
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path != "/api/action":
+            self.send_error_json(404, "not found")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            request = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            if not isinstance(request, dict):
+                raise ClientError("request must be an object")
+            self.send_json(200, execute_action(request))
+        except ClientError as err:
+            self.send_error_json(400, str(err))
+        except subprocess.TimeoutExpired:
+            self.send_error_json(504, "management command timed out")
+        except Exception as err:  # noqa: BLE001
+            self.send_error_json(500, str(err))
+
+
+def bind_server(host: str, port: int, attempts: int, quiet: bool) -> ThreadingHTTPServer:
+    for offset in range(max(attempts, 1)):
+        candidate = port + offset if port else 0
+        try:
+            server = ThreadingHTTPServer((host, candidate), ManagementGuiHandler)
+            server.quiet = quiet  # type: ignore[attr-defined]
+            return server
+        except OSError:
+            if port == 0 or offset + 1 >= attempts:
+                raise
+    raise RuntimeError("could not bind server")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the local management GUI.")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1.")
+    parser.add_argument("--port", type=int, default=8765, help="Bind port. Default: 8765.")
+    parser.add_argument("--port-attempts", type=int, default=20, help="Try this many consecutive ports before failing.")
+    parser.add_argument("--no-browser", action="store_true", help="Do not ask the OS to open a browser.")
+    parser.add_argument("--quiet", action="store_true", help="Suppress request logging.")
+    parser.add_argument("--check", action="store_true", help="Validate the GUI data path and exit.")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.check:
+        payload = model_payload()
+        print(json.dumps({"requirements": payload["counts"]["requirements"], "work_items": payload["counts"]["work_items"]}, sort_keys=True))
+        return 0
+
+    server = bind_server(args.host, args.port, args.port_attempts, args.quiet)
+    host, port = server.server_address
+    url = f"http://{host}:{port}/"
+    print(f"Management GUI: {url}", flush=True)
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nManagement GUI stopped.", file=sys.stderr)
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

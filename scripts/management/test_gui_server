@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Tests for scripts/management/gui_server."""
+
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import sys
+import unittest
+from pathlib import Path
+
+
+SOURCE_GUI = Path(__file__).resolve().parent / "gui_server"
+
+
+def load_gui_server():
+    loader = importlib.machinery.SourceFileLoader("management_gui_server_test", str(SOURCE_GUI))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError("cannot load gui_server")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+class ManagementGuiServerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.gui = load_gui_server()
+
+    def test_model_payload_contains_management_sections(self) -> None:
+        payload = self.gui.model_payload()
+        self.assertGreater(payload["counts"]["requirements"], 0)
+        self.assertIn("requirements", payload)
+        self.assertIn("work_items", payload)
+        self.assertIn("ledgers", payload)
+        self.assertIn("diagrams", payload)
+
+    def test_builds_allowlisted_requirement_command(self) -> None:
+        args = self.gui.build_management_command("show-requirement", {"requirement_id": "E.MCP.01"})
+        self.assertEqual(["show-requirement", "E.MCP.01"], args)
+
+    def test_release_tag_execution_requires_version_confirmation(self) -> None:
+        with self.assertRaises(self.gui.ClientError):
+            self.gui.build_management_command("create-release-tag", {"version": "1.2.3", "execute": True})
+        args = self.gui.build_management_command(
+            "create-release-tag",
+            {"version": "1.2.3", "execute": True, "confirm": "1.2.3"},
+        )
+        self.assertIn("--execute", args)
+
+    def test_execute_read_only_status_action(self) -> None:
+        result = self.gui.execute_action({"action": "management-status", "payload": {"stale_days": "14"}})
+        self.assertEqual(0, result["returncode"])
+        self.assertIn("Management Status", result["stdout"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

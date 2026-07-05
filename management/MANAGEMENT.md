@@ -107,4 +107,14 @@ This project is conducted under a formal management procedure. The top-level rul
         - a detailed report should be given on possible differences in interpretation between what the code does and what it was meant to do;
         - the AI may infer the quality, telling if there are tech-debts associated with that item, if there are security issues, inefficient code, or even bugs;
         - the existing branch in the git repo might be used to give the AI additional context of the initial implementation;
-        - the AI may indicate which branches changed the implementation / interpretation of that requirement as time passed and code changed; 
+        - the AI may indicate which branches changed the implementation / interpretation of that requirement as time passed and code changed;
+
+11) Supporting management ledgers:
+    * `DECISIONS.md` records accepted project decisions and their consequences.
+    * `DEFINITION_OF_READY_DONE.md` defines state-transition readiness and completion rules.
+    * `RELEASES.md` records production releases and release decisions.
+    * `RISKS.md` records active and closed project risks.
+    * `INCIDENTS.md` records operational, security, data, release, and staging incidents.
+    * `EXPERIMENTS.md` records spikes, prototypes, and `X` branches.
+    * `TRACEABILITY.md` connects requirements, work items, implementation, and verification evidence.
+    * `TOOLING.md` explains the repo-local management helper commands.

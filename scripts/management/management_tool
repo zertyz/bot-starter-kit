@@ -1,0 +1,3887 @@
+#!/usr/bin/env python3
+"""Parse and validate the management requirements and backlogs."""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import html
+import re
+import subprocess
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MANAGEMENT_DIR = REPO_ROOT / "management"
+
+REQUIREMENT_FILES = {
+    "B": "BUSINESS.md",
+    "E": "ENGINEERING.md",
+    "O": "OPERATIONS.md",
+}
+
+BACKLOG_FILES = {
+    "B": "BUSINESS.backlog.md",
+    "E": "ENGINEERING.backlog.md",
+    "O": "OPERATIONS.backlog.md",
+}
+
+SUPPORTING_FILES = [
+    "DECISIONS.md",
+    "DEFINITION_OF_READY_DONE.md",
+    "RELEASES.md",
+    "RISKS.md",
+    "INCIDENTS.md",
+    "EXPERIMENTS.md",
+    "TRACEABILITY.md",
+    "TOOLING.md",
+]
+
+VALID_STATES = [
+    "Under Planning",
+    "Planned",
+    "Started",
+    "In Code Review",
+    "Integrated",
+    "QA",
+    "Merged",
+    "Rolled Out",
+    "Rejected",
+    "Cancelled",
+]
+
+VALID_STATE_SET = set(VALID_STATES)
+
+STATE_FLOW = {
+    "Under Planning": "Planned",
+    "Planned": "Started",
+    "Started": "In Code Review",
+    "In Code Review": "QA",
+    "Integrated": "QA",
+    "QA": "Merged",
+    "Merged": "Rolled Out",
+}
+
+STATE_HEADINGS = {
+    "In Code Review": '# "In Code Review"',
+    "Integrated": '# "Integrated"',
+}
+
+VERIFICATION_COMMANDS = [
+    "scripts/ci/enforce_management_rules",
+    "scripts/ci/enforce_code_guidelines",
+    "cargo fmt --all -- --check",
+    "cargo clippy --all-targets --all-features -- -D warnings",
+    "cargo test --verbose",
+]
+
+REVIEW_RULE_REFERENCES = [
+    "management/DEFINITION_OF_READY_DONE.md",
+    "management/TRACEABILITY.md",
+    "CODE_GUIDELINES.md",
+    "CODE_PATTERNS.md",
+]
+
+REVIEW_CHECKLIST = [
+    "Does the implementation satisfy the governing requirement and the backlog work-item description?",
+    "Did implementation reveal requirement drift that must be reported before merge?",
+    "Are new or changed behaviors covered by tests, benchmarks, operational evidence, or explicit review evidence?",
+    "Does the change preserve the responsibility boundaries in CODE_PATTERNS.md?",
+    "Does production Rust avoid the denied constructs in CODE_GUIDELINES.md?",
+    "Is any new non-blocking debt documented with justification and deadline?",
+    "Does the backlog state match the real review phase?",
+]
+
+MOTIVATION_DESCRIPTIONS = {
+    "N": "new requirement work",
+    "R": "revisit or changed implementation approach",
+    "F": "fix for faulty or buggy implementation",
+    "X": "experiment, prototype, R&D, or spike",
+}
+
+VALID_MOTIVATIONS = list(MOTIVATION_DESCRIPTIONS)
+
+AUDIT_SEVERITIES = ["BLOCKER", "REVIEW", "INFO"]
+
+UNBOUNDED_REQUIREMENT_TERMS = [
+    "all",
+    "any",
+    "appropriate",
+    "easy",
+    "efficient",
+    "fast",
+    "robust",
+    "scalable",
+    "secure",
+    "simple",
+    "transparent",
+    "transparently",
+    "up-to-date",
+    "whatever",
+]
+
+IMPLEMENTATION_REQUIREMENT_TERMS = [
+    "/examples",
+    "backend",
+    "crate",
+    "directory",
+    "facade",
+    "file",
+    "folder",
+    "implementation",
+    "module",
+    "rust",
+    "src/",
+]
+
+ACTOR_TERMS = [
+    "admin",
+    "agent",
+    "application",
+    "bot",
+    "developer",
+    "engineer",
+    "gateway",
+    "human",
+    "logic",
+    "manager",
+    "operator",
+    "platform",
+    "service",
+    "system",
+    "user",
+]
+
+FAILURE_BEHAVIOR_TERMS = [
+    "cannot",
+    "crash",
+    "degradation",
+    "error",
+    "fail",
+    "failure",
+    "fallback",
+    "if",
+    "invalid",
+    "restart",
+    "restore",
+    "unless",
+    "unavailable",
+    "when",
+]
+
+ESTIMATE_HOUR_BANDS = [
+    (4, "2-6"),
+    (8, "6-16"),
+    (13, "16-40"),
+    (20, "40-80"),
+]
+
+TECH_DEBT_MARKERS = ["TODO", "FIXME", "HACK", "XXX"]
+SENSITIVE_TERMS = ["api_key", "credential", "password", "private_key", "secret", "token"]
+RISKY_RUST_SHORTCUTS = ["panic!(", ".unwrap()", ".expect("]
+RELEASE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-rc\.\d+)?$")
+RUST_MODULE_REF_RE = re.compile(r"\b(?P<root>crate|[A-Za-z_][A-Za-z0-9_]*)::(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)")
+RUST_GROUP_MODULE_REF_RE = re.compile(r"\b(?P<root>crate|[A-Za-z_][A-Za-z0-9_]*)::\{(?P<body>[^;]+)\}")
+RUST_GROUP_PATH_RE = re.compile(r"\b(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)")
+
+SECTION_RE = re.compile(r'^#\s+(?P<title>.+?)\s+"(?P<abbr>[A-Za-z][A-Za-z0-9]*)"\s*$')
+REQUIREMENT_HEADING_RE = re.compile(r"^#{2,6}\s+(?P<number>\d{2})(?P<subtopics>(?:\.[a-z]+)*)\)\s+(?P<title>.+?)\s*$")
+STATE_HEADING_RE = re.compile(r'^#\s+(?P<state>"?[^"#]+"?)\s*$')
+WORK_ITEM_RE = re.compile(
+    r"^##\s+"
+    r"(?P<id>(?P<doc>[BEO])(?P<motivation>[NRFX])\."
+    r"(?P<section>[A-Za-z][A-Za-z0-9]*)\."
+    r"(?P<number>\d{2})(?P<subtopics>(?:\.[a-z]+)*)-"
+    r"(?P<sequence>\d{3}))"
+    r"\s+--\s+(?P<title>.+?)\s*$"
+)
+BRANCH_RE = re.compile(
+    r"^(?:feature/|(?P<owner>[A-Za-z0-9_.-]+)/)?"
+    r"(?P<work_id>[BEO][NRFX]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*-\d{3})$"
+)
+TIMELINE_MARKER_RE = re.compile(r"==>\s*(?P<trail>.+)$")
+TIMELINE_OWNER_RE = re.compile(r"^(?P<owner>[^.:;]+)\.\s+")
+TIMELINE_STATE_RE = re.compile(
+    r"(?P<state>Under Planning|Planned|Started|In Code Review|Integrated|QA|Merged|Rolled Out|Rejected|Cancelled|Superseded by [^:;]+)"
+    r"\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})"
+)
+LEDGER_HEADING_RE = re.compile(r"^#{2,3}\s+(?P<id>[A-Z]+-\d{4}|`?[^`\s]+`?)\s+--\s+(?P<title>.+?)\s*$")
+
+
+@dataclasses.dataclass(frozen=True)
+class Issue:
+    severity: str
+    path: Path
+    line: int
+    message: str
+
+    def format(self) -> str:
+        return f"{self.severity}: {relative(self.path)}:{self.line}: {self.message}"
+
+
+@dataclasses.dataclass
+class Requirement:
+    id: str
+    document: str
+    section: str
+    section_title: str
+    number: str
+    subtopics: str
+    title: str
+    path: Path
+    line: int
+    body_lines: list[str] = dataclasses.field(default_factory=list)
+
+    @property
+    def body(self) -> str:
+        return trim_blank_lines(self.body_lines)
+
+
+@dataclasses.dataclass
+class WorkItem:
+    id: str
+    requirement_id: str
+    document: str
+    motivation: str
+    section: str
+    number: str
+    subtopics: str
+    sequence: str
+    title: str
+    state: str
+    path: Path
+    line: int
+    body_lines: list[str] = dataclasses.field(default_factory=list)
+    owner: str | None = None
+    timeline: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    @property
+    def body(self) -> str:
+        return trim_blank_lines(self.body_lines)
+
+
+@dataclasses.dataclass(frozen=True)
+class BranchRef:
+    raw: str
+    work_id: str
+    owner: str | None
+    is_feature: bool
+
+
+@dataclasses.dataclass
+class ManagementModel:
+    requirements: dict[str, Requirement] = dataclasses.field(default_factory=dict)
+    work_items: dict[str, WorkItem] = dataclasses.field(default_factory=dict)
+    errors: list[Issue] = dataclasses.field(default_factory=list)
+    warnings: list[Issue] = dataclasses.field(default_factory=list)
+
+    def error(self, path: Path, line: int, message: str) -> None:
+        self.errors.append(Issue("ERROR", path, line, message))
+
+    def warning(self, path: Path, line: int, message: str) -> None:
+        self.warnings.append(Issue("WARN", path, line, message))
+
+
+@dataclasses.dataclass(frozen=True)
+class AuditFinding:
+    severity: str
+    requirement: Requirement
+    category: str
+    message: str
+
+    def format(self) -> str:
+        return f"{self.severity}: {self.requirement.id}: {self.category}: {self.message} ({relative(self.requirement.path)}:{self.requirement.line})"
+
+
+@dataclasses.dataclass(frozen=True)
+class TraceabilityLink:
+    requirement_id: str
+    work_item_id: str
+    state: str
+    evidence: str
+    line: int
+
+
+@dataclasses.dataclass(frozen=True)
+class TechDebtFinding:
+    category: str
+    severity: str
+    path: str
+    line: int
+    message: str
+
+    def format(self) -> str:
+        return f"{self.severity}: {self.category}: {self.path}:{self.line}: {self.message}"
+
+
+@dataclasses.dataclass(frozen=True)
+class LedgerEntry:
+    id: str
+    title: str
+    status: str | None
+    path: Path
+    line: int
+    body: str
+
+
+@dataclasses.dataclass(frozen=True)
+class StaleWorkItem:
+    item: WorkItem
+    state_date: str | None
+    age_days: int | None
+    reason: str
+
+
+@dataclasses.dataclass(frozen=True)
+class GraphNode:
+    id: str
+    label: str
+    detail: str = ""
+    fill: str = "#f6f8fa"
+    border: str = "#57606a"
+
+
+@dataclasses.dataclass(frozen=True)
+class GraphEdge:
+    source: str
+    target: str
+    label: str = ""
+    color: str = "#8c959f"
+    dashed: bool = False
+
+
+def relative(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def trim_blank_lines(lines: list[str]) -> str:
+    start = 0
+    end = len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[start:end])
+
+
+def strip_state(raw_state: str) -> str:
+    state = raw_state.strip()
+    if len(state) >= 2 and state[0] == '"' and state[-1] == '"':
+        return state[1:-1]
+    return state
+
+
+def requirement_id(document: str, section: str, number: str, subtopics: str) -> str:
+    return f"{document}.{section}.{number}{subtopics}"
+
+
+def parse_requirement_file(model: ManagementModel, document: str, path: Path) -> None:
+    if not path.exists():
+        model.error(path, 1, "missing requirement file")
+        return
+
+    section: str | None = None
+    section_title: str | None = None
+    seen_sections: dict[str, int] = {}
+    active: Requirement | None = None
+
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        section_match = SECTION_RE.match(line)
+        if section_match:
+            section = section_match.group("abbr")
+            section_title = section_match.group("title")
+            active = None
+            if section in seen_sections:
+                model.error(path, line_number, f'duplicate section abbreviation "{section}"; first used at line {seen_sections[section]}')
+            else:
+                seen_sections[section] = line_number
+            continue
+
+        heading_match = REQUIREMENT_HEADING_RE.match(line)
+        if heading_match:
+            active = None
+            if section is None or section_title is None:
+                model.error(path, line_number, "requirement heading appears before a section heading with an abbreviation")
+                continue
+
+            req_id = requirement_id(document, section, heading_match.group("number"), heading_match.group("subtopics"))
+            requirement = Requirement(
+                id=req_id,
+                document=document,
+                section=section,
+                section_title=section_title,
+                number=heading_match.group("number"),
+                subtopics=heading_match.group("subtopics"),
+                title=heading_match.group("title"),
+                path=path,
+                line=line_number,
+            )
+            if req_id in model.requirements:
+                first = model.requirements[req_id]
+                model.error(path, line_number, f"duplicate requirement id {req_id}; first used at {relative(first.path)}:{first.line}")
+            else:
+                model.requirements[req_id] = requirement
+            active = requirement
+            continue
+
+        if active is not None:
+            active.body_lines.append(line)
+
+
+def parse_backlog_file(model: ManagementModel, document: str, path: Path) -> None:
+    if not path.exists():
+        model.error(path, 1, "missing backlog file")
+        return
+
+    current_state: str | None = None
+    active: WorkItem | None = None
+
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        state_match = STATE_HEADING_RE.match(line)
+        if state_match and not line.startswith("##"):
+            current_state = strip_state(state_match.group("state"))
+            active = None
+            if current_state not in VALID_STATE_SET:
+                model.warning(path, line_number, f'unknown backlog state "{current_state}"')
+            continue
+
+        work_match = WORK_ITEM_RE.match(line)
+        if work_match:
+            active = None
+            if current_state is None:
+                model.error(path, line_number, "work item appears before a backlog state heading")
+                continue
+            work_document = work_match.group("doc")
+            if work_document != document:
+                model.error(path, line_number, f"work item belongs to {work_document}, but is listed in {path.name}")
+
+            req_id = requirement_id(work_document, work_match.group("section"), work_match.group("number"), work_match.group("subtopics"))
+            item = WorkItem(
+                id=work_match.group("id"),
+                requirement_id=req_id,
+                document=work_document,
+                motivation=work_match.group("motivation"),
+                section=work_match.group("section"),
+                number=work_match.group("number"),
+                subtopics=work_match.group("subtopics"),
+                sequence=work_match.group("sequence"),
+                title=work_match.group("title"),
+                state=current_state,
+                path=path,
+                line=line_number,
+            )
+            if item.id in model.work_items:
+                first = model.work_items[item.id]
+                model.error(path, line_number, f"duplicate work item id {item.id}; first used at {relative(first.path)}:{first.line}")
+            else:
+                model.work_items[item.id] = item
+            active = item
+            continue
+
+        if line.startswith("## "):
+            model.error(path, line_number, "invalid work item heading; expected `## <ID> -- <title>`")
+            active = None
+            continue
+
+        if active is not None:
+            active.body_lines.append(line)
+
+    for item in [work for work in model.work_items.values() if work.path == path]:
+        parse_work_timeline(model, item)
+
+
+def parse_work_timeline(model: ManagementModel, item: WorkItem) -> None:
+    for body_line in item.body_lines:
+        marker_match = TIMELINE_MARKER_RE.search(body_line)
+        if not marker_match:
+            continue
+        trail = marker_match.group("trail")
+        owner_match = TIMELINE_OWNER_RE.match(trail)
+        if owner_match and TIMELINE_STATE_RE.search(trail[owner_match.end() :]):
+            item.owner = owner_match.group("owner").strip()
+        for state_match in TIMELINE_STATE_RE.finditer(trail):
+            item.timeline[state_match.group("state")] = state_match.group("date")
+
+    if item.state in VALID_STATE_SET and item.state not in item.timeline:
+        model.warning(item.path, item.line, f"{item.id} is in state {item.state}, but has no dated `{item.state}: YYYY-MM-DD` status trail")
+
+
+def load_model() -> ManagementModel:
+    model = ManagementModel()
+
+    for document, name in REQUIREMENT_FILES.items():
+        parse_requirement_file(model, document, MANAGEMENT_DIR / name)
+
+    for document, name in BACKLOG_FILES.items():
+        parse_backlog_file(model, document, MANAGEMENT_DIR / name)
+
+    for name in SUPPORTING_FILES:
+        path = MANAGEMENT_DIR / name
+        if not path.exists():
+            model.error(path, 1, "missing supporting management file")
+
+    for item in model.work_items.values():
+        if item.requirement_id not in model.requirements:
+            model.error(item.path, item.line, f"{item.id} references missing requirement {item.requirement_id}")
+
+    return model
+
+
+def current_branch() -> str:
+    branch = git_output(["branch", "--show-current"])
+    if not branch:
+        raise RuntimeError("git is in detached HEAD; pass a branch or work item explicitly")
+    return branch
+
+
+def git_result(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=REPO_ROOT,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def git_output(args: list[str]) -> str:
+    result = git_result(args)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"git {' '.join(args)} failed"
+        raise RuntimeError(detail)
+    return result.stdout.strip()
+
+
+def git_ref_exists(ref: str) -> bool:
+    return git_result(["rev-parse", "--verify", "--quiet", ref]).returncode == 0
+
+
+def git_branch_exists(branch: str) -> bool:
+    return git_ref_exists(f"refs/heads/{branch}")
+
+
+def git_worktree_is_dirty() -> bool:
+    return bool(git_output(["status", "--porcelain"]))
+
+
+def git_name_list(args: list[str]) -> set[str]:
+    result = git_result(args)
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def changed_files(base_ref: str | None) -> tuple[list[str], list[str]]:
+    files: set[str] = set()
+    notes: list[str] = []
+    if base_ref:
+        if git_ref_exists(base_ref):
+            files.update(git_name_list(["diff", "--name-only", "--diff-filter=ACMRTUXB", f"{base_ref}...HEAD"]))
+        else:
+            notes.append(f"Base ref {base_ref} does not exist locally; committed branch diff was skipped.")
+    files.update(git_name_list(["diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD"]))
+    files.update(git_name_list(["diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB"]))
+
+    status = git_output(["status", "--porcelain"])
+    for line in status.splitlines():
+        if len(line) < 4:
+            continue
+        if line.startswith("?? "):
+            files.add(line[3:])
+        elif " -> " in line:
+            files.add(line.split(" -> ", maxsplit=1)[1])
+        else:
+            files.add(line[3:])
+    tracked = set(tracked_files())
+    current_files = [
+        path
+        for path in files
+        if path
+        and "__pycache__/" not in path
+        and (path in tracked or (REPO_ROOT / path).exists())
+    ]
+    return sorted(current_files), notes
+
+
+def diff_stat(base_ref: str | None) -> tuple[list[str], list[str]]:
+    sections: list[str] = []
+    notes: list[str] = []
+    if base_ref:
+        if git_ref_exists(base_ref):
+            branch_stat = git_output(["diff", "--stat", "--compact-summary", f"{base_ref}...HEAD"])
+            if branch_stat:
+                sections.append(f"Committed branch diff against {base_ref}:\n{branch_stat}")
+        else:
+            notes.append(f"Base ref {base_ref} does not exist locally; committed branch diff stat was skipped.")
+
+    worktree_stat = git_output(["diff", "--stat", "--compact-summary", "HEAD"])
+    if worktree_stat:
+        sections.append(f"Uncommitted worktree diff against HEAD:\n{worktree_stat}")
+    staged_stat = git_output(["diff", "--cached", "--stat", "--compact-summary"])
+    if staged_stat:
+        sections.append(f"Staged diff:\n{staged_stat}")
+    return sections, notes
+
+
+def tracked_files() -> list[str]:
+    return sorted(git_name_list(["ls-files"]))
+
+
+def read_repo_file(path: str) -> str:
+    full_path = REPO_ROOT / path
+    if not full_path.is_file():
+        return ""
+    try:
+        return full_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def file_contains_any(path: str, patterns: list[str]) -> bool:
+    content = read_repo_file(path)
+    return any(pattern in content for pattern in patterns)
+
+
+def rust_source_file(path: str) -> bool:
+    return path.startswith("src/") and path.endswith(".rs")
+
+
+def test_evidence_file(path: str) -> bool:
+    return (
+        path.startswith("tests/")
+        or Path(path).name.startswith("test_")
+        or path.endswith("_test.rs")
+        or (path.endswith(".rs") and file_contains_any(path, ["#[test]", "#[tokio::test]", "#[async_std::test]", "#[cfg(test)]"]))
+    )
+
+
+def benchmark_evidence_file(path: str) -> bool:
+    return path.startswith("benches/") or "benchmark" in path.lower() or (path.endswith(".rs") and file_contains_any(path, ["criterion_group!", "Criterion"]))
+
+
+def operations_evidence_file(path: str) -> bool:
+    return path.startswith(".github/") or path.startswith("scripts/operations/") or path in {
+        "management/OPERATIONS.md",
+        "management/OPERATIONS.backlog.md",
+        "management/RELEASES.md",
+        "management/INCIDENTS.md",
+        "management/RISKS.md",
+    }
+
+
+def security_evidence_file(path: str) -> bool:
+    lowered = path.lower()
+    return (
+        "security" in lowered
+        or "secret" in lowered
+        or "tls" in lowered
+        or path in {"management/RISKS.md", "management/INCIDENTS.md"}
+        or path.startswith("scripts/operations/")
+    )
+
+
+def recovery_evidence_file(path: str) -> bool:
+    lowered = path.lower()
+    return (
+        "recovery" in lowered
+        or "rollback" in lowered
+        or "backup" in lowered
+        or path in {"management/RELEASES.md", "management/INCIDENTS.md", "management/OPERATIONS.md"}
+    )
+
+
+def product_evidence_file(path: str) -> bool:
+    return path in {"management/BUSINESS.md", "management/BUSINESS.backlog.md"} or path.startswith("README")
+
+
+def print_evidence_line(title: str, evidence: list[str], status_if_missing: str, reason: str) -> None:
+    if evidence:
+        print(f"{title}: FOUND")
+        for path in evidence:
+            print(f"  - {path}")
+        return
+    print(f"{title}: {status_if_missing}")
+    print(f"  - {reason}")
+
+
+def limited(paths: list[str], limit: int = 8) -> list[str]:
+    if len(paths) <= limit:
+        return paths
+    remaining = len(paths) - limit
+    return [*paths[:limit], f"... {remaining} more"]
+
+
+def parse_branch_or_work_ref(raw_ref: str) -> tuple[str | None, str]:
+    branch_ref = parse_branch_ref(raw_ref)
+    return branch_ref.owner, branch_ref.work_id
+
+
+def parse_branch_ref(raw_ref: str) -> BranchRef:
+    match = BRANCH_RE.match(raw_ref)
+    if not match:
+        raise ValueError(f"invalid branch or work item reference: {raw_ref}")
+    return BranchRef(
+        raw=raw_ref,
+        work_id=match.group("work_id"),
+        owner=match.group("owner"),
+        is_feature=raw_ref.startswith("feature/"),
+    )
+
+
+def resolve_work_item(model: ManagementModel, raw_ref: str | None) -> tuple[str, WorkItem]:
+    ref = raw_ref if raw_ref else current_branch()
+    _owner, work_id = parse_branch_or_work_ref(ref)
+    if work_id not in model.work_items:
+        raise KeyError(f"{work_id} was not found in any backlog")
+    return ref, model.work_items[work_id]
+
+
+def validate_iso_date(raw_date: str) -> str:
+    try:
+        datetime.strptime(raw_date, "%Y-%m-%d")
+    except ValueError as err:
+        raise ValueError(f"invalid date {raw_date}; expected YYYY-MM-DD") from err
+    return raw_date
+
+
+def target_state_for(item: WorkItem, raw_state: str | None) -> str:
+    if raw_state:
+        state = strip_state(raw_state)
+        if state not in VALID_STATE_SET:
+            valid = ", ".join(VALID_STATES)
+            raise ValueError(f"invalid target state {raw_state}; expected one of: {valid}")
+        return state
+
+    state = STATE_FLOW.get(item.state)
+    if state is None:
+        raise ValueError(f"{item.id} is in state {item.state}; no default next state is defined")
+    return state
+
+
+def state_heading(state: str) -> str:
+    return STATE_HEADINGS.get(state, f"# {state}")
+
+
+def backlog_sections(lines: list[str]) -> list[tuple[str, int, int]]:
+    starts: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        match = STATE_HEADING_RE.match(line.rstrip("\n"))
+        if match and not line.startswith("##"):
+            starts.append((strip_state(match.group("state")), index))
+
+    sections: list[tuple[str, int, int]] = []
+    for index, (state, start) in enumerate(starts):
+        end = starts[index + 1][1] if index + 1 < len(starts) else len(lines)
+        sections.append((state, start, end))
+    return sections
+
+
+def find_work_block(lines: list[str], work_item_id: str) -> tuple[int, int]:
+    start: int | None = None
+    for index, line in enumerate(lines):
+        match = WORK_ITEM_RE.match(line.rstrip("\n"))
+        if match and match.group("id") == work_item_id:
+            start = index
+            break
+    if start is None:
+        raise ValueError(f"{work_item_id} was not found in its backlog file")
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("# ") or line.startswith("## "):
+            end = index
+            break
+    return start, end
+
+
+def timeline_entries(item: WorkItem, target_state: str, state_date: str) -> list[tuple[str, str]]:
+    entries = list(item.timeline.items())
+    if target_state not in item.timeline:
+        entries.append((target_state, state_date))
+    return entries
+
+
+def timeline_line(item: WorkItem, target_state: str, state_date: str, engineer: str | None, indent: str = "") -> str:
+    owner = engineer or item.owner
+    prefix = f"{indent}==> "
+    if owner:
+        prefix += f"{owner}. "
+    states = "; ".join(f"{state}: {entered_at}" for state, entered_at in timeline_entries(item, target_state, state_date))
+    return f"{prefix}{states};\n"
+
+
+def update_work_block_timeline(block: list[str], item: WorkItem, target_state: str, state_date: str, engineer: str | None) -> list[str]:
+    updated = list(block)
+    timeline_index: int | None = None
+    indent = ""
+
+    for index, line in enumerate(updated):
+        marker_match = TIMELINE_MARKER_RE.search(line)
+        if marker_match:
+            timeline_index = index
+            indent = line[: marker_match.start()]
+
+    if timeline_index is None:
+        insert_index = len(updated)
+        while insert_index > 0 and not updated[insert_index - 1].strip():
+            insert_index -= 1
+        updated.insert(insert_index, timeline_line(item, target_state, state_date, engineer))
+        return updated
+
+    updated[timeline_index] = timeline_line(item, target_state, state_date, engineer, indent)
+    return updated
+
+
+def ensure_state_section(lines: list[str], state: str) -> list[str]:
+    if any(section_state == state for section_state, _start, _end in backlog_sections(lines)):
+        return lines
+
+    heading = f"{state_heading(state)}\n"
+    state_order = {value: index for index, value in enumerate(VALID_STATES)}
+    target_order = state_order[state]
+
+    insert_index = len(lines)
+    for section_state, start, _end in backlog_sections(lines):
+        if state_order.get(section_state, 999) > target_order:
+            insert_index = start
+            break
+
+    section_lines = [heading, "\n"]
+    if insert_index == len(lines):
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if lines:
+            lines.extend(["\n", "\n", *section_lines])
+        else:
+            lines.extend(section_lines)
+        return lines
+
+    if insert_index > 0 and lines[insert_index - 1].strip():
+        section_lines.insert(0, "\n")
+    lines[insert_index:insert_index] = section_lines
+    return lines
+
+
+def insertion_index_for_state(lines: list[str], state: str) -> int:
+    for section_state, start, end in backlog_sections(lines):
+        if section_state != state:
+            continue
+        insert_index = end
+        while insert_index > start + 1 and not lines[insert_index - 1].strip():
+            insert_index -= 1
+        return insert_index
+    raise ValueError(f"missing state section {state}")
+
+
+def normalize_moved_block(block: list[str]) -> list[str]:
+    start = 0
+    end = len(block)
+    while start < end and not block[start].strip():
+        start += 1
+    while end > start and not block[end - 1].strip():
+        end -= 1
+    normalized = block[start:end]
+    if normalized and not normalized[-1].endswith("\n"):
+        normalized[-1] += "\n"
+    return normalized
+
+
+def replace_or_move_work_item(item: WorkItem, target_state: str, state_date: str, engineer: str | None) -> None:
+    lines = item.path.read_text(encoding="utf-8").splitlines(keepends=True)
+    start, end = find_work_block(lines, item.id)
+    block = update_work_block_timeline(lines[start:end], item, target_state, state_date, engineer)
+
+    if target_state == item.state:
+        lines[start:end] = block
+        item.path.write_text("".join(lines), encoding="utf-8")
+        return
+
+    del lines[start:end]
+    lines = ensure_state_section(lines, target_state)
+    insert_index = insertion_index_for_state(lines, target_state)
+    normalized_block = normalize_moved_block(block)
+    insertion = ["\n", *normalized_block, "\n"]
+    lines[insert_index:insert_index] = insertion
+    item.path.write_text("".join(lines), encoding="utf-8")
+
+
+def print_requirement(requirement: Requirement) -> None:
+    print(f"Requirement: {requirement.id} -- {requirement.title}")
+    print(f"Source:      {relative(requirement.path)}:{requirement.line}")
+    print(f"Section:     {requirement.section_title} \"{requirement.section}\"")
+    if requirement.body:
+        print()
+        print(requirement.body)
+
+
+def print_work_item(model: ManagementModel, item: WorkItem) -> None:
+    print(f"Work Item:   {item.id} -- {item.title}")
+    print(f"State:       {item.state}")
+    print(f"Source:      {relative(item.path)}:{item.line}")
+    print(f"Requirement: {item.requirement_id}")
+    if item.owner:
+        print(f"Owner:       {item.owner}")
+    if item.timeline:
+        timeline = "; ".join(f"{state}: {date}" for state, date in item.timeline.items())
+        print(f"Timeline:    {timeline}")
+    if item.body:
+        print()
+        print(item.body)
+
+    requirement = model.requirements.get(item.requirement_id)
+    if requirement:
+        print()
+        print_requirement(requirement)
+
+
+def branch_owner_errors(item: WorkItem, branch_ref: BranchRef, explicit_user: str | None = None) -> list[str]:
+    errors: list[str] = []
+    if not branch_ref.is_feature and branch_ref.owner is None:
+        errors.append("ordinary work branches must use `<developer_username>/<work item id>`")
+    if branch_ref.is_feature:
+        if explicit_user and item.owner and explicit_user.lower() != item.owner.lower():
+            errors.append(f"--user {explicit_user} does not match backlog owner {item.owner}")
+        return errors
+    if item.owner is None:
+        errors.append(f"{item.id} has no backlog owner")
+    elif branch_ref.owner and branch_ref.owner.lower() != item.owner.lower():
+        errors.append(f"branch owner {branch_ref.owner} does not match backlog owner {item.owner}")
+    if explicit_user and item.owner and explicit_user.lower() != item.owner.lower():
+        errors.append(f"--user {explicit_user} does not match backlog owner {item.owner}")
+    return errors
+
+
+def started_work_errors(model: ManagementModel, item: WorkItem, branch_ref: BranchRef, explicit_user: str | None = None) -> list[str]:
+    errors: list[str] = []
+    if item.requirement_id not in model.requirements:
+        errors.append(f"{item.id} references missing requirement {item.requirement_id}")
+    if item.state != "Started":
+        errors.append(f"{item.id} is in state {item.state}; engineering work branches must reference a Started work item")
+    errors.extend(branch_owner_errors(item, branch_ref, explicit_user))
+    return errors
+
+
+def same_requirement_items(model: ManagementModel, item: WorkItem) -> list[WorkItem]:
+    return sorted(
+        [candidate for candidate in model.work_items.values() if candidate.requirement_id == item.requirement_id and candidate.id != item.id],
+        key=lambda candidate: candidate.id,
+    )
+
+
+def completed_work_items(items: list[WorkItem]) -> list[WorkItem]:
+    return [item for item in items if item.state in {"Merged", "Rolled Out"}]
+
+
+def open_work_items(items: list[WorkItem]) -> list[WorkItem]:
+    return [item for item in items if item.state not in {"Merged", "Rolled Out", "Rejected", "Cancelled"}]
+
+
+def words_in(text: str) -> list[str]:
+    return re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", text.lower())
+
+
+def requirement_text(requirement: Requirement) -> str:
+    return f"{requirement.title}\n{requirement.body}"
+
+
+def normalized_requirement_text(requirement: Requirement) -> str:
+    return " ".join(words_in(requirement_text(requirement)))
+
+
+def requirement_work_items(model: ManagementModel, requirement: Requirement) -> list[WorkItem]:
+    related_prefix = f"{requirement.id}."
+    return sorted(
+        [
+            item
+            for item in model.work_items.values()
+            if item.requirement_id == requirement.id or (not requirement.subtopics and item.requirement_id.startswith(related_prefix))
+        ],
+        key=lambda item: item.id,
+    )
+
+
+def requirement_matches_id(requirement: Requirement, candidate_id: str) -> bool:
+    return candidate_id == requirement.id or (not requirement.subtopics and candidate_id.startswith(f"{requirement.id}."))
+
+
+def traceability_status(requirement: Requirement, traceability: str) -> str:
+    if requirement.id in traceability:
+        return "direct"
+    if not requirement.subtopics and f"{requirement.id}." in traceability:
+        return "child"
+    if f"{requirement.document}.{requirement.section}.*" in traceability:
+        return "area"
+    return "missing"
+
+
+def contains_term(text: str, term: str) -> bool:
+    if any(character in term for character in "/-"):
+        return term in text
+    return re.search(rf"\b{re.escape(term)}\b", text) is not None
+
+
+def matching_terms(text: str, terms: list[str]) -> list[str]:
+    lowered = text.lower()
+    return [term for term in terms if contains_term(lowered, term)]
+
+
+def likely_compound_requirement(requirement: Requirement) -> bool:
+    body = requirement.body
+    bullet_lines = [line for line in body.splitlines() if re.match(r"\s*(?:[-*]|\d+\.)\s+", line)]
+    obligation_markers = len(re.findall(r"\b(?:and|also|or)\b", body.lower()))
+    return len(bullet_lines) >= 4 or obligation_markers >= 5
+
+
+def audit_requirement(
+    model: ManagementModel,
+    requirement: Requirement,
+    traceability: str,
+    duplicate_titles: dict[str, list[Requirement]],
+    duplicate_bodies: dict[str, list[Requirement]],
+) -> list[AuditFinding]:
+    findings: list[AuditFinding] = []
+    text = requirement_text(requirement)
+    body = requirement.body.strip()
+    body_words = words_in(body)
+    work_items = requirement_work_items(model, requirement)
+    completed_items = completed_work_items(work_items)
+    active_items = open_work_items(work_items)
+
+    def add(severity: str, category: str, message: str) -> None:
+        findings.append(AuditFinding(severity, requirement, category, message))
+
+    if not body or body.lower() in {"tbd", "todo"}:
+        add("BLOCKER", "clarity", "requirement body is empty or TBD")
+    elif len(body_words) < 8:
+        add("REVIEW", "clarity", "requirement body is very short")
+
+    unbounded = matching_terms(text, UNBOUNDED_REQUIREMENT_TERMS)
+    if unbounded:
+        add("REVIEW", "boundedness", f"contains broad terms that need explicit bounds: {', '.join(unbounded[:5])}")
+
+    implementation_terms = matching_terms(text, IMPLEMENTATION_REQUIREMENT_TERMS)
+    if implementation_terms:
+        add("REVIEW", "outcome-focus", f"mentions implementation terms; confirm this is intended: {', '.join(implementation_terms[:5])}")
+
+    if not matching_terms(text, ACTOR_TERMS):
+        add("REVIEW", "actor", "actor or responsible subject is not obvious")
+
+    if likely_compound_requirement(requirement):
+        add("REVIEW", "scope", "may combine multiple obligations that could need separate sub-requirements")
+
+    if re.search(r"\b(?:must|should|needs?|allow|support|persist|store|route)\b", text.lower()) and not matching_terms(text, FAILURE_BEHAVIOR_TERMS):
+        add("INFO", "failure-behavior", "no explicit failure or unavailable-path behavior detected")
+
+    title_key = " ".join(words_in(requirement.title))
+    title_duplicates = duplicate_titles.get(title_key, [])
+    if title_key and len(title_duplicates) > 1:
+        others = ", ".join(item.id for item in title_duplicates if item.id != requirement.id)
+        add("REVIEW", "redundancy", f"title matches another requirement: {others}")
+
+    body_key = " ".join(body_words)
+    body_duplicates = duplicate_bodies.get(body_key, [])
+    if body_key and len(body_key) > 40 and len(body_duplicates) > 1:
+        others = ", ".join(item.id for item in body_duplicates if item.id != requirement.id)
+        add("REVIEW", "redundancy", f"body matches another requirement: {others}")
+
+    if not work_items:
+        add("REVIEW", "planning", "no backlog work item maps to this requirement")
+    elif not active_items and not completed_items:
+        add("REVIEW", "planning", "only rejected or cancelled work maps to this requirement")
+
+    status = traceability_status(requirement, traceability)
+    if status == "missing":
+        add("REVIEW", "traceability", "not mentioned in TRACEABILITY.md")
+    elif status == "area":
+        add("REVIEW", "traceability", "listed only through an unmapped requirement area in TRACEABILITY.md")
+
+    if work_items and not completed_items:
+        add("INFO", "evidence", "no merged or rolled-out work item maps to this requirement yet")
+
+    return findings
+
+
+def duplicate_requirement_groups(requirements: list[Requirement], key_func) -> dict[str, list[Requirement]]:
+    groups: dict[str, list[Requirement]] = {}
+    for requirement in requirements:
+        key = key_func(requirement)
+        if key:
+            groups.setdefault(key, []).append(requirement)
+    return {key: values for key, values in groups.items() if len(values) > 1}
+
+
+def requirement_references(text: str) -> list[str]:
+    return sorted(set(re.findall(r"\b[BEO]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*\b", text)))
+
+
+def traceability_links() -> list[TraceabilityLink]:
+    path = MANAGEMENT_DIR / "TRACEABILITY.md"
+    if not path.exists():
+        return []
+
+    links: list[TraceabilityLink] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped.startswith("| `"):
+            continue
+        columns = [column.strip() for column in stripped.strip("|").split("|")]
+        if len(columns) < 4:
+            continue
+        requirement_id_column, work_item_id_column, state, evidence = columns[:4]
+        links.append(
+            TraceabilityLink(
+                requirement_id=requirement_id_column.strip("`"),
+                work_item_id=work_item_id_column.strip("`"),
+                state=state,
+                evidence=evidence,
+                line=line_number,
+            )
+        )
+    return links
+
+
+def traceability_links_for(requirement: Requirement, links: list[TraceabilityLink]) -> list[TraceabilityLink]:
+    return [link for link in links if requirement_matches_id(requirement, link.requirement_id)]
+
+
+def evidence_paths(link: TraceabilityLink) -> list[str]:
+    paths = re.findall(r"`([^`]+)`", link.evidence)
+    return [path for path in paths if "/" in path or "." in Path(path).name]
+
+
+def requirement_source_terms(requirement: Requirement) -> list[str]:
+    ignored = {
+        "able",
+        "also",
+        "and",
+        "bot",
+        "can",
+        "for",
+        "from",
+        "have",
+        "into",
+        "may",
+        "must",
+        "not",
+        "our",
+        "should",
+        "the",
+        "this",
+        "user",
+        "with",
+    }
+    words = [word for word in words_in(requirement_text(requirement)) if len(word) >= 4 and word not in ignored]
+    ordered: list[str] = []
+    for word in words:
+        if word not in ordered:
+            ordered.append(word)
+    return ordered[:8]
+
+
+def tracked_text_files() -> list[str]:
+    ignored_suffixes = {".lock", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".wasm"}
+    return [
+        path
+        for path in tracked_files()
+        if not any(path.endswith(suffix) for suffix in ignored_suffixes)
+        and not path.startswith(".git/")
+        and not path.startswith("target/")
+    ]
+
+
+def source_files_mentioning(terms: list[str], limit: int, implementation_only: bool = False) -> list[str]:
+    if not terms:
+        return []
+    mentions: list[str] = []
+    lowered_terms = [term.lower() for term in terms]
+    for path in tracked_text_files():
+        if implementation_only and not path.startswith(("src/", "tests/", "benches/", "examples/", "scripts/")):
+            continue
+        if not (path.endswith(".rs") or path.endswith(".toml") or path.endswith(".md") or path.endswith(".py") or path.endswith(".sh")):
+            continue
+        content = read_repo_file(path).lower()
+        if content and any(term in content for term in lowered_terms):
+            mentions.append(path)
+        if len(mentions) >= limit:
+            break
+    return mentions
+
+
+def estimate_effort_band(score: int) -> str:
+    for maximum, band in ESTIMATE_HOUR_BANDS:
+        if score <= maximum:
+            return band
+    return "80+"
+
+
+def requirement_complexity_score(requirement: Requirement, work_items: list[WorkItem], audit_findings: list[AuditFinding]) -> int:
+    text = requirement_text(requirement)
+    bullet_count = len([line for line in requirement.body.splitlines() if re.match(r"\s*(?:[-*]|\d+\.)\s+", line)])
+    score = 2
+    score += min(6, len(words_in(text)) // 25)
+    score += min(4, bullet_count // 2)
+    score += min(4, len(requirement_references(text)))
+    score += 2 if not work_items else 0
+    score += sum(2 for finding in audit_findings if finding.severity == "BLOCKER")
+    score += min(4, sum(1 for finding in audit_findings if finding.severity == "REVIEW"))
+    if matching_terms(text, IMPLEMENTATION_REQUIREMENT_TERMS):
+        score += 2
+    if matching_terms(text, UNBOUNDED_REQUIREMENT_TERMS):
+        score += 2
+    return score
+
+
+def evidence_path_statuses(paths: list[str]) -> list[tuple[str, str]]:
+    tracked = set(tracked_files())
+    statuses: list[tuple[str, str]] = []
+    for path in paths:
+        full_path = REPO_ROOT / path
+        if path in tracked:
+            statuses.append((path, "tracked"))
+        elif full_path.exists():
+            statuses.append((path, "exists but is not tracked"))
+        else:
+            statuses.append((path, "missing"))
+    return statuses
+
+
+def sync_signal_counts(signals: list[str]) -> tuple[int, int]:
+    blocker_count = sum(1 for signal in signals if signal.startswith("BLOCKER:"))
+    review_count = sum(1 for signal in signals if signal.startswith("REVIEW:"))
+    return blocker_count, review_count
+
+
+def source_like_file(path: str) -> bool:
+    return path.endswith((".rs", ".toml", ".yaml", ".yml", ".json", ".sh", ".py", ".md"))
+
+
+def scan_file_for_tech_debt(path: str, long_file_lines: int) -> list[TechDebtFinding]:
+    if not source_like_file(path):
+        return []
+    content = read_repo_file(path)
+    if not content:
+        return []
+
+    findings: list[TechDebtFinding] = []
+    lines = content.splitlines()
+    test_module_depth = 0
+    pending_cfg_test = False
+    if long_file_lines > 0 and len(lines) > long_file_lines:
+        findings.append(
+            TechDebtFinding(
+                "maintainability",
+                "REVIEW",
+                path,
+                1,
+                f"large file has {len(lines)} lines; consider whether responsibilities can be split",
+            )
+        )
+
+    clone_count = content.count(".clone()")
+    if path.startswith("src/") and path.endswith(".rs") and clone_count >= 10:
+        findings.append(
+            TechDebtFinding(
+                "performance",
+                "REVIEW",
+                path,
+                1,
+                f"contains {clone_count} `.clone()` calls; inspect for avoidable allocations",
+            )
+        )
+
+    for line_number, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if any(name in line for name in ["TECH_DEBT_MARKERS", "SENSITIVE_TERMS", "RISKY_RUST_SHORTCUTS"]):
+            continue
+        starts_test_module = False
+        if path.startswith("src/") and path.endswith(".rs"):
+            if "#[cfg(test)]" in stripped:
+                pending_cfg_test = True
+            elif pending_cfg_test and re.search(r"\bmod\s+tests\b", stripped):
+                starts_test_module = True
+                test_module_depth = max(1, stripped.count("{") - stripped.count("}"))
+                pending_cfg_test = False
+            elif stripped and not stripped.startswith("#"):
+                pending_cfg_test = False
+
+        upper_line = line.upper()
+        if not path.endswith(".md"):
+            for marker in TECH_DEBT_MARKERS:
+                if marker in upper_line:
+                    findings.append(TechDebtFinding("maintainability", "REVIEW", path, line_number, f"{marker} marker is present"))
+                    break
+
+        if path.startswith("src/") and path.endswith(".rs") and test_module_depth == 0 and not stripped.startswith("//"):
+            for shortcut in RISKY_RUST_SHORTCUTS:
+                if shortcut in line:
+                    findings.append(TechDebtFinding("reliability", "REVIEW", path, line_number, f"Rust shortcut `{shortcut}` needs review outside tests"))
+                    break
+
+        if not path.startswith("management/") and not path.endswith(".md"):
+            lowered = line.lower()
+            for term in SENSITIVE_TERMS:
+                if (
+                    term in lowered
+                    and "${{ secrets." not in lowered
+                    and "env::var" not in lowered
+                    and "std::env" not in lowered
+                    and re.search(r"[:=]\s*[\"'][^\"']{6,}[\"']", line)
+                ):
+                    findings.append(TechDebtFinding("security", "REVIEW", path, line_number, f"possible hard-coded sensitive literal involving `{term}`"))
+                    break
+
+        if test_module_depth > 0 and not starts_test_module:
+            test_module_depth += stripped.count("{") - stripped.count("}")
+            test_module_depth = max(0, test_module_depth)
+
+    return findings
+
+
+def chase_tech_debts(limit: int, long_file_lines: int) -> list[TechDebtFinding]:
+    findings: list[TechDebtFinding] = []
+    for path in tracked_text_files():
+        findings.extend(scan_file_for_tech_debt(path, long_file_lines))
+
+    category_order = {"reliability": 0, "security": 1, "performance": 2, "maintainability": 3}
+    findings.sort(key=lambda finding: (category_order.get(finding.category, 99), finding.path, finding.line, finding.message))
+    return findings if limit <= 0 else findings[:limit]
+
+
+def ledger_entries(path: Path) -> list[LedgerEntry]:
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    starts: list[tuple[int, re.Match[str]]] = []
+    for index, line in enumerate(lines):
+        match = LEDGER_HEADING_RE.match(line)
+        if match:
+            starts.append((index, match))
+
+    entries: list[LedgerEntry] = []
+    for position, (start, match) in enumerate(starts):
+        if "<" in match.group("title"):
+            continue
+        end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
+        body_lines = lines[start + 1 : end]
+        body = "\n".join(body_lines).strip()
+        status_match = re.search(r"^Status:\s*(?P<status>.+?)\s*$", body, flags=re.MULTILINE)
+        raw_id = match.group("id").strip("`")
+        entries.append(
+            LedgerEntry(
+                id=raw_id,
+                title=match.group("title"),
+                status=status_match.group("status").strip("` ") if status_match else None,
+                path=path,
+                line=start + 1,
+                body=body,
+            )
+        )
+    return entries
+
+
+def next_ledger_id(entries: list[LedgerEntry], prefix: str) -> str:
+    highest = 0
+    for entry in entries:
+        match = re.fullmatch(rf"{re.escape(prefix)}-(\d{{4}})", entry.id)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"{prefix}-{highest + 1:04d}"
+
+
+def append_markdown_entry(path: Path, entry: str) -> None:
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    separator = "\n\n" if content.rstrip() else ""
+    path.write_text(f"{content.rstrip()}{separator}{entry.rstrip()}\n", encoding="utf-8")
+
+
+def insert_markdown_entry_before(path: Path, marker: str, entry: str) -> None:
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    marker_index = content.find(marker)
+    if marker_index < 0:
+        append_markdown_entry(path, entry)
+        return
+    before = content[:marker_index].rstrip()
+    after = content[marker_index:].lstrip("\n")
+    path.write_text(f"{before}\n\n{entry.rstrip()}\n\n{after}", encoding="utf-8")
+
+
+def replace_ledger_entry(path: Path, entry_id: str, replacement_body: str) -> bool:
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    start: int | None = None
+    for index, line in enumerate(lines):
+        match = LEDGER_HEADING_RE.match(line.rstrip("\n"))
+        if match and match.group("id").strip("`") == entry_id:
+            start = index
+            break
+    if start is None:
+        return False
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if LEDGER_HEADING_RE.match(lines[index].rstrip("\n")):
+            end = index
+            break
+    replacement_lines = [line if line.endswith("\n") else f"{line}\n" for line in replacement_body.rstrip().splitlines()]
+    lines[start:end] = [*replacement_lines, "\n"]
+    path.write_text("".join(lines), encoding="utf-8")
+    return True
+
+
+def update_ledger_status(entry: LedgerEntry, status: str, closure_lines: list[str]) -> None:
+    lines = [f"### {entry.id} -- {entry.title}", *entry.body.splitlines()]
+    updated: list[str] = []
+    replaced = False
+    for line in lines:
+        if line.startswith("Status:"):
+            updated.append(f"Status: {status}")
+            replaced = True
+        else:
+            updated.append(line)
+    if not replaced:
+        updated.insert(1, f"Status: {status}")
+    if closure_lines:
+        updated.extend(["", *closure_lines])
+    if not replace_ledger_entry(entry.path, entry.id, "\n".join(updated)):
+        raise ValueError(f"{entry.id} was not found in {relative(entry.path)}")
+
+
+def ledger_entry_by_id(path: Path, entry_id: str) -> LedgerEntry:
+    for entry in ledger_entries(path):
+        if entry.id == entry_id:
+            return entry
+    raise ValueError(f"{entry_id} was not found in {relative(path)}")
+
+
+def state_counts(model: ManagementModel) -> dict[str, int]:
+    counts = {state: 0 for state in VALID_STATES}
+    for item in model.work_items.values():
+        counts[item.state] = counts.get(item.state, 0) + 1
+    return counts
+
+
+def last_state_date(item: WorkItem) -> str | None:
+    if item.state in item.timeline:
+        return item.timeline[item.state]
+    if item.timeline:
+        return list(item.timeline.values())[-1]
+    return None
+
+
+def stale_work_items(model: ManagementModel, threshold_days: int) -> list[StaleWorkItem]:
+    today = date.today()
+    stale_states = {"Under Planning", "Planned", "Started", "In Code Review", "Integrated", "QA"}
+    stale: list[StaleWorkItem] = []
+    for item in sorted(model.work_items.values(), key=lambda candidate: candidate.id):
+        if item.state not in stale_states:
+            continue
+        state_date = last_state_date(item)
+        if not state_date:
+            stale.append(StaleWorkItem(item, None, None, "missing dated state trail"))
+            continue
+        try:
+            age_days = (today - datetime.strptime(state_date, "%Y-%m-%d").date()).days
+        except ValueError:
+            stale.append(StaleWorkItem(item, state_date, None, "invalid state date"))
+            continue
+        if age_days >= threshold_days:
+            stale.append(StaleWorkItem(item, state_date, age_days, f"{age_days} days in or since current state"))
+    return stale
+
+
+def open_ledger_entries(path: Path) -> list[LedgerEntry]:
+    closed_statuses = {"Closed", "Adopted", "Rejected", "Expired", "Released", "Rolled back"}
+    return [entry for entry in ledger_entries(path) if (entry.status or "Open") not in closed_statuses]
+
+
+def traceability_gaps(model: ManagementModel) -> list[Requirement]:
+    links = traceability_links()
+    return [
+        requirement
+        for requirement in sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+        if not traceability_links_for(requirement, links)
+    ]
+
+
+def unmapped_requirements(model: ManagementModel) -> list[Requirement]:
+    return [
+        requirement
+        for requirement in sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+        if not requirement_work_items(model, requirement)
+    ]
+
+
+def html_page(title: str, body: str) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <style>
+    body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17202a; }}
+    main {{ max-width: 1180px; margin: 0 auto; }}
+    h1, h2 {{ margin-bottom: 0.4rem; }}
+    section {{ border-top: 1px solid #d8dee4; padding-top: 1rem; margin-top: 1.5rem; }}
+    table {{ border-collapse: collapse; width: 100%; margin-top: 0.75rem; }}
+    th, td {{ border: 1px solid #d8dee4; padding: 0.45rem 0.55rem; text-align: left; vertical-align: top; }}
+    th {{ background: #f6f8fa; }}
+    code {{ background: #f6f8fa; padding: 0.1rem 0.25rem; border-radius: 3px; }}
+    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; }}
+    .card {{ border: 1px solid #d8dee4; border-radius: 6px; padding: 0.75rem; }}
+    .metric {{ font-size: 1.8rem; font-weight: 700; }}
+    .muted {{ color: #57606a; }}
+  </style>
+</head>
+<body>
+<main>
+{body}
+</main>
+</body>
+</html>
+"""
+
+
+def html_table(headers: list[str], rows: list[list[str]]) -> str:
+    header_html = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
+    if not rows:
+        return f"<table><thead><tr>{header_html}</tr></thead><tbody><tr><td colspan=\"{len(headers)}\">None</td></tr></tbody></table>"
+    row_html = []
+    for row in rows:
+        row_html.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>")
+    return f"<table><thead><tr>{header_html}</tr></thead><tbody>{''.join(row_html)}</tbody></table>"
+
+
+def render_management_dashboard(output_dir: Path, model: ManagementModel, stale_days: int) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    risks = open_ledger_entries(MANAGEMENT_DIR / "RISKS.md")
+    incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
+    experiments = open_ledger_entries(MANAGEMENT_DIR / "EXPERIMENTS.md")
+    decisions = ledger_entries(MANAGEMENT_DIR / "DECISIONS.md")[-5:]
+    gaps = traceability_gaps(model)
+    unmapped = unmapped_requirements(model)
+    stale = stale_work_items(model, stale_days)
+    counts = state_counts(model)
+    debt_findings = chase_tech_debts(10, 500)
+
+    cards = [
+        ("Requirements", str(len(model.requirements))),
+        ("Work Items", str(len(model.work_items))),
+        ("Trace Gaps", str(len(gaps))),
+        ("Unmapped", str(len(unmapped))),
+        ("Stale Work", str(len(stale))),
+        ("Open Risks", str(len(risks))),
+        ("Open Incidents", str(len(incidents))),
+        ("Experiments", str(len(experiments))),
+    ]
+    card_html = "".join(
+        f"<div class=\"card\"><div class=\"metric\">{html.escape(value)}</div><div>{html.escape(label)}</div></div>"
+        for label, value in cards
+    )
+    state_rows = [[html.escape(state), str(count)] for state, count in counts.items() if count]
+    stale_rows = [
+        [
+            f"<code>{html.escape(item.item.id)}</code>",
+            html.escape(item.item.state),
+            html.escape(item.item.owner or ""),
+            html.escape(item.state_date or ""),
+            html.escape(str(item.age_days) if item.age_days is not None else ""),
+            html.escape(item.reason),
+        ]
+        for item in stale
+    ]
+    trace_rows = [
+        [f"<code>{html.escape(requirement.id)}</code>", html.escape(requirement.title), html.escape(relative(requirement.path))]
+        for requirement in gaps[:30]
+    ]
+    risk_rows = [[f"<code>{html.escape(entry.id)}</code>", html.escape(entry.title), html.escape(entry.status or "")] for entry in risks]
+    incident_rows = [[f"<code>{html.escape(entry.id)}</code>", html.escape(entry.title), html.escape(entry.status or "")] for entry in incidents]
+    experiment_rows = [[f"<code>{html.escape(entry.id)}</code>", html.escape(entry.title), html.escape(entry.status or "")] for entry in experiments]
+    decision_rows = [[f"<code>{html.escape(entry.id)}</code>", html.escape(entry.title), html.escape(entry.status or "")] for entry in decisions]
+    debt_rows = [[html.escape(finding.category), html.escape(finding.path), str(finding.line), html.escape(finding.message)] for finding in debt_findings]
+
+    body = f"""
+<h1>Management Dashboard</h1>
+<p class="muted">Generated from git-controlled management files. This dashboard reports status and evidence links; it does not replace human acceptance.</p>
+<div class="cards">{card_html}</div>
+<section><h2>Architecture Diagrams</h2><ul><li><a href="./diagrams/architecture-real.svg">Current architecture</a></li><li><a href="./diagrams/architecture-planned.svg">Architecture with planned and unplanned work</a></li><li><a href="./diagrams/module-dependencies.svg">Rust module dependencies</a></li></ul></section>
+<section><h2>Work by State</h2>{html_table(["State", "Count"], state_rows)}</section>
+<section><h2>Stale Work</h2>{html_table(["Work Item", "State", "Owner", "Date", "Age", "Reason"], stale_rows)}</section>
+<section><h2>Traceability Gaps</h2>{html_table(["Requirement", "Title", "Source"], trace_rows)}</section>
+<section><h2>Risks</h2>{html_table(["Risk", "Title", "Status"], risk_rows)}</section>
+<section><h2>Incidents</h2>{html_table(["Incident", "Title", "Status"], incident_rows)}</section>
+<section><h2>Experiments</h2>{html_table(["Experiment", "Title", "Status"], experiment_rows)}</section>
+<section><h2>Recent Decisions</h2>{html_table(["Decision", "Title", "Status"], decision_rows)}</section>
+<section><h2>Tech Debt Leads</h2>{html_table(["Category", "Path", "Line", "Message"], debt_rows)}</section>
+"""
+    target = output_dir / "index.html"
+    target.write_text(html_page("Management Dashboard", body), encoding="utf-8")
+    return target
+
+
+def repo_rust_source_paths() -> list[str]:
+    paths = {path for path in tracked_files() if path.startswith("src/") and path.endswith(".rs")}
+    src = REPO_ROOT / "src"
+    if src.is_dir():
+        paths.update(relative(path) for path in src.rglob("*.rs") if path.is_file())
+    return sorted(paths)
+
+
+def rust_crate_reference_roots() -> set[str]:
+    roots = {"crate"}
+    cargo_toml = REPO_ROOT / "Cargo.toml"
+    if not cargo_toml.is_file():
+        return roots
+    in_lib_section = False
+    package_name: str | None = None
+    for raw_line in cargo_toml.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_lib_section = line == "[lib]"
+            continue
+        name_match = re.match(r'^name\s*=\s*"(?P<name>[^"]+)"\s*$', line)
+        if not name_match:
+            continue
+        if in_lib_section:
+            roots.add(name_match.group("name").replace("-", "_"))
+            continue
+        if package_name is None:
+            package_name = name_match.group("name")
+    if package_name:
+        roots.add(package_name.replace("-", "_"))
+    return roots
+
+
+def rust_module_name(path: str) -> str:
+    source = Path(path)
+    parts = source.parts
+    if len(parts) < 2 or parts[0] != "src":
+        return path
+    if len(parts) == 2 and parts[1] == "lib.rs":
+        return "crate"
+    if len(parts) == 2 and parts[1] == "main.rs":
+        return "bin::main"
+    if parts[1] == "bin":
+        if len(parts) == 3:
+            return f"bin::{source.stem}"
+        module_parts = list(parts[2:-1])
+        if parts[-1] != "mod.rs":
+            module_parts.append(source.stem)
+        return "bin::" + "::".join(module_parts)
+
+    module_parts = list(parts[1:-1])
+    if parts[-1] != "mod.rs":
+        module_parts.append(source.stem)
+    return "crate::" + "::".join(module_parts)
+
+
+def rust_source_without_tests(content: str, include_tests: bool) -> str:
+    if include_tests:
+        return content
+    return content.split("#[cfg(test)]", 1)[0]
+
+
+def nearest_module(raw_crate_ref: str, module_names: set[str]) -> str | None:
+    parts = raw_crate_ref.split("::")
+    for length in range(len(parts), 0, -1):
+        candidate = "crate::" + "::".join(parts[:length])
+        if candidate in module_names:
+            return candidate
+    return None
+
+
+def architecture_bucket(module_name: str) -> str | None:
+    if module_name.startswith("bin::"):
+        return "bin"
+    if module_name.startswith("crate::"):
+        pieces = module_name.split("::")
+        return pieces[1] if len(pieces) > 1 else None
+    return None
+
+
+def module_palette(module_name: str) -> tuple[str, str]:
+    bucket = architecture_bucket(module_name) or module_name
+    palettes = {
+        "bin": ("#fef3c7", "#92400e"),
+        "commons": ("#f3f4f6", "#4b5563"),
+        "db": ("#ede9fe", "#6d28d9"),
+        "logic": ("#dcfce7", "#15803d"),
+        "messaging": ("#dbeafe", "#1d4ed8"),
+        "models": ("#f6f8fa", "#57606a"),
+        "plot": ("#ffe4e6", "#be123c"),
+        "repository": ("#ccfbf1", "#0f766e"),
+        "resources": ("#ffedd5", "#c2410c"),
+    }
+    return palettes.get(bucket, ("#f6f8fa", "#57606a"))
+
+
+def module_dependency_graph(include_tests: bool = False, scope: str | None = None) -> tuple[list[GraphNode], list[GraphEdge]]:
+    path_by_module = {rust_module_name(path): path for path in repo_rust_source_paths()}
+    module_names = set(path_by_module)
+    reference_roots = rust_crate_reference_roots()
+    edges_by_pair: dict[tuple[str, str], GraphEdge] = {}
+
+    for module_name, path in path_by_module.items():
+        content = rust_source_without_tests(read_repo_file(path), include_tests)
+        def add_target(raw_path: str) -> None:
+            target = nearest_module(raw_path, module_names)
+            if target is None or target == module_name:
+                return
+            edges_by_pair[(module_name, target)] = GraphEdge(module_name, target, "uses")
+
+        for match in RUST_MODULE_REF_RE.finditer(content):
+            if match.group("root") not in reference_roots:
+                continue
+            add_target(match.group("path"))
+        for match in RUST_GROUP_MODULE_REF_RE.finditer(content):
+            if match.group("root") not in reference_roots:
+                continue
+            for entry in RUST_GROUP_PATH_RE.finditer(match.group("body")):
+                add_target(entry.group("path"))
+
+    selected_modules = set(module_names)
+    if scope:
+        selected_modules = {module for module in module_names if module_matches_scope(module, scope)}
+        selected_modules.update(edge.target for edge in edges_by_pair.values() if edge.source in selected_modules)
+        selected_modules.update(edge.source for edge in edges_by_pair.values() if edge.target in selected_modules)
+
+    nodes = [
+        GraphNode(module, module, path_by_module[module], *module_palette(module))
+        for module in sorted(selected_modules)
+    ]
+    edges = [
+        edge
+        for edge in sorted(edges_by_pair.values(), key=lambda candidate: (candidate.source, candidate.target))
+        if edge.source in selected_modules and edge.target in selected_modules
+    ]
+    return nodes, edges
+
+
+def module_matches_scope(module_name: str, scope: str) -> bool:
+    raw = scope.strip(":")
+    candidates = [raw]
+    if not raw.startswith(("crate::", "bin::")):
+        candidates.extend([f"crate::{raw}", f"bin::{raw}"])
+    return any(module_name == candidate or module_name.startswith(f"{candidate}::") for candidate in candidates)
+
+
+def real_architecture_nodes() -> list[GraphNode]:
+    details = {
+        "bin": ("Runtime / CLI", "Executable entry points"),
+        "commons": ("Shared Commons", "Reusable test and support code"),
+        "db": ("Database Wrappers", "Async persistence adapters and benchmarks"),
+        "logic": ("Bot Logic", "Demoscenes and application behavior"),
+        "messaging": ("Messaging Layer", "Gateway contracts, routing, and adapters"),
+        "models": ("Configuration Models", "Runtime configuration and typed inputs"),
+        "plot": ("Plot Rendering", "Generated visual output demos"),
+        "repository": ("Repository Contracts", "Persistence-facing traits and domain errors"),
+        "resources": ("Embedded Resources", "Bundled runtime assets"),
+    }
+    module_buckets = {architecture_bucket(rust_module_name(path)) for path in repo_rust_source_paths()}
+    order = ["bin", "models", "messaging", "logic", "db", "repository", "plot", "resources", "commons"]
+    nodes: list[GraphNode] = []
+    for bucket in order:
+        if bucket not in module_buckets:
+            continue
+        label, detail = details[bucket]
+        fill, border = module_palette(bucket)
+        nodes.append(GraphNode(bucket, label, detail, fill, border))
+    return nodes
+
+
+def real_architecture_graph() -> tuple[list[GraphNode], list[GraphEdge]]:
+    nodes = real_architecture_nodes()
+    node_ids = {node.id for node in nodes}
+    _, module_edges = module_dependency_graph()
+    edge_keys: set[tuple[str, str]] = set()
+    edges: list[GraphEdge] = []
+    for edge in module_edges:
+        source = architecture_bucket(edge.source)
+        target = architecture_bucket(edge.target)
+        if source is None or target is None or source == target:
+            continue
+        if source not in node_ids or target not in node_ids:
+            continue
+        key = (source, target)
+        if key in edge_keys:
+            continue
+        edge_keys.add(key)
+        edges.append(GraphEdge(source, target, "uses"))
+    return nodes, edges
+
+
+def requirement_architecture_area(requirement: Requirement | None, section: str | None = None) -> str:
+    if requirement is not None:
+        text = f"{requirement.section} {requirement.section_title} {requirement.title} {requirement.body}".lower()
+        section = requirement.section
+    else:
+        text = section.lower() if section else ""
+    section_map = {
+        "mcp": "messaging",
+        "msgp": "messaging",
+        "ds": "db",
+        "db": "db",
+        "demo": "logic",
+        "plot": "plot",
+        "usrmgn": "repository",
+        "arch": "logic",
+    }
+    if section and section.lower() in section_map:
+        return section_map[section.lower()]
+    if any(term in text for term in ["message", "telegram", "gateway", "routing", "user stream"]):
+        return "messaging"
+    if any(term in text for term in ["database", "storage", "sqlite", "redb", "heed", "repository"]):
+        return "db"
+    if any(term in text for term in ["configuration", "config", "environment"]):
+        return "models"
+    if any(term in text for term in ["plot", "chart", "render"]):
+        return "plot"
+    if any(term in text for term in ["operation", "release", "incident", "rollback"]):
+        return "resources"
+    return "requirements"
+
+
+def add_overlay_area_node(nodes_by_id: dict[str, GraphNode], area: str) -> None:
+    if area in nodes_by_id:
+        return
+    if area == "requirements":
+        nodes_by_id[area] = GraphNode("requirements", "Unassigned Requirement Area", "No clear source module yet", "#f8fafc", "#64748b")
+        return
+    fill, border = module_palette(area)
+    nodes_by_id[area] = GraphNode(area, area.title(), "Inferred from requirement wording", fill, border)
+
+
+def planned_architecture_graph(model: ManagementModel) -> tuple[list[GraphNode], list[GraphEdge]]:
+    real_nodes, real_edges = real_architecture_graph()
+    nodes_by_id = {node.id: node for node in real_nodes}
+    edges = list(real_edges)
+    edge_keys = {(edge.source, edge.target, edge.label) for edge in edges}
+    final_states = {"Merged", "Rolled Out", "Rejected", "Cancelled"}
+
+    for item in sorted(model.work_items.values(), key=lambda candidate: candidate.id):
+        if item.state in final_states:
+            continue
+        requirement = model.requirements.get(item.requirement_id)
+        area = requirement_architecture_area(requirement, item.section)
+        add_overlay_area_node(nodes_by_id, area)
+        work_node_id = f"work:{item.id}"
+        nodes_by_id[work_node_id] = GraphNode(work_node_id, item.id, f"{item.state}: {item.title}", "#dbeafe", "#2563eb")
+        key = (area, work_node_id, item.state)
+        if key not in edge_keys:
+            edge_keys.add(key)
+            edges.append(GraphEdge(area, work_node_id, item.state, "#2563eb"))
+
+    for requirement in unmapped_requirements(model):
+        area = requirement_architecture_area(requirement)
+        add_overlay_area_node(nodes_by_id, area)
+        requirement_node_id = f"req:{requirement.id}"
+        nodes_by_id[requirement_node_id] = GraphNode(requirement_node_id, requirement.id, requirement.title, "#fff7ed", "#ea580c")
+        key = (area, requirement_node_id, "unplanned")
+        if key not in edge_keys:
+            edge_keys.add(key)
+            edges.append(GraphEdge(area, requirement_node_id, "unplanned", "#ea580c", dashed=True))
+
+    ordered = list(real_nodes) + [
+        node
+        for node_id, node in sorted(nodes_by_id.items(), key=lambda candidate: candidate[0])
+        if node_id not in {real_node.id for real_node in real_nodes}
+    ]
+    return ordered, edges
+
+
+def svg_text_lines(text: str, max_chars: int, max_lines: int) -> list[str]:
+    words = text.split()
+    if not words:
+        return []
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        current = word
+        if len(lines) == max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if len(lines) == max_lines and words:
+        consumed = " ".join(lines)
+        if len(consumed) < len(text):
+            lines[-1] = lines[-1].rstrip(".") + "..."
+    return lines
+
+
+def render_svg_text(lines: list[str], x: float, y: float, css_class: str) -> str:
+    if not lines:
+        return ""
+    tspans = []
+    for index, line in enumerate(lines):
+        dy = "0" if index == 0 else "1.25em"
+        tspans.append(f'<tspan x="{x:.1f}" dy="{dy}">{html.escape(line)}</tspan>')
+    return f'<text class="{css_class}" x="{x:.1f}" y="{y:.1f}">{"".join(tspans)}</text>'
+
+
+def render_svg_graph(title: str, nodes: list[GraphNode], edges: list[GraphEdge], output_path: Path, legend: list[GraphNode]) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    unique_nodes: list[GraphNode] = []
+    seen_nodes: set[str] = set()
+    for node in nodes:
+        if node.id in seen_nodes:
+            continue
+        seen_nodes.add(node.id)
+        unique_nodes.append(node)
+    if not unique_nodes:
+        unique_nodes.append(GraphNode("empty", "No modules found", "The source tree did not contain Rust modules."))
+
+    width = 1240
+    margin_x = 48
+    top = 112
+    node_width = 250
+    node_height = 86
+    columns = 3 if len(unique_nodes) <= 9 else 4
+    gap_x = (width - (2 * margin_x) - (columns * node_width)) / max(columns - 1, 1)
+    row_gap = 54
+    rows = (len(unique_nodes) + columns - 1) // columns
+    legend_height = 72 if legend else 0
+    height = top + rows * node_height + max(rows - 1, 0) * row_gap + legend_height + 54
+    positions: dict[str, tuple[float, float]] = {}
+    for index, node in enumerate(unique_nodes):
+        row = index // columns
+        column = index % columns
+        positions[node.id] = (
+            margin_x + column * (node_width + gap_x),
+            top + row * (node_height + row_gap),
+        )
+
+    edge_svg: list[str] = []
+    for edge in edges:
+        if edge.source not in positions or edge.target not in positions:
+            continue
+        sx, sy = positions[edge.source]
+        tx, ty = positions[edge.target]
+        same_row = abs(sy - ty) < 1
+        if same_row and sx < tx:
+            x1, y1 = sx + node_width, sy + (node_height / 2)
+            x2, y2 = tx, ty + (node_height / 2)
+        elif same_row:
+            x1, y1 = sx, sy + (node_height / 2)
+            x2, y2 = tx + node_width, ty + (node_height / 2)
+        else:
+            x1, y1 = sx + (node_width / 2), sy + node_height
+            x2, y2 = tx + (node_width / 2), ty
+        dash = ' stroke-dasharray="7 5"' if edge.dashed else ""
+        edge_svg.append(
+            f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            f'stroke="{html.escape(edge.color)}" stroke-width="1.6" marker-end="url(#arrow)"{dash}/>'
+        )
+        if edge.label:
+            edge_svg.append(
+                f'<text class="edge-label" x="{((x1 + x2) / 2):.1f}" y="{((y1 + y2) / 2 - 5):.1f}">'
+                f"{html.escape(edge.label)}</text>"
+            )
+
+    node_svg: list[str] = []
+    for node in unique_nodes:
+        x, y = positions[node.id]
+        node_svg.append(
+            f'<rect class="node" x="{x:.1f}" y="{y:.1f}" width="{node_width}" height="{node_height}" '
+            f'rx="7" fill="{html.escape(node.fill)}" stroke="{html.escape(node.border)}"/>'
+        )
+        node_svg.append(render_svg_text(svg_text_lines(node.label, 28, 2), x + 14, y + 27, "node-label"))
+        node_svg.append(render_svg_text(svg_text_lines(node.detail, 34, 2), x + 14, y + 60, "node-detail"))
+
+    legend_svg: list[str] = []
+    if legend:
+        legend_y = height - 82
+        legend_svg.append(f'<text class="legend-title" x="{margin_x}" y="{legend_y}">Legend</text>')
+        for index, node in enumerate(legend):
+            x = margin_x + index * 260
+            y = legend_y + 18
+            legend_svg.append(f'<rect x="{x}" y="{y}" width="22" height="14" rx="3" fill="{html.escape(node.fill)}" stroke="{html.escape(node.border)}"/>')
+            legend_svg.append(f'<text class="legend-label" x="{x + 30}" y="{y + 12}">{html.escape(node.label)}</text>')
+
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-labelledby="diagram-title diagram-desc">
+  <title id="diagram-title">{html.escape(title)}</title>
+  <desc id="diagram-desc">Generated from repository source files and git-controlled management files.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L6,3 z" fill="#57606a"/>
+    </marker>
+  </defs>
+  <style>
+    .title {{ font: 700 24px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #17202a; }}
+    .subtitle {{ font: 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #57606a; }}
+    .node {{ stroke-width: 1.5; }}
+    .node-label {{ font: 700 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #17202a; }}
+    .node-detail {{ font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #57606a; }}
+    .edge-label {{ font: 11px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #57606a; text-anchor: middle; paint-order: stroke; stroke: #ffffff; stroke-width: 4px; }}
+    .legend-title {{ font: 700 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #17202a; }}
+    .legend-label {{ font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #17202a; }}
+  </style>
+  <rect width="{width}" height="{height}" fill="#ffffff"/>
+  <text class="title" x="{margin_x}" y="42">{html.escape(title)}</text>
+  <text class="subtitle" x="{margin_x}" y="66">Generated by scripts/management from the current checkout.</text>
+  {"".join(edge_svg)}
+  {"".join(node_svg)}
+  {"".join(legend_svg)}
+</svg>
+"""
+    output_path.write_text(svg, encoding="utf-8")
+    return output_path
+
+
+def render_diagram_index(output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    links = [
+        ("architecture-real.svg", "Current architecture"),
+        ("architecture-planned.svg", "Architecture with planned and unplanned work"),
+        ("module-dependencies.svg", "Rust module dependencies"),
+    ]
+    body = "<h1>Management Diagrams</h1><ul>" + "".join(
+        f'<li><a href="./{html.escape(path)}">{html.escape(label)}</a></li>' for path, label in links
+    ) + "</ul>"
+    target = output_dir / "index.html"
+    target.write_text(html_page("Management Diagrams", body), encoding="utf-8")
+    return target
+
+
+def write_diagram(output_dir: Path, filename: str, title: str, nodes: list[GraphNode], edges: list[GraphEdge], legend: list[GraphNode]) -> Path:
+    target = render_svg_graph(title, nodes, edges, output_dir / filename, legend)
+    render_diagram_index(output_dir)
+    return target
+
+
+def traceability_evidence_text(paths: list[str], note: str | None) -> str:
+    pieces = [f"`{path}`" for path in paths]
+    if note:
+        pieces.append(note)
+    return "; ".join(pieces)
+
+
+def append_or_update_traceability(requirement_id_value: str, work_item: WorkItem, paths: list[str], note: str | None, state: str | None) -> str:
+    path = MANAGEMENT_DIR / "TRACEABILITY.md"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    new_evidence = traceability_evidence_text(paths, note)
+    row_state = state or work_item.state
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("| `"):
+            continue
+        columns = [column.strip() for column in stripped.strip("|").split("|")]
+        if len(columns) < 4:
+            continue
+        if columns[0].strip("`") == requirement_id_value and columns[1].strip("`") == work_item.id:
+            existing_evidence = columns[3]
+            evidence = existing_evidence
+            if new_evidence and new_evidence not in existing_evidence:
+                evidence = f"{existing_evidence}; {new_evidence}" if existing_evidence else new_evidence
+            lines[index] = f"| `{requirement_id_value}` | `{work_item.id}` | {row_state} | {evidence} |"
+            path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            return "updated"
+
+    insert_index = len(lines)
+    for index, line in enumerate(lines):
+        if line.startswith("## Unmapped Requirement Areas"):
+            insert_index = index
+            break
+    while insert_index > 0 and not lines[insert_index - 1].strip():
+        insert_index -= 1
+    row = f"| `{requirement_id_value}` | `{work_item.id}` | {row_state} | {new_evidence} |"
+    lines[insert_index:insert_index] = [row, ""]
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return "appended"
+
+
+def validate_evidence_paths(paths: list[str], allow_missing: bool) -> list[str]:
+    missing = [path for path in paths if not (REPO_ROOT / path).exists()]
+    if missing and not allow_missing:
+        raise ValueError(f"evidence paths do not exist: {', '.join(missing)}")
+    return missing
+
+
+def issue_line(severity: str, message: str) -> str:
+    return f"{severity}: {message}"
+
+
+def branch_reference_is_plain_work_item(branch_ref: BranchRef) -> bool:
+    return branch_ref.raw == branch_ref.work_id
+
+
+def run_git(args: list[str], dry_run: bool) -> None:
+    print(f"$ git {' '.join(args)}")
+    if not dry_run:
+        git_output(args)
+
+
+def remote_branch_ref(branch: str) -> str:
+    return f"origin/{branch}"
+
+
+def remote_branch_exists(branch: str) -> bool:
+    return git_ref_exists(f"refs/remotes/{remote_branch_ref(branch)}")
+
+
+def ensure_ref_exists(ref: str) -> None:
+    if not git_ref_exists(ref):
+        raise RuntimeError(f"git ref {ref} does not exist; pass --base or update local refs first")
+
+
+def create_or_switch_branch(branch: str, base_ref: str, dry_run: bool, assume_base_ref_exists: bool = False) -> None:
+    if git_branch_exists(branch):
+        run_git(["switch", branch], dry_run)
+        return
+    if remote_branch_exists(branch):
+        run_git(["switch", "-c", branch, remote_branch_ref(branch)], dry_run)
+        return
+    if not assume_base_ref_exists:
+        ensure_ref_exists(base_ref)
+    run_git(["switch", "-c", branch, base_ref], dry_run)
+
+
+def ensure_feature_branch(feature_branch: str, base_ref: str, dry_run: bool) -> None:
+    if git_branch_exists(feature_branch):
+        return
+    if remote_branch_exists(feature_branch):
+        run_git(["switch", "-c", feature_branch, remote_branch_ref(feature_branch)], dry_run)
+        return
+    ensure_ref_exists(base_ref)
+    run_git(["switch", "-c", feature_branch, base_ref], dry_run)
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    model = load_model()
+
+    print("Checking management requirements and backlogs")
+    print(f"Requirements: {len(model.requirements)}")
+    print(f"Work items:   {len(model.work_items)}")
+    sys.stdout.flush()
+
+    for issue in model.errors:
+        print(issue.format(), file=sys.stderr)
+    for issue in model.warnings:
+        print(issue.format(), file=sys.stderr)
+
+    if model.errors:
+        return 1
+    if args.strict and model.warnings:
+        return 1
+    return 0
+
+
+def cmd_show_requirement(args: argparse.Namespace) -> int:
+    model = load_model()
+    requirement = model.requirements.get(args.requirement_id)
+    if requirement is None:
+        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
+        return 1
+    print_requirement(requirement)
+    return 0
+
+
+def cmd_show_work(args: argparse.Namespace) -> int:
+    model = load_model()
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+    if args.chat_prompt:
+        print()
+        print("Discussion prompt:")
+        print(f"Use {item.id} and {item.requirement_id} as the management context. Review the requirement, the work-item description, existing code, and likely verification evidence before proposing implementation changes.")
+    return 0
+
+
+def cmd_chat_about(args: argparse.Namespace) -> int:
+    args.chat_prompt = True
+    return cmd_show_work(args)
+
+
+def cmd_verify_branch(args: argparse.Namespace) -> int:
+    model = load_model()
+    try:
+        raw_ref, item = resolve_work_item(model, args.branch)
+        branch_ref = parse_branch_ref(raw_ref)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    errors = started_work_errors(model, item, branch_ref)
+
+    print_work_item(model, item)
+    if errors:
+        print()
+        sys.stdout.flush()
+        for error in errors:
+            print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+    print()
+    print("Branch context is valid.")
+    return 0
+
+
+def cmd_start_work(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        branch_ref = parse_branch_ref(args.branch)
+        item = model.work_items[branch_ref.work_id]
+    except (KeyError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    errors = started_work_errors(model, item, branch_ref, args.user)
+    if errors:
+        print_work_item(model, item)
+        print()
+        sys.stdout.flush()
+        for error in errors:
+            print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+    if not args.dry_run and not args.allow_dirty and git_worktree_is_dirty():
+        print("error: worktree has uncommitted changes; use --allow-dirty only if you intentionally want to carry them", file=sys.stderr)
+        return 1
+
+    base_ref = args.base or "origin/main"
+    print_work_item(model, item)
+    print()
+    print("Branch operations:")
+
+    try:
+        if branch_ref.is_feature:
+            create_or_switch_branch(branch_ref.raw, base_ref, args.dry_run)
+        elif args.from_feature:
+            feature_branch = args.feature_branch or f"feature/{branch_ref.work_id}"
+            ensure_feature_branch(feature_branch, base_ref, args.dry_run)
+            create_or_switch_branch(branch_ref.raw, feature_branch, args.dry_run, assume_base_ref_exists=args.dry_run)
+        else:
+            create_or_switch_branch(branch_ref.raw, base_ref, args.dry_run)
+    except RuntimeError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    print()
+    if args.dry_run:
+        print(f"Dry run: {branch_ref.raw} is valid and can be started.")
+    else:
+        print(f"Started work on {branch_ref.raw}.")
+    print(f"Run `scripts/management/management_tool chat-about {branch_ref.raw}` to discuss the work context.")
+    return 0
+
+
+def cmd_evaluate_plan(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        branch_ref = parse_branch_ref(args.ref)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    item = model.work_items.get(branch_ref.work_id)
+    if item is None:
+        print(f"error: {branch_ref.work_id} was not found in any backlog", file=sys.stderr)
+        return 1
+
+    requirement = model.requirements.get(item.requirement_id)
+    siblings = same_requirement_items(model, item)
+    completed_siblings = completed_work_items(siblings)
+    findings: list[str] = []
+
+    if requirement is None:
+        findings.append(issue_line("BLOCKER", f"{item.id} references missing requirement {item.requirement_id}"))
+    elif not requirement.body or requirement.body.strip().lower() == "tbd":
+        findings.append(issue_line("REVIEW", f"{item.requirement_id} has little or no requirement detail"))
+    else:
+        findings.append(issue_line("OK", f"{item.id} references existing requirement {item.requirement_id}"))
+
+    if branch_reference_is_plain_work_item(branch_ref):
+        findings.append(issue_line("OK", "evaluating by work item id; branch owner is not applicable"))
+    elif branch_ref.is_feature:
+        findings.append(issue_line("OK", "feature branch syntax is valid"))
+    else:
+        owner_issues = branch_owner_errors(item, branch_ref, args.user)
+        if owner_issues:
+            findings.extend(issue_line("REVIEW", issue) for issue in owner_issues)
+        else:
+            findings.append(issue_line("OK", "ordinary branch owner matches the backlog owner"))
+
+    if item.state in {"Under Planning", "Planned"}:
+        findings.append(issue_line("OK", f"{item.state} is a normal planning state"))
+    elif item.state in {"Rejected", "Cancelled"}:
+        findings.append(issue_line("BLOCKER", f"{item.id} is {item.state}"))
+    else:
+        findings.append(issue_line("REVIEW", f"{item.id} is already {item.state}; confirm this is still a plan evaluation"))
+
+    if item.state in VALID_STATE_SET and item.state not in item.timeline:
+        findings.append(issue_line("REVIEW", f"{item.id} has no dated state trail for {item.state}"))
+
+    if not item.body:
+        findings.append(issue_line("REVIEW", f"{item.id} has no work-item description beyond its title"))
+    else:
+        findings.append(issue_line("OK", f"{item.id} has a work-item description"))
+
+    motivation_description = MOTIVATION_DESCRIPTIONS.get(item.motivation, "unknown motivation")
+    if item.motivation == "N" and completed_siblings:
+        findings.append(issue_line("REVIEW", "motivation N is marked as new work, but this requirement already has completed work"))
+    elif item.motivation in {"R", "F"} and not completed_siblings:
+        findings.append(issue_line("REVIEW", f"motivation {item.motivation} usually expects prior completed work for the requirement"))
+    elif item.motivation == "X":
+        findings.append(issue_line("REVIEW", "experimental work must stay out of main unless converted to normal requirement-backed work"))
+    else:
+        findings.append(issue_line("OK", f"motivation {item.motivation} means {motivation_description}"))
+
+    blocker_count = sum(1 for finding in findings if finding.startswith("BLOCKER:"))
+    review_count = sum(1 for finding in findings if finding.startswith("REVIEW:"))
+    if blocker_count:
+        verdict = "BLOCKED"
+    elif review_count:
+        verdict = "NEEDS HUMAN REVIEW"
+    else:
+        verdict = "STRUCTURALLY SOUND"
+
+    print("Plan Evaluation")
+    print("===============")
+    if branch_ref.raw != item.id:
+        print(f"Reference:   {branch_ref.raw}")
+    print_work_item(model, item)
+    print()
+    print("Sibling work for the same requirement:")
+    if siblings:
+        for sibling in siblings:
+            print(f"  - {sibling.id}: {sibling.state} -- {sibling.title}")
+    else:
+        print("  - none")
+    print()
+    print("Findings:")
+    for finding in findings:
+        print(f"  - {finding}")
+    print()
+    print(f"Verdict: {verdict}")
+    print("Scope note: this command checks structural planning coherence. Product, technical, and schedule judgment remain human decisions.")
+    return 0
+
+
+def next_work_sequence(items: list[WorkItem]) -> str:
+    highest = 0
+    for item in items:
+        highest = max(highest, int(item.sequence))
+    if highest >= 999:
+        raise ValueError("no available three-digit work sequence remains for this requirement")
+    return f"{highest + 1:03d}"
+
+
+def validate_work_sequence(raw_sequence: str) -> str:
+    if not re.fullmatch(r"\d{3}", raw_sequence):
+        raise ValueError(f"invalid work sequence {raw_sequence}; expected three digits")
+    return raw_sequence
+
+
+def default_work_motivation(items: list[WorkItem]) -> str:
+    if completed_work_items(items):
+        return "R"
+    return "N"
+
+
+def default_work_title(requirement: Requirement, motivation: str) -> str:
+    if motivation == "R":
+        return f"Revisit {requirement.title}"
+    if motivation == "F":
+        return f"Fix {requirement.title}"
+    if motivation == "X":
+        return f"Explore {requirement.title}"
+    return f"Implement {requirement.title}"
+
+
+def draft_work_item_id(requirement: Requirement, motivation: str, sequence: str) -> str:
+    return f"{requirement.document}{motivation}.{requirement.section}.{requirement.number}{requirement.subtopics}-{sequence}"
+
+
+def draft_work_entry(requirement: Requirement, work_item_id: str, title: str, state_date: str, body_lines: list[str]) -> list[str]:
+    body = body_lines or [
+        f"1. Confirm the implementation boundary for `{requirement.id}`.",
+        "2. Implement the smallest coherent change that satisfies that boundary.",
+        "3. Update verification evidence and traceability before review.",
+    ]
+    return [
+        f"## {work_item_id} -- {title}",
+        *body,
+        f"==> Under Planning: {state_date};",
+    ]
+
+
+def append_under_planning_entry(path: Path, entry: list[str]) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = ensure_state_section(lines, "Under Planning")
+    insert_index = insertion_index_for_state(lines, "Under Planning")
+    entry_lines = [f"{line}\n" for line in entry]
+    lines[insert_index:insert_index] = ["\n", *entry_lines, "\n"]
+    path.write_text("".join(lines), encoding="utf-8")
+
+
+def cmd_draft_plan(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    requirement = model.requirements.get(args.requirement_id)
+    if requirement is None:
+        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
+        return 1
+
+    try:
+        state_date = validate_iso_date(args.date or date.today().isoformat())
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    existing_items = sorted(
+        [item for item in model.work_items.values() if item.requirement_id == requirement.id],
+        key=lambda item: item.id,
+    )
+    active_items = open_work_items(existing_items)
+    motivation = args.motivation or default_work_motivation(existing_items)
+    try:
+        sequence = validate_work_sequence(args.sequence) if args.sequence else next_work_sequence(existing_items)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    work_item_id = draft_work_item_id(requirement, motivation, sequence)
+    if work_item_id in model.work_items:
+        print(f"error: {work_item_id} already exists", file=sys.stderr)
+        return 1
+
+    if args.write and active_items and not args.allow_existing_open:
+        print(
+            f"error: {requirement.id} already has open work; pass --allow-existing-open if this is an intentional sibling plan",
+            file=sys.stderr,
+        )
+        return 1
+
+    title = args.title or default_work_title(requirement, motivation)
+    entry = draft_work_entry(requirement, work_item_id, title, state_date, args.body_line)
+
+    print("Draft Plan")
+    print("==========")
+    print_requirement(requirement)
+    print()
+    print("Existing work for this requirement:")
+    if existing_items:
+        for item in existing_items:
+            print(f"  - {item.id}: {item.state} -- {item.title}")
+    else:
+        print("  - none")
+    print()
+    print(f"Backlog file: {relative(MANAGEMENT_DIR / BACKLOG_FILES[requirement.document])}")
+    print(f"Motivation:  {motivation} -- {MOTIVATION_DESCRIPTIONS[motivation]}")
+    print()
+    print("Proposed backlog entry:")
+    for line in entry:
+        print(line)
+
+    if not args.write:
+        print()
+        print("Dry run: no backlog file was changed. Re-run with --write to append this entry under Under Planning.")
+        return 0
+
+    append_under_planning_entry(MANAGEMENT_DIR / BACKLOG_FILES[requirement.document], entry)
+    print()
+    print(f"Written: {work_item_id} was appended under Under Planning.")
+    return 0
+
+
+def cmd_estimate_requirement(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    requirement = model.requirements.get(args.requirement_id)
+    if requirement is None:
+        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
+        return 1
+
+    all_requirements = sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+    traceability_text = (MANAGEMENT_DIR / "TRACEABILITY.md").read_text(encoding="utf-8") if (MANAGEMENT_DIR / "TRACEABILITY.md").exists() else ""
+    duplicate_titles = duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.title)))
+    duplicate_bodies = duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.body)))
+    findings = audit_requirement(model, requirement, traceability_text, duplicate_titles, duplicate_bodies)
+    work_items = requirement_work_items(model, requirement)
+    links = traceability_links_for(requirement, traceability_links())
+    references = [reference for reference in requirement_references(requirement_text(requirement)) if reference != requirement.id]
+    child_requirements = [
+        candidate
+        for candidate in all_requirements
+        if candidate.id.startswith(f"{requirement.id}.") and candidate.id != requirement.id
+    ]
+    score = requirement_complexity_score(requirement, work_items, findings)
+    effort_band = estimate_effort_band(score)
+    blockers = [finding for finding in findings if finding.severity == "BLOCKER"]
+    reviews = [finding for finding in findings if finding.severity == "REVIEW"]
+
+    if blockers:
+        readiness = "NOT READY"
+    elif reviews:
+        readiness = "NEEDS REFINEMENT"
+    else:
+        readiness = "READY FOR PLANNING"
+
+    print("Requirement Estimate")
+    print("====================")
+    print_requirement(requirement)
+    print()
+    print(f"Readiness:          {readiness}")
+    print(f"Estimated effort:   {effort_band} senior engineer-hours")
+    print(f"Complexity score:   {score}")
+    print()
+    print("Existing work:")
+    if work_items:
+        for item in work_items:
+            print(f"  - {item.id}: {item.state} -- {item.title}")
+    else:
+        print("  - none")
+    print()
+    print("Traceability:")
+    if links:
+        for link in links:
+            print(f"  - {link.requirement_id} -> {link.work_item_id}: {link.state}; {link.evidence}")
+    else:
+        print("  - no direct traceability link")
+    print()
+    print("Dependency signals:")
+    if references:
+        for reference in references:
+            known = "known" if reference in model.requirements else "missing"
+            print(f"  - explicit reference: {reference} ({known})")
+    if child_requirements:
+        for child in child_requirements:
+            print(f"  - child requirement: {child.id} -- {child.title}")
+    if not references and not child_requirements:
+        print("  - none detected")
+    print()
+    print("Quality signals:")
+    if findings:
+        for finding in findings:
+            print(f"  - {finding.severity}: {finding.category}: {finding.message}")
+    else:
+        print("  - no local audit findings")
+    print()
+    print("Planning prompt:")
+    print(
+        f"Assess {requirement.id} for product value, market timing, dependencies, and acceptance boundaries. "
+        "Use this estimate as local repo context, not as market or delivery certainty."
+    )
+    return 0
+
+
+def cmd_sync_requirement(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    requirement = model.requirements.get(args.requirement_id)
+    if requirement is None:
+        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
+        return 1
+
+    work_items = requirement_work_items(model, requirement)
+    completed_items = completed_work_items(work_items)
+    links = traceability_links_for(requirement, traceability_links())
+    paths = sorted({path for link in links for path in evidence_paths(link)})
+    path_statuses = evidence_path_statuses(paths)
+    missing_paths = [path for path, status in path_statuses if status == "missing"]
+    untracked_paths = [path for path, status in path_statuses if status == "exists but is not tracked"]
+    exact_mentions = source_files_mentioning([requirement.id], args.limit, implementation_only=True)
+    term_mentions = source_files_mentioning(requirement_source_terms(requirement), args.limit, implementation_only=True)
+    signals: list[str] = []
+
+    if not work_items:
+        signals.append(issue_line("REVIEW", "no backlog work item maps to this requirement"))
+    if work_items and not completed_items:
+        signals.append(issue_line("REVIEW", "no merged or rolled-out work item maps to this requirement yet"))
+    if not links:
+        signals.append(issue_line("REVIEW", "no TRACEABILITY.md row maps to this requirement"))
+    if links and not paths:
+        signals.append(issue_line("REVIEW", "traceability rows do not list concrete evidence paths"))
+    if missing_paths:
+        signals.append(issue_line("BLOCKER", f"traceability references missing evidence paths: {', '.join(missing_paths[:4])}"))
+    if untracked_paths:
+        signals.append(issue_line("REVIEW", f"traceability references untracked evidence paths: {', '.join(untracked_paths[:4])}"))
+    if completed_items and not exact_mentions and not paths:
+        signals.append(issue_line("REVIEW", "completed work exists, but no exact requirement-id mention or evidence path was found"))
+    if not signals:
+        signals.append(issue_line("OK", "local traceability structure is coherent"))
+
+    blocker_count, review_count = sync_signal_counts(signals)
+    if blocker_count:
+        verdict = "DRIFT RISK"
+    elif review_count:
+        verdict = "NEEDS REVIEW"
+    else:
+        verdict = "LOCALLY COHERENT"
+
+    print("Requirement Sync")
+    print("================")
+    print_requirement(requirement)
+    print()
+    print("Mapped work:")
+    if work_items:
+        for item in work_items:
+            print(f"  - {item.id}: {item.state} -- {item.title}")
+    else:
+        print("  - none")
+    print()
+    print("Traceability rows:")
+    if links:
+        for link in links:
+            print(f"  - line {link.line}: {link.requirement_id} -> {link.work_item_id}: {link.state}; {link.evidence}")
+    else:
+        print("  - none")
+    print()
+    print("Evidence path status:")
+    if path_statuses:
+        for path, status in path_statuses:
+            print(f"  - {path}: {status}")
+    else:
+        print("  - no concrete evidence paths listed")
+    print()
+    print("Source mentions:")
+    if exact_mentions:
+        print("  Exact requirement id:")
+        for path in exact_mentions:
+            print(f"    - {path}")
+    else:
+        print("  Exact requirement id: none")
+    if term_mentions:
+        print("  Requirement terms:")
+        for path in term_mentions:
+            print(f"    - {path}")
+    else:
+        print("  Requirement terms: none")
+    print()
+    print("Signals:")
+    for signal in signals:
+        print(f"  - {signal}")
+    print()
+    print(f"Verdict: {verdict}")
+    print("Scope note: this command checks local traceability and evidence references. It does not prove runtime behavior satisfies the requirement.")
+
+    if args.strict and (blocker_count or review_count):
+        return 1
+    return 0
+
+
+def cmd_chase_techdebts(args: argparse.Namespace) -> int:
+    all_findings = chase_tech_debts(0, args.long_file_lines)
+    printable = all_findings if args.limit <= 0 else all_findings[: args.limit]
+    categories = sorted({finding.category for finding in all_findings})
+
+    print("Tech Debt Chase")
+    print("===============")
+    print(f"Tracked text files scanned: {len(tracked_text_files())}")
+    print(f"Findings:                   {len(all_findings)}")
+    print()
+    print("Summary:")
+    if categories:
+        for category in categories:
+            count = sum(1 for finding in all_findings if finding.category == category)
+            print(f"  {category}: {count}")
+    else:
+        print("  none")
+    print()
+    print("Findings:")
+    if printable:
+        for finding in printable:
+            print(f"  - {finding.format()}")
+        if args.limit > 0 and len(all_findings) > args.limit:
+            print(f"  - ... {len(all_findings) - args.limit} more")
+    else:
+        print("  - none")
+    print()
+    print("Backlog prompt:")
+    print("For each accepted debt, create or update an Engineering or Operations requirement/backlog item with impact, deadline, and release-blocking classification.")
+    print("Scope note: this command finds review leads. It does not decide whether a lead is real debt or worth fixing now.")
+
+    if args.strict and all_findings:
+        return 1
+    return 0
+
+
+def cmd_management_status(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    risks = open_ledger_entries(MANAGEMENT_DIR / "RISKS.md")
+    incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
+    experiments = open_ledger_entries(MANAGEMENT_DIR / "EXPERIMENTS.md")
+    gaps = traceability_gaps(model)
+    unmapped = unmapped_requirements(model)
+    stale = stale_work_items(model, args.stale_days)
+    counts = state_counts(model)
+
+    print("Management Status")
+    print("=================")
+    print(f"Requirements:       {len(model.requirements)}")
+    print(f"Work items:         {len(model.work_items)}")
+    print(f"Traceability gaps:  {len(gaps)}")
+    print(f"Unmapped reqs:      {len(unmapped)}")
+    print(f"Stale work:         {len(stale)}")
+    print(f"Open risks:         {len(risks)}")
+    print(f"Open incidents:     {len(incidents)}")
+    print(f"Active experiments: {len(experiments)}")
+    print()
+    print("Work by state:")
+    for state, count in counts.items():
+        if count:
+            print(f"  - {state}: {count}")
+    print()
+    print("Stale work:")
+    if stale:
+        for stale_item in stale[: args.limit]:
+            age = f"{stale_item.age_days} days" if stale_item.age_days is not None else "unknown age"
+            print(f"  - {stale_item.item.id}: {stale_item.item.state}; {age}; {stale_item.reason}")
+    else:
+        print("  - none")
+    print()
+    print("Dashboard sections: work state, stale work, traceability gaps, risks, incidents, experiments, decisions, tech debt leads.")
+
+    if args.html:
+        target = render_management_dashboard(Path(args.html), model, args.stale_days)
+        print(f"HTML dashboard: {relative(target)}")
+    return 0
+
+
+def cmd_diagram_architecture_real(args: argparse.Namespace) -> int:
+    nodes, edges = real_architecture_graph()
+    legend = [GraphNode("legend:source", "Current source module", "", "#f6f8fa", "#57606a")]
+    target = write_diagram(Path(args.html), "architecture-real.svg", "Current Architecture", nodes, edges, legend)
+
+    print("Current Architecture Diagram")
+    print("============================")
+    print(f"Source modules: {len(nodes)}")
+    print(f"Dependencies:   {len(edges)}")
+    print(f"SVG:            {relative(target)}")
+    return 0
+
+
+def cmd_diagram_architecture_planned(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    nodes, edges = planned_architecture_graph(model)
+    legend = [
+        GraphNode("legend:source", "Current source module", "", "#f6f8fa", "#57606a"),
+        GraphNode("legend:work", "Planned or ongoing work", "", "#dbeafe", "#2563eb"),
+        GraphNode("legend:unplanned", "Unplanned requirement", "", "#fff7ed", "#ea580c"),
+    ]
+    target = write_diagram(Path(args.html), "architecture-planned.svg", "Architecture Plan Overlay", nodes, edges, legend)
+    open_count = len([item for item in model.work_items.values() if item.state not in {"Merged", "Rolled Out", "Rejected", "Cancelled"}])
+    unplanned_count = len(unmapped_requirements(model))
+
+    print("Planned Architecture Diagram")
+    print("============================")
+    print(f"Current and planned nodes: {len(nodes)}")
+    print(f"Open work items:          {open_count}")
+    print(f"Unplanned requirements:   {unplanned_count}")
+    print(f"SVG:                      {relative(target)}")
+    return 0
+
+
+def cmd_diagram_module_dependencies(args: argparse.Namespace) -> int:
+    nodes, edges = module_dependency_graph(args.include_tests, args.scope)
+    legend = [
+        GraphNode("legend:bin", "Executable", "", "#fef3c7", "#92400e"),
+        GraphNode("legend:logic", "Logic", "", "#dcfce7", "#15803d"),
+        GraphNode("legend:messaging", "Messaging", "", "#dbeafe", "#1d4ed8"),
+        GraphNode("legend:db", "Persistence", "", "#ede9fe", "#6d28d9"),
+    ]
+    target = write_diagram(Path(args.html), "module-dependencies.svg", "Rust Module Dependencies", nodes, edges, legend)
+
+    print("Module Dependencies Diagram")
+    print("===========================")
+    if args.scope:
+        print(f"Scope:        {args.scope}")
+    print(f"Modules:      {len(nodes)}")
+    print(f"Dependencies: {len(edges)}")
+    print(f"Test imports: {'included' if args.include_tests else 'excluded'}")
+    print(f"SVG:          {relative(target)}")
+    return 0
+
+
+def cmd_trace_requirement(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    requirement = model.requirements.get(args.requirement_id)
+    if requirement is None:
+        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
+        return 1
+
+    links = traceability_links_for(requirement, traceability_links())
+    work_items = requirement_work_items(model, requirement)
+    paths = sorted({path for link in links for path in evidence_paths(link)})
+    mentions = source_files_mentioning(requirement_source_terms(requirement), args.limit, implementation_only=True)
+    all_requirements = sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+    duplicate_titles = duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.title)))
+    duplicate_bodies = duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.body)))
+    traceability_text = (MANAGEMENT_DIR / "TRACEABILITY.md").read_text(encoding="utf-8") if (MANAGEMENT_DIR / "TRACEABILITY.md").exists() else ""
+    findings = audit_requirement(model, requirement, traceability_text, duplicate_titles, duplicate_bodies)
+
+    print("Requirement Trace")
+    print("=================")
+    print_requirement(requirement)
+    print()
+    print("Mapped work:")
+    if work_items:
+        for item in work_items:
+            print(f"  - {item.id}: {item.state} -- {item.title}")
+    else:
+        print("  - none")
+    print()
+    print("Traceability links:")
+    if links:
+        for link in links:
+            print(f"  - line {link.line}: {link.requirement_id} -> {link.work_item_id}: {link.state}; {link.evidence}")
+    else:
+        print("  - none")
+    print()
+    print("Evidence paths:")
+    statuses = evidence_path_statuses(paths)
+    if statuses:
+        for path, status in statuses:
+            print(f"  - {path}: {status}")
+    else:
+        print("  - none")
+    print()
+    print("Source mentions:")
+    if mentions:
+        for path in mentions:
+            print(f"  - {path}")
+    else:
+        print("  - none")
+    print()
+    print("Audit signals:")
+    if findings:
+        for finding in findings:
+            print(f"  - {finding.severity}: {finding.category}: {finding.message}")
+    else:
+        print("  - none")
+    print()
+    print("Scope note: trace output is a knowledge-base view. It helps humans and AI navigate evidence; it does not prove behavior.")
+    return 0
+
+
+def cmd_link_evidence(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    requirement = model.requirements.get(args.requirement_id)
+    if requirement is None:
+        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
+        return 1
+    work_item = model.work_items.get(args.work_item_id)
+    if work_item is None:
+        print(f"unknown work item: {args.work_item_id}", file=sys.stderr)
+        return 1
+    if not requirement_matches_id(requirement, work_item.requirement_id):
+        print(f"error: {work_item.id} maps to {work_item.requirement_id}, not {requirement.id}", file=sys.stderr)
+        return 1
+    try:
+        missing = validate_evidence_paths(args.path, args.allow_missing)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    action = append_or_update_traceability(requirement.id, work_item, args.path, args.note, args.state)
+    print("Evidence Link")
+    print("=============")
+    print(f"Requirement: {requirement.id}")
+    print(f"Work item:   {work_item.id}")
+    print(f"Action:      {action}")
+    print("Evidence:")
+    for path in args.path:
+        print(f"  - {path}")
+    if missing:
+        print("Missing paths allowed:")
+        for path in missing:
+            print(f"  - {path}")
+    print("Source:      management/TRACEABILITY.md")
+    return 0
+
+
+def validate_release_version(version: str) -> str:
+    if not RELEASE_VERSION_RE.fullmatch(version):
+        raise ValueError(f"invalid release version {version}; expected semver like 1.2.3 or 1.2.3-rc.1")
+    return version
+
+
+def release_candidate(version: str) -> bool:
+    return "-rc." in version
+
+
+def cmd_prepare_release(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        version = validate_release_version(args.version)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    included = sorted(
+        [item for item in model.work_items.values() if item.state in {"Merged", "Rolled Out"}],
+        key=lambda item: item.id,
+    )
+    open_incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
+    open_risks = open_ledger_entries(MANAGEMENT_DIR / "RISKS.md")
+    gaps = traceability_gaps(model)
+    stale = stale_work_items(model, args.stale_days)
+    blockers: list[str] = []
+    reviews: list[str] = []
+    if open_incidents:
+        blockers.append(f"{len(open_incidents)} open incident(s)")
+    if gaps:
+        reviews.append(f"{len(gaps)} requirement(s) without traceability")
+    if stale:
+        reviews.append(f"{len(stale)} stale work item(s)")
+    if open_risks:
+        reviews.append(f"{len(open_risks)} open risk(s) require release-owner review")
+
+    verdict = "BLOCKED" if blockers else "NEEDS REVIEW" if reviews else "READY TO TAG"
+
+    print("Release Packet")
+    print("==============")
+    print(f"Version:          {version}")
+    print(f"Type:             {'release candidate' if release_candidate(version) else 'production release'}")
+    print(f"Verdict:          {verdict}")
+    print()
+    print("Included merged work:")
+    if included:
+        for item in included:
+            print(f"  - {item.id}: {item.state} -- {item.title}")
+    else:
+        print("  - none")
+    print()
+    print("Blockers:")
+    if blockers:
+        for blocker in blockers:
+            print(f"  - {blocker}")
+    else:
+        print("  - none")
+    print()
+    print("Review items:")
+    if reviews:
+        for review_item in reviews:
+            print(f"  - {review_item}")
+    else:
+        print("  - none")
+    print()
+    print("Required checks:")
+    for command in VERIFICATION_COMMANDS:
+        print(f"  - {command}")
+    print("  - scripts/management/management_status")
+    print()
+    print("Tag command:")
+    print(f"  scripts/management/create_release_tag {version} --execute")
+    print("Scope note: this packet prepares a release decision. It does not create or push tags.")
+    return 1 if args.strict and blockers else 0
+
+
+def cmd_create_release_tag(args: argparse.Namespace) -> int:
+    try:
+        version = validate_release_version(args.version)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    if git_ref_exists(f"refs/tags/{version}"):
+        print(f"error: tag {version} already exists", file=sys.stderr)
+        return 1
+    if git_worktree_is_dirty():
+        print("error: worktree has uncommitted changes; release tags require a clean tree", file=sys.stderr)
+        return 1
+
+    message = args.message or f"Release {version}"
+    command = ["tag", "-a", version, "-m", message]
+    print("Release Tag")
+    print("===========")
+    print(f"Version: {version}")
+    print(f"Type:    {'release candidate' if release_candidate(version) else 'production release'}")
+    print(f"Command: git {' '.join(command)}")
+    if not args.execute:
+        print("Dry run: pass --execute to create the local tag.")
+        return 0
+    try:
+        git_output(command)
+    except RuntimeError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    print(f"Created tag {version}. Push it intentionally when the release owner approves.")
+    return 0
+
+
+def cmd_record_decision(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "DECISIONS.md"
+    decision_id = next_ledger_id(ledger_entries(path), "DEC")
+    decision_date = validate_iso_date(args.date or date.today().isoformat())
+    related = "\n".join(f"`{item}`" for item in args.related) if args.related else "None"
+    entry = f"""## {decision_id} -- {args.title}
+
+Status: {args.status}
+Date: {decision_date}
+
+Context:
+{args.context}
+
+Decision:
+{args.decision}
+
+Consequences:
+{args.consequence}
+
+Related:
+{related}
+"""
+    append_markdown_entry(path, entry)
+    print(f"Recorded decision {decision_id} in {relative(path)}")
+    return 0
+
+
+def cmd_record_risk(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "RISKS.md"
+    risk_id = next_ledger_id(ledger_entries(path), "RISK")
+    related = ", ".join(f"`{item}`" for item in args.related) if args.related else "None"
+    entry = f"""### {risk_id} -- {args.title}
+
+Status: Open
+Owner: {args.owner}
+Related: {related}
+
+Risk:
+{args.risk}
+
+Impact:
+{args.impact}
+
+Mitigation:
+{args.mitigation}
+
+Review date:
+{args.review_date or "Not set"}
+"""
+    insert_markdown_entry_before(path, "\n## Closed Risks", entry)
+    print(f"Recorded risk {risk_id} in {relative(path)}")
+    return 0
+
+
+def cmd_close_risk(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "RISKS.md"
+    try:
+        entry = ledger_entry_by_id(path, args.risk_id)
+        closed_date = validate_iso_date(args.date or date.today().isoformat())
+        update_ledger_status(entry, "Closed", ["Closed:", closed_date, "", "Closure evidence:", args.evidence])
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    print(f"Closed risk {args.risk_id}")
+    return 0
+
+
+def cmd_record_incident(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "INCIDENTS.md"
+    incident_id = next_ledger_id(ledger_entries(path), "INCIDENT")
+    detected = args.detected or f"{datetime.now().strftime('%Y-%m-%d %H:%M')} local"
+    entry = f"""### {incident_id} -- {args.title}
+
+Status: Open
+
+Detected:
+{detected}
+
+Affected environment:
+{args.environment}
+
+Impact:
+{args.impact}
+
+Timeline:
+1. {detected} -- {args.timeline}
+
+Root cause:
+Under investigation
+
+Mitigation:
+{args.mitigation}
+
+Follow-up work:
+1. Not assigned yet
+
+Requirement or decision changes:
+1. None recorded yet
+"""
+    insert_markdown_entry_before(path, "\n## Incident Entry Format", entry)
+    print(f"Recorded incident {incident_id} in {relative(path)}")
+    return 0
+
+
+def cmd_close_incident(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "INCIDENTS.md"
+    try:
+        entry = ledger_entry_by_id(path, args.incident_id)
+        update_ledger_status(entry, "Closed", ["Closed:", args.closed or f"{datetime.now().strftime('%Y-%m-%d %H:%M')} local", "", "Closure evidence:", args.evidence])
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    print(f"Closed incident {args.incident_id}")
+    return 0
+
+
+def cmd_record_experiment(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "EXPERIMENTS.md"
+    experiment_id = next_ledger_id(ledger_entries(path), "EXP")
+    expires = validate_iso_date(args.expires)
+    follow_up = "\n".join(f"1. `{item}`" for item in args.follow_up) if args.follow_up else "1. None yet"
+    entry = f"""### {experiment_id} -- {args.title}
+
+Status: Active
+
+Branch:
+`{args.branch}`
+
+Hypothesis:
+{args.hypothesis}
+
+Expires:
+{expires}
+
+Success criteria:
+1. {args.success}
+
+Failure criteria:
+1. {args.failure}
+
+Result:
+Not concluded yet
+
+Follow-up:
+{follow_up}
+"""
+    insert_markdown_entry_before(path, "\n## Experiment Rules", entry)
+    print(f"Recorded experiment {experiment_id} in {relative(path)}")
+    return 0
+
+
+def cmd_close_experiment(args: argparse.Namespace) -> int:
+    path = MANAGEMENT_DIR / "EXPERIMENTS.md"
+    try:
+        entry = ledger_entry_by_id(path, args.experiment_id)
+        update_ledger_status(entry, args.status, ["Closed:", validate_iso_date(args.date or date.today().isoformat()), "", "Result:", args.result])
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    print(f"Closed experiment {args.experiment_id} as {args.status}")
+    return 0
+
+
+def cmd_stale_work(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+    stale = stale_work_items(model, args.days)
+    print("Stale Work")
+    print("==========")
+    print(f"Threshold: {args.days} days")
+    if stale:
+        for stale_item in stale:
+            age = f"{stale_item.age_days} days" if stale_item.age_days is not None else "unknown age"
+            owner = f"; owner {stale_item.item.owner}" if stale_item.item.owner else ""
+            print(f"- {stale_item.item.id}: {stale_item.item.state}; {age}{owner}; {stale_item.reason}")
+    else:
+        print("- none")
+    return 1 if args.strict and stale else 0
+
+
+def cmd_meeting_packet(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+    stale = stale_work_items(model, args.stale_days)
+    risks = open_ledger_entries(MANAGEMENT_DIR / "RISKS.md")
+    incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
+    experiments = open_ledger_entries(MANAGEMENT_DIR / "EXPERIMENTS.md")
+    gaps = traceability_gaps(model)
+    counts = state_counts(model)
+
+    print("Meeting Packet")
+    print("==============")
+    print(f"Date: {date.today().isoformat()}")
+    print()
+    print("Work state:")
+    for state, count in counts.items():
+        if count:
+            print(f"  - {state}: {count}")
+    print()
+    print("Needs attention:")
+    print(f"  - Stale work: {len(stale)}")
+    print(f"  - Traceability gaps: {len(gaps)}")
+    print(f"  - Open risks: {len(risks)}")
+    print(f"  - Open incidents: {len(incidents)}")
+    print(f"  - Active experiments: {len(experiments)}")
+    print()
+    print("Suggested agenda:")
+    print("  - Confirm blocked or stale work owners and next actions.")
+    print("  - Review requirement traceability gaps before accepting new work.")
+    print("  - Review open incidents and release-impacting risks.")
+    print("  - Decide whether active experiments continue, close, or become requirement-backed work.")
+    print("  - Confirm release readiness if a tag is planned.")
+    return 0
+
+
+def cmd_acceptance_packet(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    requirement = model.requirements.get(item.requirement_id)
+    links = traceability_links_for(requirement, traceability_links()) if requirement else []
+
+    print("Acceptance Packet")
+    print("=================")
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+    print()
+    print("Definition references:")
+    print("  - management/DEFINITION_OF_READY_DONE.md")
+    print("  - management/TRACEABILITY.md")
+    print()
+    print("Traceability:")
+    if links:
+        for link in links:
+            print(f"  - {link.requirement_id} -> {link.work_item_id}: {link.state}; {link.evidence}")
+    else:
+        print("  - no traceability row found")
+    print()
+    print("Acceptance checklist:")
+    print("  - Requirement wording still represents the desired behavior.")
+    print("  - Work-item scope matches the completed change.")
+    print("  - Verification evidence is linked or explicitly documented.")
+    print("  - New non-blocking debt is recorded with justification and deadline.")
+    print("  - Release, risk, incident, or experiment records are updated when applicable.")
+    print()
+    print("Suggested commands:")
+    for command in VERIFICATION_COMMANDS:
+        print(f"  - {command}")
+    print(f"  - scripts/management/sync_requirement {item.requirement_id}")
+    print("Scope note: this packet prepares human acceptance. It does not approve the work.")
+    return 0
+
+
+def cmd_audit_requirements(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    requirements = sorted(model.requirements.values(), key=lambda requirement: requirement.id)
+    if args.document:
+        requirements = [requirement for requirement in requirements if requirement.document == args.document]
+
+    traceability_path = MANAGEMENT_DIR / "TRACEABILITY.md"
+    traceability = traceability_path.read_text(encoding="utf-8") if traceability_path.exists() else ""
+    duplicate_titles = duplicate_requirement_groups(requirements, lambda requirement: " ".join(words_in(requirement.title)))
+    duplicate_bodies = duplicate_requirement_groups(requirements, lambda requirement: " ".join(words_in(requirement.body)))
+
+    findings: list[AuditFinding] = []
+    for requirement in requirements:
+        findings.extend(audit_requirement(model, requirement, traceability, duplicate_titles, duplicate_bodies))
+
+    severity_order = {severity: index for index, severity in enumerate(AUDIT_SEVERITIES)}
+    findings.sort(key=lambda finding: (severity_order.get(finding.severity, 99), finding.requirement.id, finding.category))
+    counts = {severity: sum(1 for finding in findings if finding.severity == severity) for severity in AUDIT_SEVERITIES}
+
+    print("Requirement Audit")
+    print("=================")
+    if args.document:
+        print(f"Document:             {args.document} -- {REQUIREMENT_FILES[args.document]}")
+    print(f"Requirements checked: {len(requirements)}")
+    print(f"Work items:           {len(model.work_items)}")
+    print(f"Traceability source:  {relative(traceability_path)}")
+    print()
+    print("Summary:")
+    for severity in AUDIT_SEVERITIES:
+        print(f"  {severity}: {counts[severity]}")
+    print()
+    print("Findings:")
+    if not findings:
+        print("  - none")
+    else:
+        printable = findings if args.limit <= 0 else findings[: args.limit]
+        for finding in printable:
+            print(f"  - {finding.format()}")
+        if args.limit > 0 and len(findings) > args.limit:
+            print(f"  - ... {len(findings) - args.limit} more")
+    print()
+    print("Scope note: this is a local heuristic audit over management files. Market fit, competitor analysis, code-semantic drift, and final requirement wording remain human PM/manager decisions.")
+
+    if args.strict and (counts["BLOCKER"] or counts["REVIEW"]):
+        return 1
+    return 0
+
+
+def cmd_verification_check(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    base_ref = args.base or "origin/main"
+    files, notes = changed_files(base_ref)
+    all_files = sorted(set(tracked_files()) | set(files))
+    changed_rust_sources = [path for path in files if rust_source_file(path)]
+    changed_tests = [path for path in files if test_evidence_file(path)]
+    existing_tests = [path for path in all_files if test_evidence_file(path)]
+    changed_benchmarks = [path for path in files if benchmark_evidence_file(path)]
+    existing_benchmarks = [path for path in all_files if benchmark_evidence_file(path)]
+    operations_files = [path for path in files if operations_evidence_file(path)]
+    security_files = [path for path in files if security_evidence_file(path)]
+    recovery_files = [path for path in files if recovery_evidence_file(path)]
+    product_files = [path for path in files if product_evidence_file(path)]
+
+    print("Verification Check")
+    print("==================")
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+    print()
+    print(f"Diff base: {base_ref}")
+    for note in notes:
+        print(f"Note: {note}")
+    if files:
+        print("Changed files:")
+        for path in limited(files, args.limit):
+            print(f"  - {path}")
+    else:
+        print("Changed files: none detected")
+    print()
+    print("Evidence inventory:")
+    print_evidence_line(
+        "Functional behavior",
+        limited(changed_tests, args.limit),
+        "REVIEW",
+        "No changed test evidence detected. Existing tests may still cover the behavior." if existing_tests else "No project test evidence detected.",
+    )
+    if not changed_tests and existing_tests:
+        print("  Existing test inventory:")
+        for path in limited(existing_tests, args.limit):
+            print(f"    - {path}")
+
+    performance_reason = "No benchmark or benchmark-related changed file detected."
+    if any(path.startswith(("src/db/", "src/messaging/", "src/plot/")) for path in changed_rust_sources):
+        performance_reason = "Performance-sensitive Rust modules changed; benchmark or load-test evidence should be considered."
+    print_evidence_line("Performance", limited(changed_benchmarks, args.limit), "REVIEW", performance_reason)
+    if not changed_benchmarks and existing_benchmarks:
+        print("  Existing benchmark inventory:")
+        for path in limited(existing_benchmarks, args.limit):
+            print(f"    - {path}")
+
+    print_evidence_line("Security", limited(security_files, args.limit), "REVIEW", "No security-specific evidence detected in changed files.")
+    print_evidence_line("Operations", limited(operations_files, args.limit), "REVIEW", "No operations-specific evidence detected in changed files.")
+    print_evidence_line("Maintainability", [], "CHECK COMMANDS", "Run the static and test commands listed below before review or merge.")
+    print_evidence_line("Disaster recovery", limited(recovery_files, args.limit), "REVIEW", "No rollback, backup, restore, or incident evidence detected in changed files.")
+    print_evidence_line("UX or product behavior", limited(product_files, args.limit), "REVIEW", "No business requirement, product, README, or acceptance evidence detected in changed files.")
+    print()
+    print("Suggested verification commands:")
+    for command in VERIFICATION_COMMANDS:
+        print(f"  - {command}")
+    if changed_benchmarks or any(path.startswith(("src/db/", "src/messaging/", "src/plot/")) for path in changed_rust_sources):
+        print("  - cargo bench --benches")
+    print()
+    print("Scope note: this command inventories evidence. Acceptance still requires human review against the requirement and work item.")
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    base_ref = args.base or "origin/main"
+    files, file_notes = changed_files(base_ref)
+    stat_sections, stat_notes = diff_stat(base_ref)
+    changed_tests = [path for path in files if test_evidence_file(path)]
+    changed_benchmarks = [path for path in files if benchmark_evidence_file(path)]
+    operations_files = [path for path in files if operations_evidence_file(path)]
+    security_files = [path for path in files if security_evidence_file(path)]
+    recovery_files = [path for path in files if recovery_evidence_file(path)]
+    product_files = [path for path in files if product_evidence_file(path)]
+
+    print("Review Packet")
+    print("=============")
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+    print()
+    print(f"Diff base: {base_ref}")
+    for note in [*file_notes, *stat_notes]:
+        print(f"Note: {note}")
+    if item.state not in {"Started", "In Code Review", "QA"}:
+        print(f"State note: {item.id} is currently {item.state}; normal implementation review usually happens after Started.")
+    print()
+
+    if files:
+        print("Changed files:")
+        for path in limited(files, args.limit):
+            print(f"  - {path}")
+    else:
+        print("Changed files: none detected")
+    print()
+
+    if stat_sections:
+        print("Diff stats:")
+        for section in stat_sections:
+            print(section)
+    else:
+        print("Diff stats: none detected")
+    print()
+
+    print("Evidence summary:")
+    print(f"  Functional tests changed: {len(changed_tests)}")
+    print(f"  Benchmarks changed:       {len(changed_benchmarks)}")
+    print(f"  Security evidence:        {len(security_files)}")
+    print(f"  Operations evidence:      {len(operations_files)}")
+    print(f"  Recovery evidence:        {len(recovery_files)}")
+    print(f"  Product evidence:         {len(product_files)}")
+    print()
+
+    print("Rule references:")
+    for path in REVIEW_RULE_REFERENCES:
+        print(f"  - {path}")
+    print()
+
+    print("Review checklist:")
+    for item_text in REVIEW_CHECKLIST:
+        print(f"  - {item_text}")
+    print()
+
+    print("Suggested commands before accepting review:")
+    for command in VERIFICATION_COMMANDS:
+        print(f"  - {command}")
+    if changed_benchmarks or any(path.startswith(("src/db/", "src/messaging/", "src/plot/")) for path in files):
+        print("  - cargo bench --benches")
+    print()
+
+    print("AI review prompt:")
+    print(
+        f"Review {item.id} against {item.requirement_id}. Start with concrete bugs, regressions, missing tests, "
+        "requirement drift, and violations of CODE_GUIDELINES.md or CODE_PATTERNS.md. Treat this packet as context, "
+        "not as proof of correctness."
+    )
+    return 0
+
+
+def cmd_advance_state(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+        target_state = target_state_for(item, args.to)
+        state_date = validate_iso_date(args.date or date.today().isoformat())
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    engineer = args.engineer
+    if item.state == "Planned" and target_state == "Started" and not (engineer or item.owner):
+        print("error: --engineer is required when moving Planned to Started", file=sys.stderr)
+        return 1
+
+    print("Before:")
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+
+    if target_state == item.state and target_state in item.timeline:
+        print()
+        print(f"No change: {item.id} already has {target_state}: {item.timeline[target_state]}")
+        return 0
+
+    if args.dry_run:
+        print()
+        print(f"Dry run: would move {item.id} from {item.state} to {target_state} using date {state_date}.")
+        return 0
+
+    try:
+        replace_or_move_work_item(item, target_state, state_date, engineer)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    updated_model = load_model()
+    updated_item = updated_model.work_items[item.id]
+    print()
+    print("After:")
+    print_work_item(updated_model, updated_item)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Management requirements and backlog helper.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    lint = subparsers.add_parser("lint", help="Validate management file structure and links.")
+    lint.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
+    lint.set_defaults(func=cmd_lint)
+
+    show_requirement = subparsers.add_parser("show-requirement", help="Print one requirement by id.")
+    show_requirement.add_argument("requirement_id")
+    show_requirement.set_defaults(func=cmd_show_requirement)
+
+    show_work = subparsers.add_parser("show-work", help="Print one work item and its requirement. Defaults to the current branch.")
+    show_work.add_argument("ref", nargs="?", help="Work item id or branch name.")
+    show_work.add_argument("--chat-prompt", action="store_true", help="Append a short prompt for discussing the work with an AI assistant.")
+    show_work.set_defaults(func=cmd_show_work)
+
+    chat_about = subparsers.add_parser(
+        "chat-about",
+        aliases=["chat_about"],
+        help="Print the current work item, requirement, and AI discussion prompt.",
+    )
+    chat_about.add_argument("ref", nargs="?", help="Work item id or branch name. Defaults to the current branch.")
+    chat_about.set_defaults(func=cmd_chat_about)
+
+    verify_branch = subparsers.add_parser("verify-branch", help="Validate that a branch references a Started work item.")
+    verify_branch.add_argument("branch", nargs="?", help="Branch name. Defaults to the current branch.")
+    verify_branch.set_defaults(func=cmd_verify_branch)
+
+    advance_state = subparsers.add_parser(
+        "advance-state",
+        aliases=["advance_state"],
+        help="Move a backlog work item to its next state or an explicit target state.",
+    )
+    advance_state.add_argument("ref", help="Work item id or branch name.")
+    advance_state.add_argument("--to", help="Target state. Defaults to the next happy-path state.")
+    advance_state.add_argument("--date", help="State-entry date in YYYY-MM-DD. Defaults to today.")
+    advance_state.add_argument("--engineer", help="Responsible engineer, required for Planned to Started when the item has no owner.")
+    advance_state.add_argument("--dry-run", action="store_true", help="Print the intended transition without editing the backlog.")
+    advance_state.set_defaults(func=cmd_advance_state)
+
+    start_work = subparsers.add_parser(
+        "start-work",
+        aliases=["start_work"],
+        help="Validate a Started work item and create or switch to its branch.",
+    )
+    start_work.add_argument("branch", help="Branch name, such as `<developer>/EN.MCP.01-001` or `feature/EN.MCP.01-001`.")
+    start_work.add_argument("--base", help="Base git ref for new branches. Default: origin/main.")
+    start_work.add_argument("--user", help="Current responsible user for owner validation.")
+    start_work.add_argument("--from-feature", action="store_true", help="Create an ordinary work branch from `feature/<work item id>` instead of the base ref.")
+    start_work.add_argument("--feature-branch", help="Feature branch to use with --from-feature. Default: feature/<work item id>.")
+    start_work.add_argument("--allow-dirty", action="store_true", help="Allow actual branch switching with uncommitted worktree changes.")
+    start_work.add_argument("--dry-run", action="store_true", help="Print validation and git commands without switching branches.")
+    start_work.set_defaults(func=cmd_start_work)
+
+    evaluate_plan = subparsers.add_parser(
+        "evaluate-plan",
+        aliases=["evaluate_plan"],
+        help="Evaluate structural planning coherence for a backlog item or branch.",
+    )
+    evaluate_plan.add_argument("ref", help="Work item id or branch name.")
+    evaluate_plan.add_argument("--user", help="Current responsible user for owner validation.")
+    evaluate_plan.set_defaults(func=cmd_evaluate_plan)
+
+    draft_plan = subparsers.add_parser(
+        "draft-plan",
+        aliases=["draft_plan"],
+        help="Draft an Under Planning backlog entry for a requirement.",
+    )
+    draft_plan.add_argument("requirement_id", help="Requirement id, such as E.MCP.02.b.")
+    draft_plan.add_argument("--motivation", choices=VALID_MOTIVATIONS, help="Work motivation. Defaults to N, or R when completed work already exists.")
+    draft_plan.add_argument("--sequence", help="Three-digit work sequence. Defaults to the next available sequence for the requirement.")
+    draft_plan.add_argument("--title", help="Backlog item title. Defaults to a title derived from the requirement.")
+    draft_plan.add_argument("--body-line", action="append", default=[], help="Backlog body line. May be passed more than once.")
+    draft_plan.add_argument("--date", help="Under Planning date in YYYY-MM-DD. Defaults to today.")
+    draft_plan.add_argument("--write", action="store_true", help="Append the proposed entry under Under Planning.")
+    draft_plan.add_argument("--allow-existing-open", action="store_true", help="Allow --write when the requirement already has open work.")
+    draft_plan.set_defaults(func=cmd_draft_plan)
+
+    audit_requirements = subparsers.add_parser(
+        "audit-requirements",
+        aliases=["audit_requirements"],
+        help="Run a heuristic audit across requirements, backlog links, and traceability.",
+    )
+    audit_requirements.add_argument("--document", choices=sorted(REQUIREMENT_FILES), help="Restrict the audit to one requirement document.")
+    audit_requirements.add_argument("--limit", type=int, default=80, help="Maximum findings to print. Use 0 for all findings.")
+    audit_requirements.add_argument("--strict", action="store_true", help="Exit non-zero when BLOCKER or REVIEW findings exist.")
+    audit_requirements.set_defaults(func=cmd_audit_requirements)
+
+    management_status = subparsers.add_parser(
+        "management-status",
+        aliases=["management_status"],
+        help="Print management status and optionally render the static dashboard.",
+    )
+    management_status.add_argument("--html", help="Output directory for static HTML dashboard.")
+    management_status.add_argument("--stale-days", type=int, default=14, help="Age threshold for stale work. Default: 14.")
+    management_status.add_argument("--limit", type=int, default=20, help="Maximum stale work rows to print. Default: 20.")
+    management_status.set_defaults(func=cmd_management_status)
+
+    diagram_architecture_real = subparsers.add_parser(
+        "diagram-architecture-real",
+        aliases=["diagram_architecture_real"],
+        help="Render the current source architecture diagram as static SVG.",
+    )
+    diagram_architecture_real.add_argument("--html", "--output-dir", default="public/management/diagrams", help="Output directory for generated diagram files.")
+    diagram_architecture_real.set_defaults(func=cmd_diagram_architecture_real)
+
+    diagram_architecture_planned = subparsers.add_parser(
+        "diagram-architecture-planned",
+        aliases=["diagram_architecture_planned"],
+        help="Render current architecture with planned work and unplanned requirements.",
+    )
+    diagram_architecture_planned.add_argument("--html", "--output-dir", default="public/management/diagrams", help="Output directory for generated diagram files.")
+    diagram_architecture_planned.set_defaults(func=cmd_diagram_architecture_planned)
+
+    diagram_module_dependencies = subparsers.add_parser(
+        "diagram-module-dependencies",
+        aliases=["diagram_module_dependencies"],
+        help="Render Rust source-module dependency edges as static SVG.",
+    )
+    diagram_module_dependencies.add_argument("--html", "--output-dir", default="public/management/diagrams", help="Output directory for generated diagram files.")
+    diagram_module_dependencies.add_argument("--scope", help="Restrict to a module namespace, such as messaging or crate::logic.")
+    diagram_module_dependencies.add_argument("--include-tests", action="store_true", help="Include imports below #[cfg(test)] blocks.")
+    diagram_module_dependencies.set_defaults(func=cmd_diagram_module_dependencies)
+
+    trace_requirement = subparsers.add_parser(
+        "trace-requirement",
+        aliases=["trace_requirement"],
+        help="Print requirement, work, evidence, and source traceability.",
+    )
+    trace_requirement.add_argument("requirement_id")
+    trace_requirement.add_argument("--limit", type=int, default=8, help="Maximum source mention paths to print. Default: 8.")
+    trace_requirement.set_defaults(func=cmd_trace_requirement)
+
+    link_evidence = subparsers.add_parser(
+        "link-evidence",
+        aliases=["link_evidence"],
+        help="Append or update TRACEABILITY.md evidence for a requirement and work item.",
+    )
+    link_evidence.add_argument("requirement_id")
+    link_evidence.add_argument("work_item_id")
+    link_evidence.add_argument("path", nargs="+", help="Evidence path(s) to link.")
+    link_evidence.add_argument("--note", help="Additional evidence note.")
+    link_evidence.add_argument("--state", help="Traceability state. Defaults to the backlog work-item state.")
+    link_evidence.add_argument("--allow-missing", action="store_true", help="Allow evidence paths that do not currently exist.")
+    link_evidence.set_defaults(func=cmd_link_evidence)
+
+    prepare_release = subparsers.add_parser("prepare-release", aliases=["prepare_release"], help="Prepare a release decision packet.")
+    prepare_release.add_argument("version")
+    prepare_release.add_argument("--stale-days", type=int, default=14, help="Age threshold for stale work. Default: 14.")
+    prepare_release.add_argument("--strict", action="store_true", help="Exit non-zero when release blockers exist.")
+    prepare_release.set_defaults(func=cmd_prepare_release)
+
+    create_release_tag = subparsers.add_parser("create-release-tag", aliases=["create_release_tag"], help="Create a local release tag after explicit confirmation.")
+    create_release_tag.add_argument("version")
+    create_release_tag.add_argument("--message", help="Annotated tag message. Default: Release <version>.")
+    create_release_tag.add_argument("--execute", action="store_true", help="Create the tag. Without this flag the command is a dry run.")
+    create_release_tag.set_defaults(func=cmd_create_release_tag)
+
+    estimate_requirement = subparsers.add_parser(
+        "estimate-requirement",
+        aliases=["estimate_requirement"],
+        help="Estimate clarity, dependencies, and effort for one requirement.",
+    )
+    estimate_requirement.add_argument("requirement_id", help="Requirement id, such as E.MCP.02.b.")
+    estimate_requirement.set_defaults(func=cmd_estimate_requirement)
+
+    sync_requirement = subparsers.add_parser(
+        "sync-requirement",
+        aliases=["sync_requirement"],
+        help="Check one requirement against backlog work and traceability evidence.",
+    )
+    sync_requirement.add_argument("requirement_id", help="Requirement id, such as E.MCP.01.")
+    sync_requirement.add_argument("--limit", type=int, default=8, help="Maximum source mention paths to print. Default: 8.")
+    sync_requirement.add_argument("--strict", action="store_true", help="Exit non-zero when BLOCKER or REVIEW signals exist.")
+    sync_requirement.set_defaults(func=cmd_sync_requirement)
+
+    chase_techdebts = subparsers.add_parser(
+        "chase-techdebts",
+        aliases=["chase_techdebts"],
+        help="Scan tracked files for technical-debt review leads.",
+    )
+    chase_techdebts.add_argument("--limit", type=int, default=80, help="Maximum findings to print. Use 0 for all findings.")
+    chase_techdebts.add_argument("--long-file-lines", type=int, default=500, help="Line count threshold for large-file findings. Use 0 to disable.")
+    chase_techdebts.add_argument("--strict", action="store_true", help="Exit non-zero when any findings exist.")
+    chase_techdebts.set_defaults(func=cmd_chase_techdebts)
+
+    record_decision = subparsers.add_parser("record-decision", aliases=["record_decision"], help="Append a structured decision entry.")
+    record_decision.add_argument("title")
+    record_decision.add_argument("--context", required=True)
+    record_decision.add_argument("--decision", required=True)
+    record_decision.add_argument("--consequence", required=True)
+    record_decision.add_argument("--related", action="append", default=[])
+    record_decision.add_argument("--status", default="Accepted")
+    record_decision.add_argument("--date")
+    record_decision.set_defaults(func=cmd_record_decision)
+
+    record_risk = subparsers.add_parser("record-risk", aliases=["record_risk"], help="Append an open risk entry.")
+    record_risk.add_argument("title")
+    record_risk.add_argument("--owner", required=True)
+    record_risk.add_argument("--risk", required=True)
+    record_risk.add_argument("--impact", required=True)
+    record_risk.add_argument("--mitigation", required=True)
+    record_risk.add_argument("--related", action="append", default=[])
+    record_risk.add_argument("--review-date")
+    record_risk.set_defaults(func=cmd_record_risk)
+
+    close_risk = subparsers.add_parser("close-risk", aliases=["close_risk"], help="Close a risk with evidence.")
+    close_risk.add_argument("risk_id")
+    close_risk.add_argument("--evidence", required=True)
+    close_risk.add_argument("--date")
+    close_risk.set_defaults(func=cmd_close_risk)
+
+    record_incident = subparsers.add_parser("record-incident", aliases=["record_incident"], help="Append an open incident entry.")
+    record_incident.add_argument("title")
+    record_incident.add_argument("--environment", required=True)
+    record_incident.add_argument("--impact", required=True)
+    record_incident.add_argument("--timeline", required=True)
+    record_incident.add_argument("--mitigation", required=True)
+    record_incident.add_argument("--detected")
+    record_incident.set_defaults(func=cmd_record_incident)
+
+    close_incident = subparsers.add_parser("close-incident", aliases=["close_incident"], help="Close an incident with evidence.")
+    close_incident.add_argument("incident_id")
+    close_incident.add_argument("--evidence", required=True)
+    close_incident.add_argument("--closed")
+    close_incident.set_defaults(func=cmd_close_incident)
+
+    record_experiment = subparsers.add_parser("record-experiment", aliases=["record_experiment"], help="Append an active experiment entry.")
+    record_experiment.add_argument("title")
+    record_experiment.add_argument("--branch", required=True)
+    record_experiment.add_argument("--hypothesis", required=True)
+    record_experiment.add_argument("--expires", required=True)
+    record_experiment.add_argument("--success", required=True)
+    record_experiment.add_argument("--failure", required=True)
+    record_experiment.add_argument("--follow-up", action="append", default=[])
+    record_experiment.set_defaults(func=cmd_record_experiment)
+
+    close_experiment = subparsers.add_parser("close-experiment", aliases=["close_experiment"], help="Close an experiment with a result.")
+    close_experiment.add_argument("experiment_id")
+    close_experiment.add_argument("--status", choices=["Adopted", "Rejected", "Expired"], required=True)
+    close_experiment.add_argument("--result", required=True)
+    close_experiment.add_argument("--date")
+    close_experiment.set_defaults(func=cmd_close_experiment)
+
+    stale_work = subparsers.add_parser("stale-work", aliases=["stale_work"], help="List work items stale in active states.")
+    stale_work.add_argument("--days", type=int, default=14, help="Age threshold. Default: 14.")
+    stale_work.add_argument("--strict", action="store_true", help="Exit non-zero when stale work exists.")
+    stale_work.set_defaults(func=cmd_stale_work)
+
+    meeting_packet = subparsers.add_parser("meeting-packet", aliases=["meeting_packet"], help="Print a manager/PM/engineering meeting packet.")
+    meeting_packet.add_argument("--stale-days", type=int, default=14, help="Age threshold for stale work. Default: 14.")
+    meeting_packet.set_defaults(func=cmd_meeting_packet)
+
+    acceptance_packet = subparsers.add_parser("acceptance-packet", aliases=["acceptance_packet"], help="Print a PM/manager acceptance packet for a work item.")
+    acceptance_packet.add_argument("ref", help="Work item id or branch name.")
+    acceptance_packet.set_defaults(func=cmd_acceptance_packet)
+
+    verification_check = subparsers.add_parser(
+        "verification-check",
+        aliases=["verification_check"],
+        help="Inventory verification evidence for a work item or branch.",
+    )
+    verification_check.add_argument("ref", nargs="?", help="Work item id or branch name. Defaults to the current branch.")
+    verification_check.add_argument("--base", help="Base git ref for changed-file detection. Default: origin/main.")
+    verification_check.add_argument("--limit", type=int, default=8, help="Maximum evidence paths to print per section. Default: 8.")
+    verification_check.set_defaults(func=cmd_verification_check)
+
+    review = subparsers.add_parser("review", help="Print a code-review packet for a work item or branch.")
+    review.add_argument("ref", nargs="?", help="Work item id or branch name. Defaults to the current branch.")
+    review.add_argument("--base", help="Base git ref for changed-file and diff-stat detection. Default: origin/main.")
+    review.add_argument("--limit", type=int, default=8, help="Maximum changed paths to print. Default: 8.")
+    review.set_defaults(func=cmd_review)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

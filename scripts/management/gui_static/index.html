@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Management Console</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Management Console</h1>
+      <p id="repo-root"></p>
+    </div>
+    <div class="top-actions">
+      <span id="generated-at"></span>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <div class="shell">
+    <nav class="nav" aria-label="Management views">
+      <button class="nav-item active" data-view="overview" type="button">Overview</button>
+      <button class="nav-item" data-view="requirements" type="button">Requirements</button>
+      <button class="nav-item" data-view="work" type="button">Work</button>
+      <button class="nav-item" data-view="workflows" type="button">Workflows</button>
+      <button class="nav-item" data-view="ledgers" type="button">Ledgers</button>
+      <button class="nav-item" data-view="diagrams" type="button">Diagrams</button>
+    </nav>
+
+    <main>
+      <section class="view active" id="view-overview">
+        <div class="metric-grid" id="metrics"></div>
+        <div class="two-column">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Work by State</h2>
+              <button type="button" data-action="meeting-packet">Meeting Packet</button>
+            </div>
+            <div id="state-counts"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Needs Attention</h2>
+              <button type="button" data-action="lint">Lint</button>
+            </div>
+            <div id="attention"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="view-requirements">
+        <div class="toolbar">
+          <input id="requirement-filter" type="search" placeholder="Filter requirements">
+          <button type="button" data-action="audit-requirements">Audit</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Title</th>
+                <th>Work</th>
+                <th>Trace</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="requirements-table"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view" id="view-work">
+        <div class="toolbar">
+          <input id="work-filter" type="search" placeholder="Filter work items">
+          <button type="button" data-action="stale-work">Stale Work</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Requirement</th>
+                <th>State</th>
+                <th>Owner</th>
+                <th>Title</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="work-table"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view" id="view-workflows">
+        <div class="workflow-grid">
+          <form class="panel" data-form="draft-plan">
+            <h2>Draft Plan</h2>
+            <label>Requirement <select name="requirement_id" data-select="requirements"></select></label>
+            <label>Title <input name="title"></label>
+            <label>Motivation <select name="motivation"><option value="">Default</option><option>N</option><option>R</option><option>F</option><option>X</option></select></label>
+            <label>Date <input name="date" placeholder="YYYY-MM-DD"></label>
+            <label>Body Lines <textarea name="body_lines" rows="3"></textarea></label>
+            <label class="check"><input name="write" type="checkbox"> Write backlog entry</label>
+            <button type="submit">Run Draft</button>
+          </form>
+
+          <form class="panel" data-form="advance-state">
+            <h2>Advance State</h2>
+            <label>Work Item <select name="ref" data-select="work-items"></select></label>
+            <label>Target <select name="to" id="advance-state-target"></select></label>
+            <label>Engineer <input name="engineer"></label>
+            <label>Date <input name="date" placeholder="YYYY-MM-DD"></label>
+            <label class="check"><input name="dry_run" type="checkbox" checked> Dry run</label>
+            <button type="submit">Advance</button>
+          </form>
+
+          <form class="panel" data-form="link-evidence">
+            <h2>Link Evidence</h2>
+            <label>Requirement <select name="requirement_id" data-select="requirements"></select></label>
+            <label>Work Item <select name="work_item_id" data-select="work-items"></select></label>
+            <label>Paths <textarea name="paths" rows="3" placeholder="src/lib.rs"></textarea></label>
+            <label>Note <input name="note"></label>
+            <label class="check"><input name="allow_missing" type="checkbox"> Allow missing paths</label>
+            <button type="submit">Link Evidence</button>
+          </form>
+
+          <form class="panel" data-form="release">
+            <h2>Release</h2>
+            <label>Version <input name="version" placeholder="1.2.3-rc.1"></label>
+            <label>Tag Message <input name="message"></label>
+            <label>Confirm Tag <input name="confirm" placeholder="Must match version"></label>
+            <div class="button-row">
+              <button type="button" data-form-action="prepare-release">Prepare</button>
+              <button type="button" data-form-action="create-release-tag">Dry Tag</button>
+            </div>
+          </form>
+
+          <form class="panel" data-form="branch-tools">
+            <h2>Branch Tools</h2>
+            <label>Branch or Work Ref <input name="ref" placeholder="Luiz/EN.MCP.01-001"></label>
+            <label>Branch for Start <input name="branch" placeholder="Luiz/EN.MCP.01-001"></label>
+            <label>User <input name="user"></label>
+            <label>Base <input name="base" placeholder="origin/main"></label>
+            <label class="check"><input name="dry_run" type="checkbox" checked> Dry run</label>
+            <div class="button-row">
+              <button type="button" data-form-action="verify-branch">Verify</button>
+              <button type="button" data-form-action="chat-about">Chat</button>
+              <button type="button" data-form-action="start-work">Start</button>
+            </div>
+          </form>
+
+          <form class="panel" data-form="quick-tools">
+            <h2>Quick Tools</h2>
+            <label>Document <select name="document"><option value="">All</option><option>B</option><option>E</option><option>O</option></select></label>
+            <label>Limit <input name="limit" placeholder="20"></label>
+            <label class="check"><input name="strict" type="checkbox"> Strict</label>
+            <div class="button-row">
+              <button type="button" data-form-action="management-status">Status</button>
+              <button type="button" data-form-action="audit-requirements">Audit</button>
+              <button type="button" data-form-action="chase-techdebts">Debt</button>
+            </div>
+          </form>
+
+          <form class="panel" data-form="record-decision">
+            <h2>Record Decision</h2>
+            <label>Title <input name="title"></label>
+            <label>Context <textarea name="context" rows="3"></textarea></label>
+            <label>Decision <textarea name="decision" rows="3"></textarea></label>
+            <label>Consequence <textarea name="consequence" rows="3"></textarea></label>
+            <label>Related <textarea name="related" rows="2"></textarea></label>
+            <button type="submit">Record Decision</button>
+          </form>
+
+          <form class="panel" data-form="record-risk">
+            <h2>Record Risk</h2>
+            <label>Title <input name="title"></label>
+            <label>Owner <input name="owner"></label>
+            <label>Risk <textarea name="risk" rows="3"></textarea></label>
+            <label>Impact <textarea name="impact" rows="3"></textarea></label>
+            <label>Mitigation <textarea name="mitigation" rows="3"></textarea></label>
+            <label>Review Date <input name="review_date" placeholder="YYYY-MM-DD"></label>
+            <button type="submit">Record Risk</button>
+          </form>
+
+          <form class="panel" data-form="record-incident">
+            <h2>Record Incident</h2>
+            <label>Title <input name="title"></label>
+            <label>Environment <input name="environment"></label>
+            <label>Impact <textarea name="impact" rows="3"></textarea></label>
+            <label>Timeline <textarea name="timeline" rows="3"></textarea></label>
+            <label>Mitigation <textarea name="mitigation" rows="3"></textarea></label>
+            <button type="submit">Record Incident</button>
+          </form>
+
+          <form class="panel" data-form="record-experiment">
+            <h2>Record Experiment</h2>
+            <label>Title <input name="title"></label>
+            <label>Branch <input name="branch"></label>
+            <label>Expires <input name="expires" placeholder="YYYY-MM-DD"></label>
+            <label>Hypothesis <textarea name="hypothesis" rows="3"></textarea></label>
+            <label>Success <input name="success"></label>
+            <label>Failure <input name="failure"></label>
+            <button type="submit">Record Experiment</button>
+          </form>
+
+          <form class="panel" data-form="close-ledger">
+            <h2>Close Ledger</h2>
+            <label>Entry Type <select name="entry_type"><option value="risk">Risk</option><option value="incident">Incident</option><option value="experiment">Experiment</option></select></label>
+            <label>Entry ID <input name="entry_id" placeholder="RISK-0001"></label>
+            <label>Evidence or Result <textarea name="evidence" rows="3"></textarea></label>
+            <label>Experiment Status <select name="status"><option>Adopted</option><option>Rejected</option><option>Expired</option></select></label>
+            <label>Date <input name="date" placeholder="YYYY-MM-DD"></label>
+            <button type="submit">Close Entry</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="view" id="view-ledgers">
+        <div class="ledger-grid" id="ledger-grid"></div>
+      </section>
+
+      <section class="view" id="view-diagrams">
+        <div class="diagram-actions">
+          <button type="button" data-action="diagram-architecture-real">Regenerate Current</button>
+          <button type="button" data-action="diagram-architecture-planned">Regenerate Planned</button>
+          <button type="button" data-action="diagram-module-dependencies">Regenerate Modules</button>
+        </div>
+        <div class="diagram-grid">
+          <figure><figcaption>Current Architecture</figcaption><img id="diagram-real" alt="Current architecture diagram"></figure>
+          <figure><figcaption>Plan Overlay</figcaption><img id="diagram-planned" alt="Planned architecture diagram"></figure>
+          <figure><figcaption>Module Dependencies</figcaption><img id="diagram-modules" alt="Module dependency diagram"></figure>
+        </div>
+      </section>
+    </main>
+
+    <aside class="inspector">
+      <h2>Selection</h2>
+      <div id="selection"></div>
+    </aside>
+  </div>
+
+  <section class="console">
+    <div class="console-head">
+      <h2>Command Output</h2>
+      <button id="clear-output" type="button">Clear</button>
+    </div>
+    <pre id="command-output"></pre>
+  </section>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>
