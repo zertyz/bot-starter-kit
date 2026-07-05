@@ -187,6 +187,49 @@ class ManagementToolTest(unittest.TestCase):
         self.assertIn("Requirement Audit", audit.stdout)
         self.assertIn("REVIEW:", audit.stdout)
 
+    def test_estimate_requirement_prints_planning_packet(self) -> None:
+        estimate = self.tool_run("estimate-requirement", "E.MCP.02.b")
+        self.assertIn("Requirement Estimate", estimate.stdout)
+        self.assertIn("Readiness:", estimate.stdout)
+        self.assertIn("Estimated effort:", estimate.stdout)
+        self.assertIn("Dependency signals:", estimate.stdout)
+        self.assertIn("Planning prompt:", estimate.stdout)
+
+    def test_sync_requirement_prints_traceability_packet(self) -> None:
+        sync = self.tool_run("sync-requirement", "E.MCP.01")
+        self.assertIn("Requirement Sync", sync.stdout)
+        self.assertIn("Mapped work:", sync.stdout)
+        self.assertIn("EN.MCP.01-001", sync.stdout)
+        self.assertIn("Signals:", sync.stdout)
+        self.assertIn("Verdict:", sync.stdout)
+
+    def test_sync_requirement_strict_fails_on_review_signals(self) -> None:
+        sync = self.tool_run("sync-requirement", "E.MCP.02.b", "--strict", expected=1)
+        self.assertIn("Requirement Sync", sync.stdout)
+        self.assertIn("REVIEW:", sync.stdout)
+
+    def test_chase_techdebts_reports_review_leads(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text(
+            "pub fn risky(value: Option<u8>) -> u8 {\n    // TODO: replace shortcut\n    value.unwrap()\n}\n",
+            encoding="utf-8",
+        )
+        run(self.root, ["git", "add", "src/lib.rs"])
+        debts = self.tool_run("chase-techdebts", "--limit", "0")
+        self.assertIn("Tech Debt Chase", debts.stdout)
+        self.assertIn("TODO marker is present", debts.stdout)
+        self.assertIn("Rust shortcut `.unwrap()` needs review outside tests", debts.stdout)
+
+    def test_chase_techdebts_strict_fails_on_findings(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text("// FIXME: tighten this\n", encoding="utf-8")
+        run(self.root, ["git", "add", "src/lib.rs"])
+        debts = self.tool_run("chase-techdebts", "--strict", expected=1)
+        self.assertIn("Tech Debt Chase", debts.stdout)
+        self.assertIn("Findings:", debts.stdout)
+
     def test_verification_check_reports_existing_evidence(self) -> None:
         src = self.root / "src"
         src.mkdir()

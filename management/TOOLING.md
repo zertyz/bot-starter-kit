@@ -72,6 +72,35 @@ scripts/management/audit_requirements --strict
 The command reports local heuristic findings across requirements, backlog links, and `TRACEABILITY.md`: missing or thin requirement text, unbounded wording, implementation-heavy wording, unclear actors, likely compound scope, missing work, and missing traceability. It is an audit aid; market fit, competitor analysis, code-semantic drift, and final wording remain human PM/manager decisions.
 
 
+## Estimate a Requirement
+
+```bash
+scripts/management/estimate_requirement E.MCP.02.b
+```
+
+The command prints a planning packet for one requirement: local readiness signals, existing work, traceability links, dependency signals, and a senior-engineer-hour effort band. The estimate is based on repo-local structure and wording; product value, market timing, and final commitment remain PM/manager decisions.
+
+
+## Sync a Requirement
+
+```bash
+scripts/management/sync_requirement E.MCP.01
+scripts/management/sync_requirement E.MCP.01 --strict
+```
+
+The command checks one requirement against mapped backlog work, `TRACEABILITY.md`, evidence paths, and source mentions. It reports drift signals and a local coherence verdict; it does not prove runtime behavior satisfies the requirement.
+
+
+## Chase Technical Debts
+
+```bash
+scripts/management/chase_techdebts
+scripts/management/chase_techdebts --limit 20
+```
+
+The command scans tracked text files for technical-debt review leads: debt markers, large files, risky Rust shortcuts in `src/`, repeated clone pressure, and sensitive terms in tracked text. Accepted findings should become Engineering or Operations requirements/backlog items with impact, deadline, and release-blocking classification.
+
+
 ## Check Verification Evidence
 
 ```bash
