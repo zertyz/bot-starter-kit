@@ -36,6 +36,25 @@ class ManagementGuiServerTest(unittest.TestCase):
         self.assertIn("work_items", payload)
         self.assertIn("ledgers", payload)
         self.assertIn("diagrams", payload)
+        self.assertIn("audit_findings", payload)
+        self.assertIn("tech_debts", payload)
+        self.assertIn("audit_blockers", payload["counts"])
+        self.assertIn("tech_debt_findings", payload["counts"])
+
+    def test_requirement_payload_contains_proactive_audit_context(self) -> None:
+        payload = self.gui.model_payload()
+        requirement = payload["requirements"][0]
+        self.assertIn("audit_findings", requirement)
+        self.assertIn("traceability_status", requirement)
+        self.assertIn("edit_hint", requirement)
+
+    def test_work_payload_contains_attention_context(self) -> None:
+        payload = self.gui.model_payload()
+        item = payload["work_items"][0]
+        self.assertIn("attention", item)
+        for signal in item["attention"]:
+            self.assertIn("severity", signal)
+            self.assertIn("message", signal)
 
     def test_builds_allowlisted_requirement_command(self) -> None:
         args = self.gui.build_management_command("show-requirement", {"requirement_id": "E.MCP.01"})

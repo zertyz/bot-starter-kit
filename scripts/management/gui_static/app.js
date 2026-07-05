@@ -33,8 +33,13 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function pill(text, kind = "") {
-  return `<span class="pill ${kind}">${escapeHtml(text)}</span>`;
+function attr(value) {
+  return escapeHtml(value).replaceAll("\n", "&#10;");
+}
+
+function pill(text, kind = "", title = "") {
+  const titleAttr = title ? ` title="${attr(title)}"` : "";
+  return `<span class="pill ${kind}"${titleAttr}>${escapeHtml(text)}</span>`;
 }
 
 function stateKind(value) {
@@ -42,6 +47,56 @@ function stateKind(value) {
   if (["Rejected", "Cancelled"].includes(value)) return "red";
   if (["Started", "In Code Review", "Integrated", "QA"].includes(value)) return "blue";
   return "orange";
+}
+
+function severityKind(severity) {
+  if (severity === "BLOCKER") return "red";
+  if (severity === "REVIEW") return "orange";
+  if (severity === "INFO") return "blue";
+  return "green";
+}
+
+function highestSeverity(items) {
+  if (!items || !items.length) return "OK";
+  if (items.some((item) => item.severity === "BLOCKER")) return "BLOCKER";
+  if (items.some((item) => item.severity === "REVIEW")) return "REVIEW";
+  return "INFO";
+}
+
+function issueTitle(items) {
+  if (!items || !items.length) return "No proactive issue detected.";
+  return items.map((item) => {
+    const location = item.edit_hint ? ` (${item.edit_hint})` : "";
+    const category = item.category ? `${item.category}: ` : "";
+    return `${item.severity}: ${category}${item.message}${location}`;
+  }).join("\n");
+}
+
+function auditPill(findings) {
+  const severity = highestSeverity(findings);
+  if (severity === "OK") return pill("OK", "green", "No audit finding for this requirement.");
+  const count = findings.filter((item) => item.severity === severity).length;
+  return pill(`${severity} ${count}`, severityKind(severity), issueTitle(findings));
+}
+
+function tracePill(req) {
+  const auditTrace = req.audit_findings.filter((finding) => finding.category === "traceability");
+  const title = [
+    req.traceability_detail,
+    req.traceability_lines.length ? `Rows: ${req.traceability_lines.join(", ")}` : "",
+    issueTitle(auditTrace),
+  ].filter(Boolean).join("\n");
+  if (req.traceability_status === "direct") return pill("linked", "green", title);
+  if (req.traceability_status === "child") return pill("child", "blue", title);
+  if (req.traceability_status === "area") return pill("area", "orange", title);
+  return pill("gap", "orange", title);
+}
+
+function rowClassForIssues(items) {
+  const severity = highestSeverity(items);
+  if (severity === "BLOCKER") return "row-blocker";
+  if (severity === "REVIEW") return "row-review";
+  return "";
 }
 
 async function loadModel() {
@@ -62,6 +117,7 @@ function render() {
   renderWorkItems();
   renderSelects();
   renderLedgers();
+  renderTechDebt();
   renderDiagrams();
   renderSelection();
 }
@@ -76,6 +132,9 @@ function renderMetrics() {
     ["open_risks", "Open Risks"],
     ["open_incidents", "Open Incidents"],
     ["active_experiments", "Experiments"],
+    ["audit_blockers", "Audit Blockers"],
+    ["audit_reviews", "Audit Reviews"],
+    ["tech_debt_findings", "Debt Leads"],
   ];
   $("#metrics").innerHTML = labels.map(([key, label]) => `
     <div class="metric">
@@ -104,6 +163,9 @@ function renderAttention() {
   for (const item of state.model.stale_work.slice(0, 8)) {
     items.push(`<div class="list-item"><strong>${escapeHtml(item.id)}</strong><span>${escapeHtml(item.reason)}</span></div>`);
   }
+  for (const finding of state.model.audit_findings.filter((item) => item.severity === "BLOCKER").slice(0, 8)) {
+    items.push(`<div class="list-item"><strong class="error">${escapeHtml(finding.requirement_id)} ${escapeHtml(finding.category)}</strong><span>${escapeHtml(finding.message)} · ${escapeHtml(finding.edit_hint)}</span></div>`);
+  }
   for (const req of state.model.traceability_gaps.slice(0, 8)) {
     items.push(`<div class="list-item"><strong>${escapeHtml(req)}</strong><span>Missing traceability link</span></div>`);
   }
@@ -123,20 +185,21 @@ function renderRequirements() {
   const rows = state.model.requirements
     .filter((req) => `${req.id} ${req.title} ${req.body}`.toLowerCase().includes(filter))
     .map((req) => `
-      <tr>
+      <tr class="${rowClassForIssues(req.audit_findings)}" title="${attr(issueTitle(req.audit_findings))}">
         <td><button type="button" data-select-requirement="${escapeHtml(req.id)}">${escapeHtml(req.id)}</button></td>
         <td>${escapeHtml(req.title)}</td>
+        <td>${auditPill(req.audit_findings)}</td>
         <td>${req.work_items.length}</td>
-        <td>${req.traceability.length ? pill("linked", "green") : pill("gap", "orange")}</td>
+        <td>${tracePill(req)}</td>
         <td class="actions">
-          <button type="button" data-action="show-requirement" data-requirement-id="${escapeHtml(req.id)}">Show</button>
-          <button type="button" data-action="estimate-requirement" data-requirement-id="${escapeHtml(req.id)}">Estimate</button>
-          <button type="button" data-action="sync-requirement" data-requirement-id="${escapeHtml(req.id)}">Sync</button>
-          <button type="button" data-action="trace-requirement" data-requirement-id="${escapeHtml(req.id)}">Trace</button>
+          <button type="button" data-action="show-requirement" data-requirement-id="${escapeHtml(req.id)}" title="Show requirement text and source location.">Show</button>
+          <button type="button" class="${highestSeverity(req.audit_findings) === "BLOCKER" ? "danger" : highestSeverity(req.audit_findings) === "REVIEW" ? "warn" : ""}" data-action="estimate-requirement" data-requirement-id="${escapeHtml(req.id)}" title="${attr(issueTitle(req.audit_findings))}">Estimate</button>
+          <button type="button" class="${req.traceability_status === "missing" || req.traceability_status === "area" ? "warn" : ""}" data-action="sync-requirement" data-requirement-id="${escapeHtml(req.id)}" title="${attr(req.traceability_detail)}">Sync</button>
+          <button type="button" class="${req.traceability_status === "missing" || req.traceability_status === "area" ? "warn" : ""}" data-action="trace-requirement" data-requirement-id="${escapeHtml(req.id)}" title="${attr(req.traceability_detail)}">Trace</button>
         </td>
       </tr>
     `).join("");
-  $("#requirements-table").innerHTML = rows || `<tr><td colspan="5" class="empty">None</td></tr>`;
+  $("#requirements-table").innerHTML = rows || `<tr><td colspan="6" class="empty">None</td></tr>`;
 }
 
 function renderWorkItems() {
@@ -144,22 +207,23 @@ function renderWorkItems() {
   const rows = state.model.work_items
     .filter((item) => `${item.id} ${item.requirement_id} ${item.title} ${item.state} ${item.owner ?? ""}`.toLowerCase().includes(filter))
     .map((item) => `
-      <tr>
+      <tr class="${rowClassForIssues(item.attention)}" title="${attr(issueTitle(item.attention))}">
         <td><button type="button" data-select-work="${escapeHtml(item.id)}">${escapeHtml(item.id)}</button></td>
         <td>${escapeHtml(item.requirement_id)}</td>
         <td>${pill(item.state, stateKind(item.state))}</td>
         <td>${escapeHtml(item.owner ?? "")}</td>
         <td>${escapeHtml(item.title)}</td>
+        <td>${auditPill(item.attention)}</td>
         <td class="actions">
           <button type="button" data-action="show-work" data-ref="${escapeHtml(item.id)}">Show</button>
-          <button type="button" data-action="evaluate-plan" data-ref="${escapeHtml(item.id)}">Evaluate</button>
-          <button type="button" data-action="verification-check" data-ref="${escapeHtml(item.id)}">Verify</button>
-          <button type="button" data-action="review" data-ref="${escapeHtml(item.id)}">Review</button>
-          <button type="button" data-action="acceptance-packet" data-ref="${escapeHtml(item.id)}">Accept</button>
+          <button type="button" class="${highestSeverity(item.attention) === "BLOCKER" ? "danger" : item.attention.length ? "warn" : ""}" data-action="evaluate-plan" data-ref="${escapeHtml(item.id)}" title="${attr(issueTitle(item.attention))}">Evaluate</button>
+          <button type="button" class="${["Started", "In Code Review", "QA"].includes(item.state) ? "" : "warn"}" data-action="verification-check" data-ref="${escapeHtml(item.id)}" title="Most useful for Started, In Code Review, or QA work.">Verify</button>
+          <button type="button" class="${["Started", "In Code Review", "QA"].includes(item.state) ? "" : "warn"}" data-action="review" data-ref="${escapeHtml(item.id)}" title="Normal implementation review usually happens after Started.">Review</button>
+          <button type="button" class="${["Merged", "Rolled Out"].includes(item.state) ? "" : "warn"}" data-action="acceptance-packet" data-ref="${escapeHtml(item.id)}" title="Acceptance is normally final for Merged or Rolled Out work.">Accept</button>
         </td>
       </tr>
     `).join("");
-  $("#work-table").innerHTML = rows || `<tr><td colspan="6" class="empty">None</td></tr>`;
+  $("#work-table").innerHTML = rows || `<tr><td colspan="7" class="empty">None</td></tr>`;
 }
 
 function renderSelects() {
@@ -190,6 +254,58 @@ function renderLedgers() {
       </div>
     </section>
   `).join("");
+  const autoDebt = state.model.ledgers.tech_debts.auto_detected.slice(0, 8).map((finding) => `
+    <div class="list-item" title="${attr(finding.message + "\n" + finding.edit_hint)}">
+      <strong>${escapeHtml(finding.category)} · ${escapeHtml(finding.path)}:${finding.line}</strong>
+      <span>${escapeHtml(finding.message)}</span>
+    </div>
+  `).join("");
+  const confirmedDebt = state.model.ledgers.tech_debts.confirmed.slice(0, 8).map((item) => `
+    <div class="list-item" title="${attr(item.edit_hint)}">
+      <strong>${escapeHtml(item.id)} -- ${escapeHtml(item.title)}</strong>
+      <span>${escapeHtml(item.kind)} ${escapeHtml(item.state || "")} ${escapeHtml(item.path)}:${item.line}</span>
+    </div>
+  `).join("");
+  $("#ledger-grid").insertAdjacentHTML("beforeend", `
+    <section class="panel">
+      <h2>Auto-detected Tech Debt</h2>
+      <div class="list">${autoDebt || '<p class="empty">None</p>'}</div>
+    </section>
+    <section class="panel">
+      <h2>Confirmed Tech Debt</h2>
+      <div class="list">${confirmedDebt || '<p class="empty">None</p>'}</div>
+    </section>
+  `);
+}
+
+function renderTechDebt() {
+  const filter = ($("#tech-debt-filter")?.value ?? "").toLowerCase();
+  const auto = state.model.tech_debts.auto_detected
+    .filter((finding) => `${finding.category} ${finding.severity} ${finding.path} ${finding.message}`.toLowerCase().includes(filter))
+    .map((finding) => `
+      <div class="list-item ${finding.category}" title="${attr(finding.message + "\nEdit: " + finding.edit_hint)}">
+        <strong>${pill(finding.severity, severityKind(finding.severity))} ${escapeHtml(finding.category)} · ${escapeHtml(finding.path)}:${finding.line}</strong>
+        <span>${escapeHtml(finding.message)}</span>
+      </div>
+    `).join("");
+  const confirmed = state.model.tech_debts.confirmed
+    .filter((item) => `${item.kind} ${item.id} ${item.title} ${item.state} ${item.path}`.toLowerCase().includes(filter))
+    .map((item) => `
+      <div class="list-item" title="${attr(item.edit_hint)}">
+        <strong>${escapeHtml(item.id)} -- ${escapeHtml(item.title)}</strong>
+        <span>${escapeHtml(item.kind)} ${escapeHtml(item.state || "")} ${escapeHtml(item.path)}:${item.line}</span>
+      </div>
+    `).join("");
+  $("#tech-debt-grid").innerHTML = `
+    <section class="panel">
+      <h2>Auto-detected</h2>
+      <div class="list">${auto || '<p class="empty">None</p>'}</div>
+    </section>
+    <section class="panel">
+      <h2>Confirmed</h2>
+      <div class="list">${confirmed || '<p class="empty">None</p>'}</div>
+    </section>
+  `;
 }
 
 function renderDiagrams() {
@@ -212,6 +328,14 @@ function renderSelection() {
       <div class="kv"><span>Title</span><span>${escapeHtml(req.title)}</span></div>
       <div class="kv"><span>Source</span><span>${escapeHtml(req.path)}:${req.line}</span></div>
       <div class="kv"><span>Work</span><span>${escapeHtml(req.work_items.join(", ") || "None")}</span></div>
+      <div class="kv"><span>Audit</span><span>${auditPill(req.audit_findings)}</span></div>
+      <div class="kv"><span>Trace</span><span>${tracePill(req)}</span></div>
+      <div class="list">${req.audit_findings.map((finding) => `
+        <div class="list-item" title="${attr(finding.edit_hint)}">
+          <strong>${escapeHtml(finding.severity)} ${escapeHtml(finding.category)}</strong>
+          <span>${escapeHtml(finding.message)} · ${escapeHtml(finding.edit_hint)}</span>
+        </div>
+      `).join("") || '<p class="empty">No audit finding</p>'}</div>
       <div class="list-item"><strong>Body</strong><span>${escapeHtml(req.body || "No body")}</span></div>
     `;
     return;
@@ -223,6 +347,13 @@ function renderSelection() {
     <div class="kv"><span>State</span><span>${pill(item.state, stateKind(item.state))}</span></div>
     <div class="kv"><span>Owner</span><span>${escapeHtml(item.owner ?? "")}</span></div>
     <div class="kv"><span>Source</span><span>${escapeHtml(item.path)}:${item.line}</span></div>
+    <div class="kv"><span>Attention</span><span>${auditPill(item.attention)}</span></div>
+    <div class="list">${item.attention.map((signal) => `
+      <div class="list-item" title="${attr(signal.edit_hint || "")}">
+        <strong>${escapeHtml(signal.severity)}</strong>
+        <span>${escapeHtml(signal.message)}${signal.edit_hint ? ` · ${escapeHtml(signal.edit_hint)}` : ""}</span>
+      </div>
+    `).join("") || '<p class="empty">No proactive signal</p>'}</div>
     <div class="list-item"><strong>Body</strong><span>${escapeHtml(item.body || "No body")}</span></div>
   `;
 }
@@ -301,6 +432,7 @@ function wireEvents() {
   $("#clear-output").addEventListener("click", () => { $("#command-output").textContent = ""; });
   $("#requirement-filter").addEventListener("input", renderRequirements);
   $("#work-filter").addEventListener("input", renderWorkItems);
+  $("#tech-debt-filter").addEventListener("input", renderTechDebt);
 
   for (const item of $all(".nav-item")) {
     item.addEventListener("click", () => {
