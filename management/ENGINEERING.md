@@ -6,7 +6,9 @@ The BOT communicates with the Messaging Platform defined in [BUSINESS/Messaging 
 
 ## 01) Per User Routing
 
-From the dialog handling logic point of view, each user should receive its own Stream of MOs and should hand over the Stream of MTs. This routing logic is handled by each Messaging Platform gateway implementation.
+From the dialog handling logic point of view, each user should receive its own Stream of MOs and should hand over the Stream of MTs. This routing logic is handled by each Messaging Platform gateway.
+Should any messages cause an unknown error, it should be presented to the user in addition to being logged.
+No errors should disrupt the underlying Messaging Platform instance, the Per-User Routing, nor the current user dialog processor logic. 
 
 
 ## 02) Messaging Platform Agnosticism
@@ -16,15 +18,20 @@ The dialog handling logic may or may not care about the Messaging Platform throu
 
 ## 02.a) Common MO and MT Models
 
-To allow a single logic implementation to support multiple Messaging Platforms, a common MO, MT, and User models are defined.
+To allow a single logic unit to support multiple Messaging Platforms, a common "MO", "MT", and "User" models are defined.
+Any breaking upstream changes to the Messaging Platform should be identified at any of the following steps – the sooner the better:
+1. Program failing to compile;
+2. Program failing to execute – quitting with a clear error message regarding model drift;
+3. Messaging Platform stopping to execute – with a log message clearly stating the model drift;
+4. QA session via one of the test plans.
 
 
 ## 02.b) Messaging Platform Inquiry and Features Inquiry
 
-If the logic wants to split itself -- e.g., one logic for Slack and another logic for SMS -- it can do so by:
+If the logic wants to split itself – e.g., one logic for Slack and another logic for SMS – it can do so by:
 
 1. Inquiring the Underlying Messaging Platform
-2. Inquiring the Features Available -- for instance, message edition, picture support, etc.
+2. Inquiring the Features Available – for instance, message edition, picture support, etc.
 
 We will not provide a full list of features here, as each Messaging Platform is the source of truth.
 Note: [BUSINESS/Messaging Platforms/02 Supported Features] define how we should monitor and follow new features as they are made available for each Messaging Platform.
@@ -120,16 +127,17 @@ In order to support what is specified in the sessions of [BUSINESS/Messaging Pla
 
 ## 01) Telegram
 
-Uses the `teloxide` crate in the polling mode to demoscene all its documented features.
-The example should contain docs on how to create the Telegram Account (a.k.a., Telegram Bot Entry) and have it configured in the example.
-All local developers wanting to execute this example should be able to create their own remote account within Telegram – and the responsibility of keeping the secrets must be made clear.
+An example program to demoscene the currently documented official Telegram features.
+The example should contain docs on how to create the Telegram Account (a.k.a., Telegram Bot Entry) and have it configured in the example 
+so that local developers wanting to execute this example should be able to easily follow the necessary procedures.
+Even if it is just an example, the program should not hide errors but may simply exit should one happen. 
 
-## 02) Whatsapp
+## 02) WhatsApp
 
-Similarly to the "Telegram" example above, this example demonstrates all the Whatsapp features.
-We must use a TBD crate set up in the easiest mode possible to ease development.
-As before, the example should contain docs on how to create the Whatsapp Development Account and have it configured in the example so it can work.
-All local developers wanting to execute this example should be able to create their own remote accounts within Whatsapp – and the responsibility of keeping the secrets must be made clear.
+An example program to demoscene the currently documented official WhatsApp features.
+The example should contain docs on how to create the WhatsApp Development Account and have it configured in the example
+so that local developers wanting to execute this example should be able to easily follow the necessary procedures.
+Even if it is just an example, the program should not hide errors but may simply exit should one happen.
 
 
 
