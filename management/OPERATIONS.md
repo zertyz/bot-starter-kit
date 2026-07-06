@@ -11,7 +11,7 @@ The BOT makes use of the following types of persistence:
 2. Session Data: this is, in essence, data that lives in RAM needed to correctly conduct the user along each dialog and conversation state. In practice, this data is persisted because we want that any application
    deployments or crashes to go unnoticed; Also, the BOT may decide to clear from RAM some dialogs after an inactivity period -- which should be transparently restored.
 3. Formally Persisted Data: this is the data that we cannot lose, otherwise it would be perceived as a degradation of the service or even would drain our ability from receiving revenue. Examples are: user profile data,
-   preferences, any integration or progress details and so on.
+   preferences, any integration or progress details, and so on.
 
 Note: to disambiguate further between Session Data and Formally Persisted Data: we may discard Session Data in certain occasions, without losing any service quality:
 1. When the user says "goodbye" -- the session may be deleted.
@@ -28,3 +28,5 @@ For this kind of data, we want a storage backend that allows the following:
 1. It should allow inspecting the model -- for both automated and manual evaluation
 2. It should allow changing the model -- both automated or manually
 3. A human should be aboe to inspect the current data at any time -- including when the BOT is executing
+
+For easy referencing, when we mention "Database" throughout the requirements and backlogs, we are referring to the platform, backend, or location for this kind of data.

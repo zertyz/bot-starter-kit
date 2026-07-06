@@ -8,7 +8,7 @@ Bellow, we define the Messaging Platforms we support.
 
 The BOT must be able to communicate with:
  * Telegram
- * Whatsapp
+ * WhatsApp
  * Slack
  * Microsoft Teams
  * Discord
@@ -49,4 +49,4 @@ This section defines how we should deal with users, the information needed to st
 
 ## 01) Valuable Data
 
-tbd
+This section describes the data the BOT deems valuable and needs to be persisted, as per the definition in [OPERATIONS/Data Storage/02 Formally Persisted Data]
