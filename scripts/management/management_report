@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+has_output=0
+for arg in "$@"; do
+  case "$arg" in
+    --html|--export-report)
+      has_output=1
+      ;;
+  esac
+done
+
+if [[ $# -eq 0 ]]; then
+  set -- --html public/management
+elif [[ "${1:-}" != --* ]]; then
+  set -- --html "$@"
+elif [[ "$has_output" -eq 0 ]]; then
+  set -- --html public/management "$@"
+fi
+
+exec "$SCRIPT_DIR/gui_server" "$@"

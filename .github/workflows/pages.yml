@@ -60,10 +60,7 @@ jobs:
         mkdir -p public/doc public/benchmarks
         cp -r target/doc/. public/doc/
         cp -r target/criterion/. public/benchmarks/
-        scripts/management/management_status --html public/management
-        scripts/management/diagram_architecture_real --html public/management/diagrams
-        scripts/management/diagram_architecture_planned --html public/management/diagrams
-        scripts/management/diagram_module_dependencies --html public/management/diagrams
+        scripts/management/management_report --html public/management
         node <<'NODE'
         const fs = require("fs");
         const report = JSON.parse(fs.readFileSync("target/llvm-cov/summary.json", "utf8"));
@@ -96,7 +93,7 @@ jobs:
             <li><a href="./doc/bot_starter_kit/">Rust documentation</a></li>
             <li><a href="./coverage/html/">Coverage report</a></li>
             <li><a href="./benchmarks/report/">Benchmark report</a></li>
-            <li><a href="./management/">Management dashboard</a></li>
+            <li><a href="./management/">Management report</a></li>
           </ul>
         </body>
         </html>

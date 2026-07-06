@@ -22,7 +22,15 @@ When those disagree, treat it as requirement drift. Report the drift and use the
 
 ## Generated and Interactive Surfaces
 
-GitHub Pages is read-only. It can publish the management dashboard, diagrams, Rust docs, coverage, and benchmarks. It cannot run the local GUI, edit files, commit, tag, or push.
+GitHub Pages is read-only. It publishes the static Management Report, diagrams, Rust docs, coverage, and benchmarks. It cannot run the local GUI, edit files, commit, tag, or push.
+
+The static Management Report is an offline export of the GUI shell:
+
+```bash
+scripts/management/management_report --html public/management
+```
+
+It writes `index.html`, `model.json`, frontend assets, and generated diagrams. Refresh and action buttons remain visible there, but are disabled with a local-online-mode tooltip.
 
 The local GUI is an authoring console over allowlisted management commands:
 
@@ -30,7 +38,7 @@ The local GUI is an authoring console over allowlisted management commands:
 scripts/management/gui
 ```
 
-Use it for interactive planning and review. Use the CLI directly for scripted work, tests, CI, and precise terminal evidence.
+Use it for interactive planning and review. Use the CLI directly for scripted work, tests, CI, and precise terminal evidence. The local GUI and static report share `scripts/management/gui_server` plus `scripts/management/gui_static/`; keep new views and model fields shared unless a feature genuinely requires a localhost-only action path.
 
 
 ## Normal Agent Workflow
@@ -53,7 +61,8 @@ After changing management tooling or management files:
 
 ## Command Intent
 
-- `management_status`: summarize the current management state and render the static dashboard.
+- `management_status`: summarize the current management state; its compact HTML dashboard mode is compatibility-only.
+- `management_report`: export the static GUI-based Management Report for GitHub Pages or local review.
 - `diagram_architecture_real`, `diagram_architecture_planned`, `diagram_module_dependencies`: render static SVG diagrams for Pages or local review.
 - `audit_requirements`: find local requirement quality and planning issues.
 - `estimate_requirement`: prepare PM/manager planning context for one requirement.

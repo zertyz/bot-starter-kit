@@ -6,6 +6,7 @@
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://zertyz.github.io/bot-starter-kit/doc/bot_starter_kit/)
 [![Coverage report](https://img.shields.io/badge/coverage-report-blue)](https://zertyz.github.io/bot-starter-kit/coverage/html/)
 [![Benchmark report](https://img.shields.io/badge/benchmarks-report-blue)](https://zertyz.github.io/bot-starter-kit/benchmarks/report/)
+[![Management Status](https://img.shields.io/badge/management-status-blue)](https://zertyz.github.io/bot-starter-kit/management/)
 
 This repository collects patterns and boilerplate for building backend Rust bots that receive user messages, process them asynchronously, persist bot state, and send responses back through chat platforms. The current implementation is Telegram-first, using `teloxide`, while the internal contracts are shaped so more messaging platforms can be added later.
 

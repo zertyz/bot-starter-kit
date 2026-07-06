@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
+
 scripts/management/management_tool lint
 scripts/management/test_management_tool
 scripts/management/test_gui_server
+scripts/management/management_report --html "${TMPDIR:-/tmp}/bot-starter-kit-management-report-check"

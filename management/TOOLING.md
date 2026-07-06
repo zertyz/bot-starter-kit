@@ -12,14 +12,24 @@ scripts/ci/enforce_management_rules
 This runs the management linter and the management-tool test suite.
 
 
-## Management Dashboard
+## Management Status
 
 ```bash
 scripts/management/management_status
 scripts/management/management_status --html public/management
 ```
 
-The command prints a project-management status summary and can render a static HTML dashboard. GitHub Pages publishes the dashboard next to Rust docs, coverage, and benchmark reports.
+The command prints a project-management status summary. Its `--html` mode remains available for the older compact dashboard format, but GitHub Pages publishes the GUI-based Management Report below.
+
+
+## Static Management Report
+
+```bash
+scripts/management/management_report
+scripts/management/management_report --html public/management
+```
+
+The command exports an offline static version of the management GUI: `index.html`, `model.json`, reused CSS/JS assets, and generated SVG diagrams. It reads from git-controlled management files at generation time. Refresh and action buttons stay visible in the static report, but they are disabled because Pages cannot run local commands, edit files, commit, tag, or push.
 
 
 ## Local Management GUI
@@ -31,6 +41,8 @@ scripts/management/gui --port 8780
 ```
 
 The GUI runs a localhost-only browser console over the same management files and helper commands. It shows requirements, backlog work, ledgers, diagrams, status metrics, audit signals, tech-debt leads, and workflow forms for planning, state changes, evidence links, releases, branch checks, and ledger entries. Browser actions are allowlisted by the Python server; they do not execute arbitrary shell commands.
+
+The local GUI and static Management Report share the same model builder and frontend assets. Add new management views to both surfaces by extending `scripts/management/gui_server` and `scripts/management/gui_static/` together, then verify with `scripts/management/test_gui_server`.
 
 
 ## Architecture Diagrams

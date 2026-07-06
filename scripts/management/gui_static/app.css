@@ -50,12 +50,28 @@ button:hover {
   background: var(--surface-soft);
 }
 
+button:disabled,
+button.local-only {
+  border-color: var(--line);
+  background: #eef2f6;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 button.primary,
 button[data-action="lint"],
 button[type="submit"] {
   border-color: #1d4ed8;
   background: var(--blue);
   color: #ffffff;
+}
+
+button.primary:disabled,
+button[data-action="lint"]:disabled,
+button[type="submit"]:disabled {
+  border-color: var(--line);
+  background: #eef2f6;
+  color: var(--muted);
 }
 
 input,
@@ -107,6 +123,16 @@ p {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.mode-label {
+  min-height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  padding: 3px 9px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .shell {
@@ -271,6 +297,14 @@ button.danger {
   border-color: var(--red);
   background: var(--red-soft);
   color: var(--red);
+}
+
+button.warn:disabled,
+button.danger:disabled,
+button.local-only {
+  border-color: var(--line);
+  background: #eef2f6;
+  color: var(--muted);
 }
 
 .pill {

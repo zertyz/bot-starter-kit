@@ -1,7 +1,10 @@
 const state = {
   model: null,
   selected: null,
+  staticMode: Boolean(window.MANAGEMENT_STATIC_MODE),
 };
+
+const localOnlyTooltip = "Only available in the local online mode.";
 
 const stateOrder = [
   "Under Planning",
@@ -99,15 +102,34 @@ function rowClassForIssues(items) {
   return "";
 }
 
+function localOnlyMessage(action) {
+  return `${action} is only available in the local online mode.`;
+}
+
+function embeddedModelPayload() {
+  const embedded = $("#management-model");
+  const text = embedded?.textContent?.trim();
+  if (!text) return null;
+  return JSON.parse(text);
+}
+
 async function loadModel() {
-  const response = await fetch("/api/model");
-  if (!response.ok) throw new Error(await response.text());
-  state.model = await response.json();
+  const embedded = state.staticMode ? embeddedModelPayload() : null;
+  if (embedded) {
+    state.model = embedded;
+  } else {
+    const modelUrl = state.staticMode ? (window.MANAGEMENT_STATIC_MODEL_URL || "./model.json") : "/api/model";
+    const response = await fetch(modelUrl);
+    if (!response.ok) throw new Error(await response.text());
+    state.model = await response.json();
+  }
+  state.staticMode = state.staticMode || state.model.surface?.mode === "static";
   render();
 }
 
 function render() {
   const model = state.model;
+  renderMode();
   $("#repo-root").textContent = model.repo_root;
   $("#generated-at").textContent = `Generated ${model.generated_at}`;
   renderMetrics();
@@ -120,6 +142,33 @@ function render() {
   renderTechDebt();
   renderDiagrams();
   renderSelection();
+  applyRuntimeMode();
+}
+
+function renderMode() {
+  const title = window.MANAGEMENT_TITLE || (state.staticMode ? "Management Report" : "Management Console");
+  document.title = title;
+  $("#app-title").textContent = title;
+  const mode = $("#mode-label");
+  mode.textContent = state.staticMode ? "Static offline report" : "Local online mode";
+  mode.title = state.staticMode
+    ? "Generated from git-controlled files. Server-backed refresh and actions are disabled."
+    : "Connected to the local management GUI server.";
+}
+
+function applyRuntimeMode() {
+  const localOnlyControls = [
+    $("#refresh"),
+    ...$all("[data-action]"),
+    ...$all("[data-form-action]"),
+    ...$all('form[data-form] button[type="submit"]'),
+  ].filter(Boolean);
+  for (const control of localOnlyControls) {
+    if (!state.staticMode) continue;
+    control.disabled = true;
+    control.classList.add("local-only");
+    control.title = localOnlyTooltip;
+  }
 }
 
 function renderMetrics() {
@@ -397,6 +446,10 @@ function formAction(form, payload) {
 
 async function runAction(action, payload = {}) {
   const output = $("#command-output");
+  if (state.staticMode) {
+    output.textContent = localOnlyMessage(action);
+    return;
+  }
   output.textContent = `Running ${action}...`;
   const response = await fetch("/api/action", {
     method: "POST",
@@ -458,6 +511,10 @@ function wireEvents() {
     }
     const actionButton = event.target.closest("[data-action]");
     if (actionButton) {
+      if (state.staticMode) {
+        $("#command-output").textContent = localOnlyMessage(actionButton.dataset.action);
+        return;
+      }
       runAction(actionButton.dataset.action, buttonPayload(actionButton));
     }
   });
@@ -465,6 +522,10 @@ function wireEvents() {
   for (const form of $all("[data-form]")) {
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      if (state.staticMode) {
+        $("#command-output").textContent = localOnlyMessage(form.dataset.form);
+        return;
+      }
       const payload = formPayload(form);
       const action = formAction(form, payload);
       if (["release", "branch-tools", "quick-tools"].includes(action)) return;
@@ -474,6 +535,10 @@ function wireEvents() {
 
   for (const button of $all("[data-form-action]")) {
     button.addEventListener("click", () => {
+      if (state.staticMode) {
+        $("#command-output").textContent = localOnlyMessage(button.dataset.formAction);
+        return;
+      }
       const form = button.closest("[data-form]");
       runAction(button.dataset.formAction, formPayload(form));
     });
@@ -481,6 +546,8 @@ function wireEvents() {
 }
 
 wireEvents();
+renderMode();
+applyRuntimeMode();
 loadModel().catch((err) => {
   $("#command-output").textContent = err.stack || String(err);
 });

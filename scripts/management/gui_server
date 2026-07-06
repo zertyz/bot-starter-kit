@@ -8,6 +8,7 @@ import importlib.machinery
 import importlib.util
 import json
 import mimetypes
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -318,16 +319,20 @@ def model_payload(stale_days: int = DEFAULT_STALE_DAYS) -> dict[str, object]:
             "architecture_planned": "/diagrams/architecture-planned.svg",
             "module_dependencies": "/diagrams/module-dependencies.svg",
         },
+        "surface": {
+            "mode": "local",
+            "actions_enabled": True,
+        },
     }
 
 
-def ensure_diagrams() -> None:
+def ensure_diagrams(output_dir: Path = DIAGRAM_DIR) -> None:
     model = tool.load_model()
     real_nodes, real_edges = tool.real_architecture_graph()
     planned_nodes, planned_edges = tool.planned_architecture_graph(model)
     module_nodes, module_edges = tool.module_dependency_graph()
     tool.write_diagram(
-        DIAGRAM_DIR,
+        output_dir,
         "architecture-real.svg",
         "Current Architecture",
         real_nodes,
@@ -335,7 +340,7 @@ def ensure_diagrams() -> None:
         [tool.GraphNode("legend:source", "Current source module", "", "#f6f8fa", "#57606a")],
     )
     tool.write_diagram(
-        DIAGRAM_DIR,
+        output_dir,
         "architecture-planned.svg",
         "Architecture Plan Overlay",
         planned_nodes,
@@ -347,7 +352,7 @@ def ensure_diagrams() -> None:
         ],
     )
     tool.write_diagram(
-        DIAGRAM_DIR,
+        output_dir,
         "module-dependencies.svg",
         "Rust Module Dependencies",
         module_nodes,
@@ -359,6 +364,57 @@ def ensure_diagrams() -> None:
             tool.GraphNode("legend:db", "Persistence", "", "#ede9fe", "#6d28d9"),
         ],
     )
+
+
+def static_script_json(payload: object) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True).replace("</", "<\\/")
+
+
+def static_index_html(payload: dict[str, object]) -> str:
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    index = index.replace("<title>Management Console</title>", "<title>Management Report</title>")
+    index = index.replace("<h1 id=\"app-title\">Management Console</h1>", "<h1 id=\"app-title\">Management Report</h1>")
+    index = index.replace('href="/assets/app.css"', 'href="./assets/app.css"')
+    index = index.replace('src="/assets/app.js"', 'src="./assets/app.js"')
+    static_bootstrap = f"""  <script>
+    window.MANAGEMENT_STATIC_MODE = true;
+    window.MANAGEMENT_STATIC_MODEL_URL = "./model.json";
+    window.MANAGEMENT_TITLE = "Management Report";
+  </script>
+  <script id="management-model" type="application/json">
+{static_script_json(payload)}
+  </script>
+"""
+    return index.replace('  <script src="./assets/app.js"></script>', f"{static_bootstrap}  <script src=\"./assets/app.js\"></script>")
+
+
+def static_report_payload(stale_days: int) -> dict[str, object]:
+    payload = model_payload(stale_days)
+    payload["diagrams"] = {
+        "architecture_real": "./diagrams/architecture-real.svg",
+        "architecture_planned": "./diagrams/architecture-planned.svg",
+        "module_dependencies": "./diagrams/module-dependencies.svg",
+    }
+    payload["surface"] = {
+        "mode": "static",
+        "actions_enabled": False,
+    }
+    return payload
+
+
+def export_management_report(output_dir: Path, stale_days: int = DEFAULT_STALE_DAYS) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    assets_dir = output_dir / "assets"
+    diagrams_dir = output_dir / "diagrams"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    ensure_diagrams(diagrams_dir)
+    payload = static_report_payload(stale_days)
+    shutil.copy2(STATIC_DIR / "app.css", assets_dir / "app.css")
+    shutil.copy2(STATIC_DIR / "app.js", assets_dir / "app.js")
+    (output_dir / "model.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    target = output_dir / "index.html"
+    target.write_text(static_index_html(payload), encoding="utf-8")
+    return target
 
 
 def required(payload: dict[str, object], name: str) -> str:
@@ -726,21 +782,27 @@ def bind_server(host: str, port: int, attempts: int, quiet: bool) -> ThreadingHT
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the local management GUI.")
+    parser = argparse.ArgumentParser(description="Run the local management GUI or export the static Management Report.")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1.")
     parser.add_argument("--port", type=int, default=8765, help="Bind port. Default: 8765.")
     parser.add_argument("--port-attempts", type=int, default=20, help="Try this many consecutive ports before failing.")
     parser.add_argument("--no-browser", action="store_true", help="Do not ask the OS to open a browser.")
     parser.add_argument("--quiet", action="store_true", help="Suppress request logging.")
     parser.add_argument("--check", action="store_true", help="Validate the GUI data path and exit.")
+    parser.add_argument("--html", "--export-report", dest="export_report", help="Write the static Management Report to this directory and exit.")
+    parser.add_argument("--stale-days", type=int, default=DEFAULT_STALE_DAYS, help="Age threshold for stale work. Default: 14.")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
     if args.check:
-        payload = model_payload()
+        payload = model_payload(args.stale_days)
         print(json.dumps({"requirements": payload["counts"]["requirements"], "work_items": payload["counts"]["work_items"]}, sort_keys=True))
+        return 0
+    if args.export_report:
+        target = export_management_report(Path(args.export_report), args.stale_days)
+        print(f"Management Report: {target}")
         return 0
 
     server = bind_server(args.host, args.port, args.port_attempts, args.quiet)

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -73,6 +75,27 @@ class ManagementGuiServerTest(unittest.TestCase):
         result = self.gui.execute_action({"action": "management-status", "payload": {"stale_days": "14"}})
         self.assertEqual(0, result["returncode"])
         self.assertIn("Management Status", result["stdout"])
+
+    def test_export_management_report_writes_static_gui(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "management"
+            target = self.gui.export_management_report(output_dir, stale_days=0)
+            self.assertEqual(output_dir / "index.html", target)
+            index = target.read_text(encoding="utf-8")
+            model = json.loads((output_dir / "model.json").read_text(encoding="utf-8"))
+
+            self.assertIn("Management Report", index)
+            self.assertIn("MANAGEMENT_STATIC_MODE", index)
+            self.assertIn('id="management-model"', index)
+            self.assertIn('src="./assets/app.js"', index)
+            self.assertEqual("static", model["surface"]["mode"])
+            self.assertFalse(model["surface"]["actions_enabled"])
+            self.assertEqual("./diagrams/architecture-real.svg", model["diagrams"]["architecture_real"])
+            self.assertTrue((output_dir / "assets" / "app.css").is_file())
+            self.assertTrue((output_dir / "assets" / "app.js").is_file())
+            self.assertTrue((output_dir / "diagrams" / "architecture-real.svg").is_file())
+            self.assertTrue((output_dir / "diagrams" / "architecture-planned.svg").is_file())
+            self.assertTrue((output_dir / "diagrams" / "module-dependencies.svg").is_file())
 
 
 if __name__ == "__main__":
