@@ -1,47 +1,60 @@
 //! WhatsApp Business Cloud API demoscene.
-//! +5521991234899
-//! 1617456909739506
-//! a3309c8e1b1dc2e48b3a88288d9c3435
 //!
-//! token_de_app: 1617456909739506|hAMXJcW5KY5eBwxOsYITZxoCass
-//! token_de_usuário: EAAWZCEYiLZAfIBRZBZAJrLbVPe6BUixxZAgrvbpB69hlNY7Holk9yFzQHh4im8bqn3f5K1dfmZB64nV76jnEFeqR2g8TwH55i7JL4HUhplZCztUl80Uzfd8csvXEOdCmL2YXvaUVpDfVjQMZBL7Qm3Y9ds4czmTRjN244E0c9ZBeIDPuObwM7yGg2s0Yf01xNmgx3spjo37fjoMfZCVZA46EJ3gx56ZCOp2kQI0pt7OOM5NGl7esIsNj7k1d2sdMG1G01snfqrZBASFjHWP1fUiJKmWhn9QZDZD
+//! This example is meant for the WhatsApp Cloud API test phase: create a Meta
+//! app, use Meta's test phone number or your onboarded sender number, add a test
+//! recipient, and exchange real messages. It is not a production bot template.
 //!
-//! From Use Cases, 1: experiment
-//! Test phone number: +1 (555) 620-2558
-//! Phone Number ID: 1190399224161359
-//! Whatsapp Business Account ID: 2399533690534984
-//! Access Token: EAAWZCEYiLZAfIBR1ytc4vutU3FTPHDkTkkWyiiaUPicXkcVVZBPUOPX83hlemzSC0RSha3mDxKHoCc4URJO4Xruc2hsQs0wtGUMutRNNNZBRR1tnupwGtf80QmHUUAk0i3GfgVDBADvpMfTb5nFLZCx3O48e0lk15Sz2SHrvfuM65v921J7qICirtju5cpSc54AQWXVgg5QhHFcbQ2eZAiFB5Cgp1UjXFktdd14RgqQaLMy23td3aoIBNoCTEmiRoQaixjDGNB69Nc4F8lAxD7ChUZD
+//! Do not paste tokens, app secrets, phone numbers, or real account IDs in this
+//! source file. Put test values in your shell environment and rotate them if
+//! they were ever committed, shared, or pasted into source.
 //!
-//! Meta setup:
+//! Meta setup map:
 //!
-//! 1. Create or open a Meta app with the WhatsApp product:
-//!    https://developers.facebook.com/docs/whatsapp/cloud-api/get-started
-//! 2. In the WhatsApp product, collect the temporary or system-user access token,
-//!    the Phone Number ID, and the App ID/App Secret.
-//! 3. Add your test recipient while using the Meta test number, or use a real
-//!    approved business number when you leave development mode.
-//! 4. For webhook modes, expose this example through a public HTTPS URL and use
-//!    that exact URL in `WHATSAPP_WEBHOOK_PUBLIC_URL`.
+//! 1. Go to Meta for Developers -> My Apps -> your app -> WhatsApp -> API setup.
+//! 2. Copy "Temporary access token" into `WHATSAPP_ACCESS_TOKEN`. A system-user
+//!    token with WhatsApp permissions can replace it later. The app token is not
+//!    the token used by this example to send messages.
+//! 3. Copy the sender's "Phone number ID" into `WHATSAPP_PHONE_NUMBER_ID`.
+//!    This is not the display phone number. "WhatsApp Business Account ID" is
+//!    shown in the same area but is not needed by this example.
+//! 4. Add and verify your own phone number in the recipient/"To" test area, then
+//!    put it in `WHATSAPP_RECIPIENT_PHONE_NUMBER` using E.164 format such as
+//!    `+15551234567`.
+//! 5. Go to App settings -> Basic. Copy "App ID" into `WHATSAPP_APP_ID` and
+//!    "App secret" into `WHATSAPP_APP_SECRET`.
+//! 6. Go to WhatsApp -> Configuration. The "Callback URL" is the same value as
+//!    `WHATSAPP_WEBHOOK_PUBLIC_URL`. The "Verify token" is a random secret you
+//!    choose yourself; use the same value in Meta and in
+//!    `WHATSAPP_WEBHOOK_VERIFY_TOKEN`.
 //!
 //! Required environment for outbound modes:
 //!
 //! - `WHATSAPP_ACCESS_TOKEN`
-//! - `WHATSAPP_BUSINESS_PHONE_NUMBER_ID`
-//! - `WHATSAPP_TO`
+//! - `WHATSAPP_PHONE_NUMBER_ID`
+//! - `WHATSAPP_RECIPIENT_PHONE_NUMBER`
 //!
-//! Required environment for webhook modes:
+//! Required environment for webhook modes that receive messages from Meta:
 //!
 //! - `WHATSAPP_ACCESS_TOKEN`
+//! - `WHATSAPP_APP_SECRET`
+//! - `WHATSAPP_WEBHOOK_PUBLIC_URL`
 //! - `WHATSAPP_WEBHOOK_VERIFY_TOKEN`
-//! - `WHATSAPP_APP_SECRET`, optional for local trials but required to validate
-//!   Meta signatures.
 //! - `WHATSAPP_WEBHOOK_LISTEN_ADDR`, optional. Defaults to `127.0.0.1:8080`.
-//! - `WHATSAPP_WEBHOOK_ROUTE`, optional. Defaults to `/whatsapp`.
 //!
 //! Required environment for webhook registration modes:
 //!
 //! - `WHATSAPP_APP_ID`
-//! - `WHATSAPP_WEBHOOK_PUBLIC_URL`
+//!
+//! HTTPS and local testing:
+//!
+//! Meta verifies and delivers webhooks through the public callback URL, and that
+//! URL must be HTTPS. The `whatsapp-business-rs` managed server used here binds a
+//! local plain HTTP listener. During test development, put a public HTTPS tunnel
+//! or reverse proxy in front of it and set `WHATSAPP_WEBHOOK_PUBLIC_URL` to that
+//! public URL. The example derives the local route from the public URL path, so
+//! the operator only writes the webhook path once. Do not use a self-signed
+//! certificate for the Meta-facing URL; use a tunnel/proxy or certificate trusted
+//! by public clients.
 //!
 //! Run:
 //!
@@ -57,7 +70,8 @@
 //!    The compiler cannot tell an app token, system-user token, or phone-number
 //!    token apart.
 //! 2. `ServerBuilder::verify_payload` is opt-in. Without it, webhook POSTs are
-//!    easier to spoof in non-local environments.
+//!    easier to spoof in non-local environments. This example requires the app
+//!    secret in webhook modes and always enables payload verification.
 //! 3. `Handler` methods return `()`, so reply failures cannot be bubbled to the
 //!    server loop. This example logs every failed handler-side API call.
 //! 4. `ClientBuilder::api_version` requires `&'static str`, so runtime API
@@ -67,6 +81,7 @@
 
 use anyhow::{Result, anyhow};
 use std::{env, net::SocketAddr, time::Duration};
+use url::Url;
 use whatsapp_business_rs::{
     Client, Fields, Server, WebhookHandler,
     app::SubscriptionField,
@@ -86,14 +101,13 @@ enum Mode {
 
 struct Config {
     access_token: String,
-    business_phone_number_id: Option<String>,
+    phone_number_id: Option<String>,
     recipient_phone_number: Option<String>,
     app_id: Option<String>,
     app_secret: Option<String>,
     webhook_verify_token: Option<String>,
-    webhook_public_url: Option<String>,
+    webhook_public_url: Option<Url>,
     webhook_listen_addr: SocketAddr,
-    webhook_route: String,
     media_path: Option<String>,
 }
 
@@ -190,35 +204,46 @@ impl Config {
 
         Ok(Self {
             access_token: env_required("WHATSAPP_ACCESS_TOKEN")?,
-            business_phone_number_id: env_optional("WHATSAPP_BUSINESS_PHONE_NUMBER_ID"),
-            recipient_phone_number: env_optional("WHATSAPP_TO"),
+            phone_number_id: env_optional("WHATSAPP_PHONE_NUMBER_ID"),
+            recipient_phone_number: env_optional("WHATSAPP_RECIPIENT_PHONE_NUMBER"),
             app_id: env_optional("WHATSAPP_APP_ID"),
             app_secret: env_optional("WHATSAPP_APP_SECRET"),
             webhook_verify_token: env_optional("WHATSAPP_WEBHOOK_VERIFY_TOKEN"),
-            webhook_public_url: env_optional("WHATSAPP_WEBHOOK_PUBLIC_URL"),
+            webhook_public_url: parse_public_webhook_url("WHATSAPP_WEBHOOK_PUBLIC_URL")?,
             webhook_listen_addr: listen_addr,
-            webhook_route: env_optional("WHATSAPP_WEBHOOK_ROUTE").unwrap_or_else(|| "/whatsapp".to_owned()),
             media_path: env_optional("WHATSAPP_DEMO_MEDIA_PATH"),
         })
     }
 
     fn outbound(&self) -> Result<OutboundConfig<'_>> {
         Ok(OutboundConfig {
-            business_phone_number_id: self
-                .business_phone_number_id
+            phone_number_id: self
+                .phone_number_id
                 .as_deref()
-                .ok_or_else(|| anyhow!("WHATSAPP_BUSINESS_PHONE_NUMBER_ID is required for outbound demo modes"))?,
+                .ok_or_else(|| anyhow!("WHATSAPP_PHONE_NUMBER_ID is required for outbound demo modes"))?,
             recipient_phone_number: self
                 .recipient_phone_number
                 .as_deref()
-                .ok_or_else(|| anyhow!("WHATSAPP_TO is required for outbound demo modes"))?,
+                .ok_or_else(|| anyhow!("WHATSAPP_RECIPIENT_PHONE_NUMBER is required for outbound demo modes"))?,
         })
+    }
+
+    fn app_secret(&self) -> Result<&str> {
+        self.app_secret
+            .as_deref()
+            .ok_or_else(|| anyhow!("WHATSAPP_APP_SECRET is required for webhook modes so payload signatures can be verified"))
     }
 
     fn webhook_verify_token(&self) -> Result<&str> {
         self.webhook_verify_token
             .as_deref()
             .ok_or_else(|| anyhow!("WHATSAPP_WEBHOOK_VERIFY_TOKEN is required for webhook modes"))
+    }
+
+    fn webhook_public_url(&self) -> Result<&Url> {
+        self.webhook_public_url
+            .as_ref()
+            .ok_or_else(|| anyhow!("WHATSAPP_WEBHOOK_PUBLIC_URL is required for webhook modes"))
     }
 
     fn webhook_registration(&self) -> Result<WebhookRegistrationConfig<'_>> {
@@ -228,28 +253,32 @@ impl Config {
                 .as_deref()
                 .ok_or_else(|| anyhow!("WHATSAPP_APP_ID is required for webhook registration"))?,
             verify_token: self.webhook_verify_token()?,
-            public_url: self
-                .webhook_public_url
-                .as_deref()
-                .ok_or_else(|| anyhow!("WHATSAPP_WEBHOOK_PUBLIC_URL is required for webhook registration"))?,
+            public_url: self.webhook_public_url()?,
         })
+    }
+
+    fn webhook_route(&self) -> Result<String> {
+        Ok(self
+            .webhook_public_url()?
+            .path()
+            .to_owned())
     }
 }
 
 struct OutboundConfig<'a> {
-    business_phone_number_id: &'a str,
+    phone_number_id: &'a str,
     recipient_phone_number: &'a str,
 }
 
 struct WebhookRegistrationConfig<'a> {
     app_id: &'a str,
     verify_token: &'a str,
-    public_url: &'a str,
+    public_url: &'a Url,
 }
 
 async fn send_demos(config: &Config, client: &Client) -> Result<()> {
     let outbound = config.outbound()?;
-    let sender = client.message(outbound.business_phone_number_id);
+    let sender = client.message(outbound.phone_number_id);
 
     let text = sender
         .send(
@@ -309,12 +338,12 @@ async fn send_batch_demo(config: &Config, client: &Client) -> Result<()> {
         .batch()
         .include(
             client
-                .message(outbound.business_phone_number_id)
+                .message(outbound.phone_number_id)
                 .send(outbound.recipient_phone_number, Draft::text("OgreRobot WhatsApp Demoscene batch: first message.")),
         )
         .include(
             client
-                .message(outbound.business_phone_number_id)
+                .message(outbound.phone_number_id)
                 .send(outbound.recipient_phone_number, Draft::text("OgreRobot WhatsApp Demoscene batch: second message.")),
         )
         .execute()
@@ -339,6 +368,7 @@ async fn register_webhook(config: &Config, client: &Client) -> Result<()> {
                 .to_owned(),
             registration
                 .public_url
+                .as_str()
                 .to_owned(),
         ))
         .events(
@@ -357,22 +387,19 @@ async fn serve_webhook(config: &Config, client: Client, register: bool) -> Resul
     let verify_token = config
         .webhook_verify_token()?
         .to_owned();
-    let mut builder = Server::builder()
+    let app_secret = config
+        .app_secret()?
+        .to_owned();
+    let public_url = config.webhook_public_url()?;
+    let route = config.webhook_route()?;
+    let builder = Server::builder()
         .endpoint(config.webhook_listen_addr)
-        .route(
-            config
-                .webhook_route
-                .clone(),
-        )
-        .verify_token(verify_token);
+        .route(route.clone())
+        .verify_token(verify_token)
+        .verify_payload(app_secret);
 
-    if let Some(app_secret) = &config.app_secret {
-        builder = builder.verify_payload(app_secret);
-    } else {
-        eprintln!("WHATSAPP_APP_SECRET is not set; inbound webhook payload signatures will not be validated.");
-    }
-
-    println!("serving WhatsApp webhook on http://{}{}", config.webhook_listen_addr, config.webhook_route);
+    println!("serving local WhatsApp webhook on http://{}{}", config.webhook_listen_addr, route);
+    println!("expecting Meta to call public HTTPS URL {public_url}");
 
     let serve = builder
         .build()
@@ -390,6 +417,7 @@ async fn serve_webhook(config: &Config, client: Client, register: bool) -> Resul
                             .to_owned(),
                         registration
                             .public_url
+                            .as_str()
                             .to_owned(),
                     ))
                     .events(Fields::new().with(SubscriptionField::Messages)),
@@ -545,4 +573,32 @@ fn env_optional(name: &str) -> Option<String> {
                 .to_owned()
         })
         .filter(|value| !value.is_empty())
+}
+
+fn parse_public_webhook_url(name: &str) -> Result<Option<Url>> {
+    let Some(raw_url) = env_optional(name) else {
+        return Ok(None);
+    };
+    let url = Url::parse(&raw_url).map_err(|err| anyhow!("{name} must be a full HTTPS URL such as https://example.ngrok-free.app/whatsapp: {err}"))?;
+
+    if url.scheme() != "https" {
+        return Err(anyhow!("{name} must use HTTPS because Meta verifies and delivers webhooks through HTTPS callback URLs"));
+    }
+    if url
+        .host_str()
+        .is_none()
+    {
+        return Err(anyhow!("{name} must include a public host name"));
+    }
+    if url
+        .query()
+        .is_some()
+        || url
+            .fragment()
+            .is_some()
+    {
+        return Err(anyhow!("{name} must not include query parameters or a fragment; use only the path as the webhook route"));
+    }
+
+    Ok(Some(url))
 }
