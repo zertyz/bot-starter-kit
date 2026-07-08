@@ -92,6 +92,16 @@
 //! endpoint, registers the callback URL, then stops. A standalone registration
 //! request without a reachable webhook server fails with Meta error 2200.
 //!
+//! Runtime diagnostics:
+//!
+//! - `WEBHOOK HTTP <- ...` means a request reached this process. If no such
+//!   line appears after sending a WhatsApp message to the sender number, Meta
+//!   has not delivered a webhook to this server.
+//! - `WEBHOOK HTTP -> ... status=401|400|500` means the request reached this
+//!   process but was rejected before it could become a parsed incoming message.
+//! - `MO ...` means the SDK parsed an incoming message and the example attempted
+//!   to reply.
+//!
 //! SDK issues found while building this example:
 //!
 //! 1. `whatsapp-business-rs` keeps token-scope correctness as a runtime concern.
@@ -112,7 +122,7 @@ use anyhow::{Result, anyhow};
 use axum::{
     Router,
     extract::{Query, Request},
-    http::StatusCode,
+    http::{StatusCode, header},
     routing::get,
 };
 use rustls::{
@@ -139,7 +149,7 @@ use whatsapp_business_rs::{
     Client, Fields, WebhookHandler,
     app::SubscriptionField,
     message::{Content, Draft, Media, Message, MessageCreate},
-    server::{EventContext, IncomingMessage, MessageUpdate, WabaEvent},
+    server::{ErrorContext, EventContext, IncomingMessage, MessageUpdate, WabaEvent},
     webhook_service::WebhookService,
 };
 
@@ -218,6 +228,10 @@ impl WebhookHandler for WhatsAppDemosceneHandler {
 
     async fn handle_waba_event(&self, _ctx: EventContext, waba_event: WabaEvent) {
         println!("WABA event: {waba_event:?}");
+    }
+
+    async fn handle_error(&self, _ctx: ErrorContext, error: Box<dyn std::error::Error + Send>) {
+        eprintln!("WhatsApp demoscene: webhook processing error: {error}");
     }
 }
 
@@ -570,31 +584,25 @@ async fn serve_webhook(config: &Config, client: Client, app_client: Option<Clien
         .verify_token(verify_token)
         .verify_payload(app_secret)
         .build(WhatsAppDemosceneHandler, client.clone());
-    let app = Router::new().route(
-        &route,
-        get({
-            let service = service.clone();
-            move |req: Request| {
+    let app = Router::new()
+        .route(
+            &route,
+            get({
                 let service = service.clone();
-                async move {
-                    service
-                        .handle(req)
-                        .await
+                move |req: Request| {
+                    let service = service.clone();
+                    async move { handle_logged_webhook(service, req).await }
                 }
-            }
-        })
-        .post({
-            let service = service.clone();
-            move |req: Request| {
+            })
+            .post({
                 let service = service.clone();
-                async move {
-                    service
-                        .handle(req)
-                        .await
+                move |req: Request| {
+                    let service = service.clone();
+                    async move { handle_logged_webhook(service, req).await }
                 }
-            }
-        }),
-    );
+            }),
+        )
+        .fallback(handle_unmatched_webhook_route);
 
     println!("serving WhatsApp HTTPS webhook on {local_addr}{route}");
     println!("expecting Meta to call public HTTPS URL {public_url}");
@@ -641,6 +649,49 @@ async fn serve_webhook(config: &Config, client: Client, app_client: Option<Clien
     server_task
         .await
         .map_err(|err| anyhow!("WhatsApp demoscene: HTTPS webhook task failed to join: {err}"))?
+}
+
+async fn handle_logged_webhook(service: WebhookService<WhatsAppDemosceneHandler>, req: Request) -> axum::response::Response {
+    let method = req
+        .method()
+        .clone();
+    let path = req
+        .uri()
+        .path()
+        .to_owned();
+    let content_length = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| {
+            value
+                .to_str()
+                .ok()
+        })
+        .unwrap_or("unknown")
+        .to_owned();
+    let signature_present = req
+        .headers()
+        .contains_key("x-hub-signature-256");
+
+    println!("WEBHOOK HTTP <- method={method} path={path} content_length={content_length} x_hub_signature_256_present={signature_present}");
+    let response = service
+        .handle(req)
+        .await;
+    println!("WEBHOOK HTTP -> method={method} path={path} status={}", response.status());
+    response
+}
+
+async fn handle_unmatched_webhook_route(req: Request) -> (StatusCode, &'static str) {
+    let method = req
+        .method()
+        .clone();
+    let path = req
+        .uri()
+        .path()
+        .to_owned();
+
+    println!("WEBHOOK HTTP <- method={method} path={path} route=unmatched");
+    (StatusCode::NOT_FOUND, "No WhatsApp webhook route matches this path")
 }
 
 async fn wait_for_webhook_listener() {
