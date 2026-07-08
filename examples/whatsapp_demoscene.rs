@@ -13,7 +13,8 @@
 //! 1. Go to Meta for Developers -> My Apps -> your app -> WhatsApp -> API setup.
 //! 2. Copy "Temporary access token" into `WHATSAPP_ACCESS_TOKEN`. A system-user
 //!    token with WhatsApp permissions can replace it later. The app token is not
-//!    the token used by this example to send messages.
+//!    the token used by this example to send messages, and this example derives
+//!    it from `WHATSAPP_APP_ID` and `WHATSAPP_APP_SECRET` for webhook registration.
 //! 3. Copy the sender's "Phone number ID" into `WHATSAPP_PHONE_NUMBER_ID`.
 //!    This is not the display phone number. "WhatsApp Business Account ID" is
 //!    shown in the same area but is not needed by this example.
@@ -39,22 +40,43 @@
 //! - `WHATSAPP_APP_SECRET`
 //! - `WHATSAPP_WEBHOOK_PUBLIC_URL`
 //! - `WHATSAPP_WEBHOOK_VERIFY_TOKEN`
-//! - `WHATSAPP_WEBHOOK_LISTEN_ADDR`, optional. Defaults to `127.0.0.1:8080`.
+//! - `WHATSAPP_WEBHOOK_CERTIFICATE_FILE`
+//! - `WHATSAPP_WEBHOOK_PRIVATE_KEY_FILE`
 //!
 //! Required environment for webhook registration modes:
 //!
 //! - `WHATSAPP_APP_ID`
+//! - `WHATSAPP_APP_SECRET`
+//! - `WHATSAPP_WEBHOOK_PUBLIC_URL`
+//! - `WHATSAPP_WEBHOOK_VERIFY_TOKEN`
+//! - `WHATSAPP_WEBHOOK_CERTIFICATE_FILE`
+//! - `WHATSAPP_WEBHOOK_PRIVATE_KEY_FILE`
 //!
 //! HTTPS and local testing:
 //!
 //! Meta verifies and delivers webhooks through the public callback URL, and that
-//! URL must be HTTPS. The `whatsapp-business-rs` managed server used here binds a
-//! local plain HTTP listener. During test development, put a public HTTPS tunnel
-//! or reverse proxy in front of it and set `WHATSAPP_WEBHOOK_PUBLIC_URL` to that
-//! public URL. The example derives the local route from the public URL path, so
-//! the operator only writes the webhook path once. Do not use a self-signed
-//! certificate for the Meta-facing URL; use a tunnel/proxy or certificate trusted
-//! by public clients.
+//! URL must be HTTPS. This example terminates HTTPS itself using the certificate
+//! and private key files above. It binds `0.0.0.0` on the port from
+//! `WHATSAPP_WEBHOOK_PUBLIC_URL`; if the URL has no explicit port, it binds
+//! `0.0.0.0:443`. The example derives the local route from the public URL path,
+//! so the operator only writes the webhook path once. Use a certificate chain
+//! trusted by public clients for the Meta-facing URL. A self-signed certificate
+//! is useful for local `curl` checks, not for Meta callback verification.
+//!
+//! Certificate files:
+//!
+//! For Meta webhook registration, use a public DNS name and a publicly trusted
+//! certificate. Use the CachyOS' package `lego` to create one:
+//!
+//! Example:
+//!
+//! lego run --path /operations/your_bot/lego --server letsencrypt --email 'admin@your-domain.com' --domains 'bot.your-domain.com' --domains 'whatsapp.bot.your-domain.com' --domains 'telegram.bot.your-domain.com' --cert.name 'bot.your-domain.com' --accept-tos --http --http.address ':80' --key-type RSA2048 --deploy-hook your-script-to-restart-the-service
+//! (the above script must be run periodically before the 90 days expiry).
+//!
+//! Then, you'll be able to configure:
+//!
+//! - `WHATSAPP_WEBHOOK_CERTIFICATE_FILE=/operations/your_bot/lego/certificates/XXXX.crt`
+//! - `WHATSAPP_WEBHOOK_PRIVATE_KEY_FILE=/operations/your_bot/lego/certificates/XXXX.key`
 //!
 //! Run:
 //!
@@ -64,14 +86,21 @@
 //! - `cargo run --example whatsapp_demoscene -- register-webhook`
 //! - `cargo run --example whatsapp_demoscene -- serve-and-register`
 //!
+//! Meta verifies the callback URL while registration is running. Use
+//! `serve-and-register` for the full bot loop. Use `register-webhook` only when
+//! you want to configure Meta and exit; it starts a temporary HTTPS verification
+//! endpoint, registers the callback URL, then stops. A standalone registration
+//! request without a reachable webhook server fails with Meta error 2200.
+//!
 //! SDK issues found while building this example:
 //!
 //! 1. `whatsapp-business-rs` keeps token-scope correctness as a runtime concern.
 //!    The compiler cannot tell an app token, system-user token, or phone-number
 //!    token apart.
-//! 2. `ServerBuilder::verify_payload` is opt-in. Without it, webhook POSTs are
-//!    easier to spoof in non-local environments. This example requires the app
-//!    secret in webhook modes and always enables payload verification.
+//! 2. Webhook payload verification is opt-in in the SDK builders. Without it,
+//!    webhook POSTs are easier to spoof in non-local environments. This example
+//!    requires the app secret in webhook modes and always enables payload
+//!    verification.
 //! 3. `Handler` methods return `()`, so reply failures cannot be bubbled to the
 //!    server loop. This example logs every failed handler-side API call.
 //! 4. `ClientBuilder::api_version` requires `&'static str`, so runtime API
@@ -80,13 +109,38 @@
 //!    source shape; this example uses `IncomingMessage::message()`.
 
 use anyhow::{Result, anyhow};
-use std::{env, net::SocketAddr, time::Duration};
+use axum::{
+    Router,
+    extract::{Query, Request},
+    http::StatusCode,
+    routing::get,
+};
+use rustls::{
+    ServerConfig,
+    crypto::ring,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+};
+use serde::Deserialize;
+use std::{
+    env,
+    future::{self, Future},
+    io,
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::oneshot,
+};
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use url::Url;
 use whatsapp_business_rs::{
-    Client, Fields, Server, WebhookHandler,
+    Client, Fields, WebhookHandler,
     app::SubscriptionField,
     message::{Content, Draft, Media, Message, MessageCreate},
     server::{EventContext, IncomingMessage, MessageUpdate, WabaEvent},
+    webhook_service::WebhookService,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,14 +154,15 @@ enum Mode {
 }
 
 struct Config {
-    access_token: String,
+    access_token: Option<String>,
     phone_number_id: Option<String>,
     recipient_phone_number: Option<String>,
     app_id: Option<String>,
     app_secret: Option<String>,
     webhook_verify_token: Option<String>,
     webhook_public_url: Option<Url>,
-    webhook_listen_addr: SocketAddr,
+    webhook_certificate_file: Option<String>,
+    webhook_private_key_file: Option<String>,
     media_path: Option<String>,
 }
 
@@ -175,42 +230,44 @@ async fn main() -> Result<()> {
     }
 
     let config = Config::from_env()?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(20))
-        .connect(
-            config
-                .access_token
-                .clone(),
-        )
-        .await
-        .map_err(|err| anyhow!("WhatsApp demoscene: building WhatsApp client failed: {err}"))?;
-
     match mode {
-        Mode::Send => send_demos(&config, &client).await,
-        Mode::SendBatch => send_batch_demo(&config, &client).await,
-        Mode::Serve => serve_webhook(&config, client, false).await,
-        Mode::RegisterWebhook => register_webhook(&config, &client).await,
-        Mode::ServeAndRegister => serve_webhook(&config, client, true).await,
+        Mode::Send => {
+            let client = whatsapp_client(&config).await?;
+            send_demos(&config, &client).await
+        }
+        Mode::SendBatch => {
+            let client = whatsapp_client(&config).await?;
+            send_batch_demo(&config, &client).await
+        }
+        Mode::Serve => {
+            let client = whatsapp_client(&config).await?;
+            serve_webhook(&config, client, None).await
+        }
+        Mode::RegisterWebhook => {
+            let app_client = app_client(&config).await?;
+            register_webhook_with_temporary_server(&config, app_client).await
+        }
+        Mode::ServeAndRegister => {
+            let client = whatsapp_client(&config).await?;
+            let app_client = app_client(&config).await?;
+            serve_webhook(&config, client, Some(app_client)).await
+        }
         Mode::Help => Ok(()),
     }
 }
 
 impl Config {
     fn from_env() -> Result<Self> {
-        let listen_addr = env_optional("WHATSAPP_WEBHOOK_LISTEN_ADDR")
-            .unwrap_or_else(|| "127.0.0.1:8080".to_owned())
-            .parse::<SocketAddr>()
-            .map_err(|err| anyhow!("WHATSAPP_WEBHOOK_LISTEN_ADDR must be a socket address such as 127.0.0.1:8080: {err}"))?;
-
         Ok(Self {
-            access_token: env_required("WHATSAPP_ACCESS_TOKEN")?,
+            access_token: env_optional("WHATSAPP_ACCESS_TOKEN"),
             phone_number_id: env_optional("WHATSAPP_PHONE_NUMBER_ID"),
             recipient_phone_number: env_optional("WHATSAPP_RECIPIENT_PHONE_NUMBER"),
             app_id: env_optional("WHATSAPP_APP_ID"),
             app_secret: env_optional("WHATSAPP_APP_SECRET"),
             webhook_verify_token: env_optional("WHATSAPP_WEBHOOK_VERIFY_TOKEN"),
             webhook_public_url: parse_public_webhook_url("WHATSAPP_WEBHOOK_PUBLIC_URL")?,
-            webhook_listen_addr: listen_addr,
+            webhook_certificate_file: env_optional("WHATSAPP_WEBHOOK_CERTIFICATE_FILE"),
+            webhook_private_key_file: env_optional("WHATSAPP_WEBHOOK_PRIVATE_KEY_FILE"),
             media_path: env_optional("WHATSAPP_DEMO_MEDIA_PATH"),
         })
     }
@@ -228,10 +285,16 @@ impl Config {
         })
     }
 
+    fn access_token(&self) -> Result<&str> {
+        self.access_token
+            .as_deref()
+            .ok_or_else(|| anyhow!("WHATSAPP_ACCESS_TOKEN is required for send, send-batch, serve, and serve-and-register modes"))
+    }
+
     fn app_secret(&self) -> Result<&str> {
         self.app_secret
             .as_deref()
-            .ok_or_else(|| anyhow!("WHATSAPP_APP_SECRET is required for webhook modes so payload signatures can be verified"))
+            .ok_or_else(|| anyhow!("WHATSAPP_APP_SECRET is required for webhook modes and app-level webhook registration"))
     }
 
     fn webhook_verify_token(&self) -> Result<&str> {
@@ -244,6 +307,18 @@ impl Config {
         self.webhook_public_url
             .as_ref()
             .ok_or_else(|| anyhow!("WHATSAPP_WEBHOOK_PUBLIC_URL is required for webhook modes"))
+    }
+
+    fn webhook_certificate_file(&self) -> Result<&str> {
+        self.webhook_certificate_file
+            .as_deref()
+            .ok_or_else(|| anyhow!("WHATSAPP_WEBHOOK_CERTIFICATE_FILE is required for webhook modes"))
+    }
+
+    fn webhook_private_key_file(&self) -> Result<&str> {
+        self.webhook_private_key_file
+            .as_deref()
+            .ok_or_else(|| anyhow!("WHATSAPP_WEBHOOK_PRIVATE_KEY_FILE is required for webhook modes"))
     }
 
     fn webhook_registration(&self) -> Result<WebhookRegistrationConfig<'_>> {
@@ -263,6 +338,14 @@ impl Config {
             .path()
             .to_owned())
     }
+
+    fn webhook_bind_addr(&self) -> Result<SocketAddr> {
+        let public_url = self.webhook_public_url()?;
+        let port = public_url
+            .port_or_known_default()
+            .ok_or_else(|| anyhow!("WHATSAPP_WEBHOOK_PUBLIC_URL must include an HTTPS port"))?;
+        Ok(([0, 0, 0, 0], port).into())
+    }
 }
 
 struct OutboundConfig<'a> {
@@ -276,6 +359,44 @@ struct WebhookRegistrationConfig<'a> {
     public_url: &'a Url,
 }
 
+#[derive(Debug, Deserialize)]
+struct WebhookVerificationQuery {
+    #[serde(rename = "hub.mode")]
+    mode: Option<String>,
+    #[serde(rename = "hub.verify_token")]
+    verify_token: Option<String>,
+    #[serde(rename = "hub.challenge")]
+    challenge: Option<String>,
+}
+
+async fn whatsapp_client(config: &Config) -> Result<Client> {
+    Client::builder()
+        .timeout(Duration::from_secs(20))
+        .connect(
+            config
+                .access_token()?
+                .to_owned(),
+        )
+        .await
+        .map_err(|err| anyhow!("WhatsApp demoscene: building WhatsApp send/reply client failed: {err}"))
+}
+
+async fn app_client(config: &Config) -> Result<Client> {
+    let registration = config.webhook_registration()?;
+    Client::builder()
+        .timeout(Duration::from_secs(20))
+        .connect((
+            registration
+                .app_id
+                .to_owned(),
+            config
+                .app_secret()?
+                .to_owned(),
+        ))
+        .await
+        .map_err(|err| anyhow!("WhatsApp demoscene: building Meta app client failed: {err}"))
+}
+
 async fn send_demos(config: &Config, client: &Client) -> Result<()> {
     let outbound = config.outbound()?;
     let sender = client.message(outbound.phone_number_id);
@@ -283,7 +404,7 @@ async fn send_demos(config: &Config, client: &Client) -> Result<()> {
     let text = sender
         .send(
             outbound.recipient_phone_number,
-            Draft::text("OgreRobot WhatsApp Demoscene: text message with link preview disabled.")
+            Draft::text("OgreRobot Demoscene: text message with no link preview")
                 .preview_url(false)
                 .with_biz_opaque_callback_data("whatsapp-demoscene:text"),
         )
@@ -383,7 +504,52 @@ async fn register_webhook(config: &Config, client: &Client) -> Result<()> {
     Ok(())
 }
 
-async fn serve_webhook(config: &Config, client: Client, register: bool) -> Result<()> {
+async fn register_webhook_with_temporary_server(config: &Config, app_client: Client) -> Result<()> {
+    let verify_token = config
+        .webhook_verify_token()?
+        .to_owned();
+    let public_url = config.webhook_public_url()?;
+    let route = config.webhook_route()?;
+    let bind_addr = config.webhook_bind_addr()?;
+    let tls_config = load_tls_server_config(config.webhook_certificate_file()?, config.webhook_private_key_file()?)?;
+    let tcp_listener = TcpListener::bind(bind_addr)
+        .await
+        .map_err(|err| anyhow!("WhatsApp demoscene: couldn't bind temporary HTTPS webhook verification listener to {bind_addr}: {err}"))?;
+    let local_addr = tcp_listener
+        .local_addr()
+        .map_err(|err| anyhow!("WhatsApp demoscene: couldn't read temporary HTTPS webhook verification listener address: {err}"))?;
+    let app = Router::new().route(
+        &route,
+        get({
+            move |Query(query): Query<WebhookVerificationQuery>| {
+                let verify_token = verify_token.clone();
+                async move { verify_webhook_challenge(&verify_token, query) }
+            }
+        }),
+    );
+
+    println!("serving temporary WhatsApp webhook verifier on {local_addr}{route}");
+    println!("asking Meta to verify public HTTPS URL {public_url}");
+
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(run_tls_webhook_server(tcp_listener, tls_config, app, async {
+        _ = shutdown_receiver.await;
+    }));
+    wait_for_webhook_listener().await;
+
+    let registration_result = register_webhook(config, &app_client).await;
+    _ = shutdown_sender.send(());
+    if let Err(shutdown_err) = server_task
+        .await
+        .map_err(|join_err| anyhow!("WhatsApp demoscene: temporary HTTPS verifier task failed to join: {join_err}"))
+        .and_then(|server_result| server_result)
+    {
+        eprintln!("WhatsApp demoscene: temporary HTTPS verifier shutdown failed: {shutdown_err}");
+    }
+    registration_result
+}
+
+async fn serve_webhook(config: &Config, client: Client, app_client: Option<Client>) -> Result<()> {
     let verify_token = config
         .webhook_verify_token()?
         .to_owned();
@@ -392,43 +558,187 @@ async fn serve_webhook(config: &Config, client: Client, register: bool) -> Resul
         .to_owned();
     let public_url = config.webhook_public_url()?;
     let route = config.webhook_route()?;
-    let builder = Server::builder()
-        .endpoint(config.webhook_listen_addr)
-        .route(route.clone())
+    let bind_addr = config.webhook_bind_addr()?;
+    let tls_config = load_tls_server_config(config.webhook_certificate_file()?, config.webhook_private_key_file()?)?;
+    let tcp_listener = TcpListener::bind(bind_addr)
+        .await
+        .map_err(|err| anyhow!("WhatsApp demoscene: couldn't bind HTTPS webhook listener to {bind_addr}: {err}"))?;
+    let local_addr = tcp_listener
+        .local_addr()
+        .map_err(|err| anyhow!("WhatsApp demoscene: couldn't read HTTPS webhook listener address: {err}"))?;
+    let service = WebhookService::<WhatsAppDemosceneHandler>::builder()
         .verify_token(verify_token)
-        .verify_payload(app_secret);
+        .verify_payload(app_secret)
+        .build(WhatsAppDemosceneHandler, client.clone());
+    let app = Router::new().route(
+        &route,
+        get({
+            let service = service.clone();
+            move |req: Request| {
+                let service = service.clone();
+                async move {
+                    service
+                        .handle(req)
+                        .await
+                }
+            }
+        })
+        .post({
+            let service = service.clone();
+            move |req: Request| {
+                let service = service.clone();
+                async move {
+                    service
+                        .handle(req)
+                        .await
+                }
+            }
+        }),
+    );
 
-    println!("serving local WhatsApp webhook on http://{}{}", config.webhook_listen_addr, route);
+    println!("serving WhatsApp HTTPS webhook on {local_addr}{route}");
     println!("expecting Meta to call public HTTPS URL {public_url}");
 
-    let serve = builder
-        .build()
-        .serve(WhatsAppDemosceneHandler, client.clone());
+    let Some(app_client) = app_client else {
+        return run_tls_webhook_server(tcp_listener, tls_config, app, future::pending()).await;
+    };
 
-    if register {
-        let registration = config.webhook_registration()?;
-        serve
-            .register_webhook(
-                client
-                    .app(registration.app_id)
-                    .configure_webhook((
-                        registration
-                            .verify_token
-                            .to_owned(),
-                        registration
-                            .public_url
-                            .as_str()
-                            .to_owned(),
-                    ))
-                    .events(Fields::new().with(SubscriptionField::Messages)),
-            )
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(run_tls_webhook_server(tcp_listener, tls_config, app, async {
+        _ = shutdown_receiver.await;
+    }));
+    wait_for_webhook_listener().await;
+
+    let registration = config.webhook_registration()?;
+    let registration_result = app_client
+        .app(registration.app_id)
+        .configure_webhook((
+            registration
+                .verify_token
+                .to_owned(),
+            registration
+                .public_url
+                .as_str()
+                .to_owned(),
+        ))
+        .events(Fields::new().with(SubscriptionField::Messages))
+        .await
+        .map_err(|err| anyhow!("WhatsApp demoscene: registering webhook while serving failed: {err}"));
+
+    if let Err(err) = registration_result {
+        _ = shutdown_sender.send(());
+        if let Err(shutdown_err) = server_task
             .await
-            .map_err(|err| anyhow!("WhatsApp demoscene: serving and registering webhook failed: {err}"))
-    } else {
-        serve
-            .await
-            .map_err(|err| anyhow!("WhatsApp demoscene: webhook server failed: {err}"))
+            .map_err(|join_err| anyhow!("WhatsApp demoscene: HTTPS webhook task failed to join after registration failure: {join_err}"))
+            .and_then(|server_result| server_result)
+        {
+            eprintln!("WhatsApp demoscene: HTTPS webhook shutdown after registration failure also failed: {shutdown_err}");
+        }
+        return Err(err);
     }
+
+    println!("webhook registered for {public_url}");
+    server_task
+        .await
+        .map_err(|err| anyhow!("WhatsApp demoscene: HTTPS webhook task failed to join: {err}"))?
+}
+
+async fn wait_for_webhook_listener() {
+    tokio::time::sleep(Duration::from_millis(400)).await;
+}
+
+fn verify_webhook_challenge(expected_verify_token: &str, query: WebhookVerificationQuery) -> (StatusCode, String) {
+    if query
+        .mode
+        .as_deref()
+        != Some("subscribe")
+    {
+        return (StatusCode::BAD_REQUEST, "unsupported webhook verification mode".to_owned());
+    }
+    if query
+        .verify_token
+        .as_deref()
+        != Some(expected_verify_token)
+    {
+        return (StatusCode::FORBIDDEN, "webhook verify token mismatch".to_owned());
+    }
+
+    match query.challenge {
+        Some(challenge) => (StatusCode::OK, challenge),
+        None => (StatusCode::BAD_REQUEST, "missing webhook challenge".to_owned()),
+    }
+}
+
+struct TlsListener {
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = TlsStream<TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (stream, addr) = match self
+                .listener
+                .accept()
+                .await
+            {
+                Ok(accepted) => accepted,
+                Err(err) => {
+                    eprintln!("WhatsApp demoscene: HTTPS webhook TCP accept failed: {err}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            match self
+                .acceptor
+                .accept(stream)
+                .await
+            {
+                Ok(stream) => return (stream, addr),
+                Err(err) => eprintln!("WhatsApp demoscene: HTTPS webhook TLS handshake failed for {addr}: {err}"),
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener
+            .local_addr()
+    }
+}
+
+async fn run_tls_webhook_server<Shutdown>(tcp_listener: TcpListener, tls_config: ServerConfig, app: Router, shutdown: Shutdown) -> Result<()>
+where
+    Shutdown: Future<Output = ()> + Send + 'static,
+{
+    let listener = TlsListener { listener: tcp_listener, acceptor: TlsAcceptor::from(Arc::new(tls_config)) };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(|err| anyhow!("WhatsApp demoscene: HTTPS webhook server failed: {err}"))
+}
+
+fn load_tls_server_config(certificate_file: &str, private_key_file: &str) -> Result<ServerConfig> {
+    let certificate_chain = CertificateDer::pem_file_iter(certificate_file)
+        .map_err(|err| anyhow!("WhatsApp demoscene: couldn't open TLS certificate file '{certificate_file}': {err}"))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| anyhow!("WhatsApp demoscene: couldn't parse TLS certificate file '{certificate_file}': {err}"))?;
+    if certificate_chain.is_empty() {
+        return Err(anyhow!("WhatsApp demoscene: TLS certificate file '{certificate_file}' did not contain any certificates"));
+    }
+
+    let private_key = PrivateKeyDer::from_pem_file(private_key_file).map_err(|err| anyhow!("WhatsApp demoscene: couldn't read TLS private key file '{private_key_file}': {err}"))?;
+
+    ServerConfig::builder_with_provider(ring::default_provider().into())
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|err| anyhow!("WhatsApp demoscene: couldn't build TLS protocol configuration: {err}"))?
+        .with_no_client_auth()
+        .with_single_cert(certificate_chain, private_key)
+        .map_err(|err| anyhow!("WhatsApp demoscene: couldn't build TLS server configuration: {err}"))
 }
 
 fn response_for(message: &Message) -> Draft {
@@ -558,10 +868,6 @@ fn parse_mode() -> Result<Mode> {
 
 fn print_usage() {
     println!("Usage: cargo run --example whatsapp_demoscene -- <send|send-batch|serve|register-webhook|serve-and-register>");
-}
-
-fn env_required(name: &str) -> Result<String> {
-    env::var(name).map_err(|err| anyhow!("{name} is required: {err}"))
 }
 
 fn env_optional(name: &str) -> Option<String> {
