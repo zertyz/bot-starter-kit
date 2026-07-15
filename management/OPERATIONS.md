@@ -1,3 +1,35 @@
+# Operational Environment "OpEnv"
+
+This section describes the patterns to use on Production, Stage, Testing, and whatever shared environments we have.
+Due to the nature of "whole system into a single machine" approach -- containing the application, config, media, database, etc. –
+we'll be using small long-lived VMs – in opposition to short-lived Kubernetes Pods.
+The homologated OS for these environments is CachyOS with BTRFS. Developers are strongly advised to use an Archlinux-based distro with the same filesystem.
+
+
+## 01) The /operations Directory
+
+Everything needed to execute our program – apart from OS libs and default systemd files – will be put under `/operations/OgreRobot.com/`:
+1. `bin/`: the program, encrypted/obfuscated config files, and scripts;
+2. `certificates`: certificate files and account data. We use the `lego` tool to have free certificates generated;
+3. `db/`: where the database files live;
+4. `logs/`: rotational log files;
+5. `metrics/`: usage reports and so on;
+6. `packages/`: where both the current, the previous, and new packages should live.
+
+
+## 02) The CachyOS Installable Package
+
+From what is described above in `OpEnv.01`, releases should be made available via `pacman` installable packages. The package should:
+1. Be created with the appropriate version specification and target environment suffix – either `-prod`, `-stage`, `-test`, `-dev`, etc.
+2. The package should always provide the full contents of the `bin/` directory, except for the config file – for which we should provide a default & unobfuscated one with the suffix `.example`;
+3. The full set of `systemd` files – services, timers, etc. – to be placed on the system directory – allowing the user to overwrite anyone of them in the usual `/etc` way;
+4. Any one-time scripts – such as database or config migrations – to be activated immediately after updates, creating backups via BTRFS snapshots;
+5. Among the `systemd` & scripts, a simple "Snapshot Management System" is included, described next in `OpEnv.02.a`;
+6. Also, a `rollback` script is provided, described in `OpEnv.02.b`;
+7. All contents from the package must come from the git repo, under `/operations/OgreRobot.com/`.
+
+
+
 # Data Storage "DS"
 
 This section defines some rules around data storage, balancing performance, maintainability, and endurance.

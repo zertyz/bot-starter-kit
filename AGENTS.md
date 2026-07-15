@@ -1,14 +1,16 @@
 # Instructions for Codex AI Agents
 
-## Behavior correction for Codex 5.5 Extra-high
-1. Never drop code -- even if wrong -- when this would mean dropping intention. Ask first.
-2. Never drop comments and do not change Strings, even if they are wrong. Ask first.
-3. Do not make unrelated changes. Only make changes to parts you are 100% sure to be what the human wants -- do not invent unrelated scope; within the requested scope, still use engineering judgment. Ask for anything else.
-4. When you are asked to add or complete the documentation, make sure every word has real value instead of being verbose or adding typical AI "I can never be wrong" disclaimers. Instead, go infer the intention of having the documentation there and be expressive and succinct, exactly as good code should be.
+## Change scope and intent preservation
 
-## Performance Considerations
-1. Spend effort inferring the minimal domain model that makes the requested change coherent -- maybe using Mathematical Inference-like capabilities.
-2. For every solution (and/or details of the solution) you are considering, spend time simulating future evolutions, considering maintainability, and other engineering practices. Always prefer the solutions more in tune with good engineering practices.
+1. Preserve intent. Do not delete code when doing so would discard user intent. If an in-scope change requires deletion and the intent is ambiguous, ask first.
+2. Preserve comments and string literals unless changing them is required by the request or necessary to keep them accurate after an in-scope change. Ask before changing user-facing & API-facing text or established contracts when compatibility or intended wording is unclear.
+3. Make only the requested change and its necessary supporting changes. Use engineering judgment within that boundary; ask before materially expanding scope.
+4. Documentation must earn its place: infer its purpose, write expressive and succinct prose, and omit generic caveats or filler.
+
+## Engineering judgment
+
+1. Infer the smallest coherent domain model for the requested change.
+2. Evaluate maintainability and likely evolution before selecting an implementation.
 
 ## Knowledge Base
 Read KNOWLEDGE_BASE.md for instructions.
