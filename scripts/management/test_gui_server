@@ -249,12 +249,36 @@ class ManagementGuiServerTest(unittest.TestCase):
         self.assertEqual("pending", requirements["E.Demo.02"]["evidence_coverage"]["status"])
         self.assertEqual("not_applicable", requirements["B.MsgP.02"]["evidence_coverage"]["status"])
         self.assertTrue(requirements["E.MCP.01"]["evidence_coverage"]["links"])
-        trace = next(item for item in payload["traceability"] if item["work_item_id"] == "EN.MCP.01-001")
-        self.assertEqual("Merged", trace["trace_state"])
-        self.assertEqual("Merged", trace["work_state"])
+        trace = next(item for item in payload["traceability"] if item["work_item_id"] == "EN.Demo.01-001")
+        self.assertEqual("Rolled Out", trace["trace_state"])
+        self.assertEqual("Rolled Out", trace["work_state"])
         self.assertTrue(trace["state_matches"])
-        self.assertIn("src/messaging/user_router.rs", trace["existing_evidence_paths"])
+        self.assertIn("src/logic/telegram_demoscene.rs", trace["existing_evidence_paths"])
         self.assertEqual("management/TRACEABILITY.md", trace["source_path"])
+
+    def test_work_payload_accepts_rustrover_aligned_traceability(self) -> None:
+        model = self.gui.tool.load_model()
+        text = """# Traceability
+
+## Current Links
+
+| Requirement | Work Item      | State      | Evidence                              |
+|-------------|----------------|------------|---------------------------------------|
+| `E.Gov.01` | `EN.Gov.01-001` | Rolled Out | `scripts/management/management_tool`  |
+"""
+        links = self.gui.tool.traceability_links_from_text(text)
+        self.assertEqual(1, len(links))
+
+        item = model.work_items["EN.Gov.01-001"]
+        work = self.gui.work_item_payload(item, model, {}, links)
+        attention_messages = {signal["message"] for signal in work["attention"]}
+        self.assertNotIn("Completed work has no traceability row", attention_messages)
+        self.assertNotIn("Completed work has no existing concrete evidence path", attention_messages)
+
+        requirement = model.requirements["E.Gov.01"]
+        evidence = self.gui.evidence_coverage_payload(model, requirement, links)
+        self.assertEqual("evidenced", evidence["status"])
+        self.assertEqual(["EN.Gov.01-001"], [link["work_item_id"] for link in evidence["links"]])
 
     def test_pending_evidence_detail_handles_completed_and_active_work(self) -> None:
         model = self.gui.tool.load_model()
@@ -505,7 +529,16 @@ class ManagementGuiServerTest(unittest.TestCase):
         )
 
     def test_execute_read_only_status_action(self) -> None:
-        result = self.gui.execute_action({"action": "management-status", "payload": {"stale_days": "14"}})
+        expected = {
+            "command": "scripts/management/management_tool management-status --stale-days 14",
+            "returncode": 0,
+            "stdout": "Management Status\n",
+            "stderr": "",
+        }
+        with mock.patch.object(self.gui, "run_management_command", return_value=expected) as run_command:
+            result = self.gui.execute_action({"action": "management-status", "payload": {"stale_days": "14"}})
+
+        run_command.assert_called_once_with(["management-status", "--stale-days", "14"])
         self.assertEqual(0, result["returncode"])
         self.assertIn("Management Status", result["stdout"])
 

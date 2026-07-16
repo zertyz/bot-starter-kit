@@ -412,7 +412,7 @@ class ManagementToolTest(unittest.TestCase):
         )
         traceability.write_text(malformed_schema, encoding="utf-8")
         malformed_table = self.tool_run("lint", "--strict", expected=1)
-        self.assertIn("canonical traceability table header and separator", malformed_table.stderr)
+        self.assertIn("canonical four-column header and a valid Markdown separator", malformed_table.stderr)
         self.assertEqual([], module.traceability_links_from_text(malformed_schema))
 
         self.write_traceability()
@@ -431,6 +431,90 @@ class ManagementToolTest(unittest.TestCase):
         )
         placeholder = self.tool_run("lint", "--strict", expected=1)
         self.assertIn("does not match EN.MCP.01-001 backlog state Started", placeholder.stderr)
+
+    def test_traceability_accepts_markdown_table_presentation_formatting(self) -> None:
+        module = self.load_tool_module()
+        traceability = self.management / "TRACEABILITY.md"
+        aligned = textwrap.dedent(
+            """\
+            # Traceability
+
+            ## Current Links
+
+            | Requirement | Work Item       | State   | Evidence                         |
+            |-------------|-----------------|---------|----------------------------------|
+            | `E.MCP.01`  | `EN.MCP.01-001` | Started | `management/TRACEABILITY.md`     |
+            """
+        )
+
+        links = module.traceability_links_from_text(aligned)
+        self.assertEqual(
+            [("E.MCP.01", "EN.MCP.01-001", "Started", "`management/TRACEABILITY.md`")],
+            [(link.requirement_id, link.work_item_id, link.state, link.evidence) for link in links],
+        )
+        traceability.write_text(aligned, encoding="utf-8")
+        self.tool_run("lint", "--strict")
+
+        aligned_markers = aligned.replace(
+            "|-------------|-----------------|---------|----------------------------------|",
+            "|:------------|----------------:|:-------:|----------------------------------|",
+        )
+        self.assertEqual(1, len(module.traceability_links_from_text(aligned_markers)))
+        unpadded_row = aligned.replace(
+            "| `E.MCP.01`  | `EN.MCP.01-001` | Started | `management/TRACEABILITY.md`     |",
+            "|`E.MCP.01`|`EN.MCP.01-001`|Started|`management/TRACEABILITY.md`|",
+        )
+        self.assertEqual(1, len(module.traceability_links_from_text(unpadded_row)))
+
+        extra_column = aligned.replace(
+            "| `E.MCP.01`  | `EN.MCP.01-001` | Started | `management/TRACEABILITY.md`     |",
+            "| `E.MCP.01` | `EN.MCP.01-001` | Started | `management/TRACEABILITY.md` | unexpected |",
+        )
+        self.assertEqual([], module.traceability_links_from_text(extra_column))
+        traceability.write_text(extra_column, encoding="utf-8")
+        malformed = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("exactly four Markdown-table fields", malformed.stderr)
+
+    def test_traceability_writer_preserves_aligned_header_and_separator(self) -> None:
+        module = self.load_tool_module()
+        model = module.load_model()
+        traceability = self.management / "TRACEABILITY.md"
+        header = "| Requirement | Work Item       | State   | Evidence                         |"
+        separator = "|:------------|----------------:|:-------:|----------------------------------|"
+        traceability.write_text(
+            "# Traceability\n\n## Current Links\n\n"
+            f"{header}\n{separator}\n"
+            "| `E.MCP.01` | `EN.MCP.01-001` | Started | Existing context |\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            "updated",
+            module.append_or_update_traceability(
+                "E.MCP.01",
+                model.work_items["EN.MCP.01-001"],
+                ["src/lib.rs"],
+                None,
+                None,
+            ),
+        )
+        self.assertEqual(
+            "appended",
+            module.append_or_update_traceability(
+                "E.MCP.02.a",
+                model.work_items["ER.MCP.02.a-001"],
+                ["src/lib.rs"],
+                None,
+                None,
+            ),
+        )
+
+        updated = traceability.read_text(encoding="utf-8")
+        self.assertIn(f"{header}\n{separator}\n", updated)
+        self.assertEqual(
+            ["EN.MCP.01-001", "ER.MCP.02.a-001"],
+            [link.work_item_id for link in module.traceability_links_from_text(updated)],
+        )
 
     def test_traceability_writer_creates_repairs_or_rejects_without_partial_writes(self) -> None:
         module = self.load_tool_module()

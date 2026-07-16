@@ -209,6 +209,8 @@ ESTIMATE_HOUR_BANDS = [
 TRACEABILITY_CURRENT_LINKS_HEADING = "## Current Links"
 TRACEABILITY_TABLE_HEADER = "| Requirement | Work Item | State | Evidence |"
 TRACEABILITY_TABLE_SEPARATOR = "| --- | --- | --- | --- |"
+TRACEABILITY_TABLE_COLUMNS = ("Requirement", "Work Item", "State", "Evidence")
+TRACEABILITY_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
 
 TECH_DEBT_MARKERS = ["TODO", "FIXME", "HACK", "XXX"]
 SENSITIVE_TERMS = ["api_key", "credential", "password", "private_key", "secret", "token"]
@@ -1681,11 +1683,8 @@ def render_traceability_work_state(work_item_id: str, target_state: str) -> str 
     for index, line in enumerate(lines):
         if index not in current_link_indexes:
             continue
-        stripped = line.strip()
-        if not stripped.startswith("| `"):
-            continue
-        columns = [column.strip() for column in stripped.strip("|").split("|")]
-        if len(columns) != 4 or columns[1].strip("`") != work_item_id:
+        columns = traceability_table_cells(line)
+        if columns is None or len(columns) != 4 or columns[1].strip("`") != work_item_id:
             continue
         lines[index] = f"| {columns[0]} | {columns[1]} | {target_state} | {columns[3]} |"
         changed = True
@@ -2011,6 +2010,27 @@ def traceability_current_links_section_bounds(lines: list[str]) -> tuple[int, in
     return heading_index, end_index
 
 
+def traceability_table_cells(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return None
+    return [cell.strip() for cell in stripped[1:-1].split("|")]
+
+
+def is_traceability_table_header(line: str) -> bool:
+    cells = traceability_table_cells(line)
+    return cells is not None and tuple(cells) == TRACEABILITY_TABLE_COLUMNS
+
+
+def is_traceability_table_separator(line: str) -> bool:
+    cells = traceability_table_cells(line)
+    return (
+        cells is not None
+        and len(cells) == len(TRACEABILITY_TABLE_COLUMNS)
+        and all(TRACEABILITY_TABLE_SEPARATOR_CELL_RE.fullmatch(cell) for cell in cells)
+    )
+
+
 def traceability_current_links_table_bounds(lines: list[str]) -> tuple[int, int, int, int] | None:
     section = traceability_current_links_section_bounds(lines)
     if section is None:
@@ -2021,8 +2041,8 @@ def traceability_current_links_table_bounds(lines: list[str]) -> tuple[int, int,
         return None
     header_index, separator_index = nonblank[:2]
     if (
-        lines[header_index].strip() != TRACEABILITY_TABLE_HEADER
-        or lines[separator_index].strip() != TRACEABILITY_TABLE_SEPARATOR
+        not is_traceability_table_header(lines[header_index])
+        or not is_traceability_table_separator(lines[separator_index])
         or separator_index != header_index + 1
     ):
         return None
@@ -2044,17 +2064,18 @@ def traceability_current_link_lines(text: str) -> list[tuple[int, str]]:
 def traceability_links_from_text(text: str) -> list[TraceabilityLink]:
     links: list[TraceabilityLink] = []
     for line_number, line in traceability_current_link_lines(text):
-        stripped = line.strip()
-        if not stripped.startswith("| `"):
+        columns = traceability_table_cells(line)
+        if columns is None or len(columns) != 4:
             continue
-        columns = [column.strip() for column in stripped.strip("|").split("|")]
-        if len(columns) < 4:
+        requirement_id_column, work_item_id_column, state, evidence = columns
+        requirement_match = re.fullmatch(r"`([^`]+)`", requirement_id_column)
+        work_item_match = re.fullmatch(r"`([^`]+)`", work_item_id_column)
+        if requirement_match is None or work_item_match is None:
             continue
-        requirement_id_column, work_item_id_column, state, evidence = columns[:4]
         links.append(
             TraceabilityLink(
-                requirement_id=requirement_id_column.strip("`"),
-                work_item_id=work_item_id_column.strip("`"),
+                requirement_id=requirement_match.group(1),
+                work_item_id=work_item_match.group(1),
                 state=state,
                 evidence=evidence,
                 line=line_number,
@@ -2603,7 +2624,7 @@ def validate_traceability(model: ManagementModel) -> None:
         model.error(
             path,
             current_link_headings[0] + 1,
-            "Current Links must begin with the canonical traceability table header and separator",
+            "Current Links must begin with the canonical four-column header and a valid Markdown separator",
         )
         return
 
@@ -2618,8 +2639,8 @@ def validate_traceability(model: ManagementModel) -> None:
         if not stripped.startswith("|"):
             model.error(path, line_number, "Current Links may contain only traceability table rows")
             continue
-        columns = [column.strip() for column in stripped.strip("|").split("|")]
-        if len(columns) != 4:
+        columns = traceability_table_cells(line)
+        if columns is None or len(columns) != 4:
             model.error(path, line_number, "traceability row must contain exactly four Markdown-table fields")
             continue
         requirement_column, work_column, state, evidence = columns
@@ -3549,9 +3570,9 @@ def append_or_update_traceability(requirement_id_value: str, work_item: WorkItem
             stripped = lines[index].strip()
             if not stripped:
                 continue
-            columns = [column.strip() for column in stripped.strip("|").split("|")]
+            columns = traceability_table_cells(lines[index])
             if (
-                not stripped.startswith("| `")
+                columns is None
                 or len(columns) != 4
                 or re.fullmatch(r"`[^`]+`", columns[0]) is None
                 or re.fullmatch(r"`[^`]+`", columns[1]) is None
@@ -3560,8 +3581,9 @@ def append_or_update_traceability(requirement_id_value: str, work_item: WorkItem
             current_link_indexes.append(index)
 
         for index in current_link_indexes:
-            stripped = lines[index].strip()
-            columns = [column.strip() for column in stripped.strip("|").split("|")]
+            columns = traceability_table_cells(lines[index])
+            if columns is None:
+                raise ValueError("cannot safely update a malformed Current Links table")
             if columns[0].strip("`") == requirement_id_value and columns[1].strip("`") == work_item.id:
                 existing_evidence = columns[3]
                 evidence = existing_evidence
