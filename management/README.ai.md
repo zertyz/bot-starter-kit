@@ -65,10 +65,10 @@ After changing management tooling or management files:
 - `management_status`: summarize the current management state; its compact HTML dashboard mode is compatibility-only.
 - `management_report`: export the static GUI-based Management Report for GitHub Pages or local review.
 - `diagram_architecture_real`, `diagram_architecture_planned`, `diagram_module_dependencies`: render static SVG diagrams for Pages or local review.
-- `semantic_context`: provide versioned deterministic evidence for the repo-local `$analyze-management` semantic workflow.
-- `audit_requirements`: find local requirement quality and planning issues.
+- `semantic_context`: provide versioned deterministic quality, prompt, work-coverage, and evidence-coverage context for the repo-local `$analyze-management` semantic workflow.
+- `audit_requirements`: report deterministic quality separately from lexical prompts, work coverage, and lifecycle-aware evidence coverage.
 - `estimate_requirement`: prepare PM/manager planning context for one requirement.
-- `sync_requirement` and `trace_requirement`: compare one requirement against backlog, traceability, and implementation signals.
+- `sync_requirement` and `trace_requirement`: compare one requirement against backlog and parsed traceability evidence without treating unplanned work as drift.
 - `draft_plan`: propose or write an `Under Planning` backlog item.
 - `evaluate_plan`: check whether a proposed work item coheres with its requirement.
 - `advance_state`: move a backlog item through the state model.

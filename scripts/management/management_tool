@@ -206,6 +206,10 @@ ESTIMATE_HOUR_BANDS = [
     (20, "40-80"),
 ]
 
+TRACEABILITY_CURRENT_LINKS_HEADING = "## Current Links"
+TRACEABILITY_TABLE_HEADER = "| Requirement | Work Item | State | Evidence |"
+TRACEABILITY_TABLE_SEPARATOR = "| --- | --- | --- | --- |"
+
 TECH_DEBT_MARKERS = ["TODO", "FIXME", "HACK", "XXX"]
 SENSITIVE_TERMS = ["api_key", "credential", "password", "private_key", "secret", "token"]
 RISKY_RUST_SHORTCUTS = ["panic!(", ".unwrap()", ".expect("]
@@ -518,11 +522,42 @@ class AuditFinding:
 
 
 @dataclasses.dataclass(frozen=True)
+class SemanticPrompt:
+    status: str
+    requirement: Requirement
+    category: str
+    message: str
+    terms: tuple[str, ...] = ()
+    mixed_terms: tuple[str, ...] = ()
+
+    def format(self) -> str:
+        label = "ACKNOWLEDGED" if self.status == "acknowledged" else "PROMPT"
+        return f"{label}: {self.requirement.id}: {self.category}: {self.message} ({relative(self.requirement.path)}:{self.requirement.line})"
+
+
+@dataclasses.dataclass(frozen=True)
+class EstimateDecision:
+    readiness: str
+    delivery_estimate: str
+    structural_score: int
+    structural_effort_band: str
+    confidence: str
+    uncertainty_drivers: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
 class TraceabilityLink:
     requirement_id: str
     work_item_id: str
     state: str
     evidence: str
+    line: int
+
+
+@dataclasses.dataclass(frozen=True)
+class CoverageAcknowledgement:
+    pattern: str
+    description: str
     line: int
 
 
@@ -1639,9 +1674,13 @@ def render_traceability_work_state(work_item_id: str, target_state: str) -> str 
     path = MANAGEMENT_DIR / "TRACEABILITY.md"
     if not path.exists():
         return None
-    lines = path.read_text(encoding="utf-8").splitlines()
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    current_link_indexes = {line_number - 1 for line_number, _ in traceability_current_link_lines(text)}
     changed = False
     for index, line in enumerate(lines):
+        if index not in current_link_indexes:
+            continue
         stripped = line.strip()
         if not stripped.startswith("| `"):
             continue
@@ -1781,13 +1820,17 @@ def descendant_requirements(model: ManagementModel, requirement: Requirement) ->
     )
 
 
-def traceability_status(requirement: Requirement, traceability: str) -> str:
-    if requirement.id in traceability:
+def traceability_status(requirement: Requirement, links_or_text: list[TraceabilityLink] | str | None = None) -> str:
+    if links_or_text is None:
+        links = traceability_links()
+    elif isinstance(links_or_text, str):
+        links = traceability_links_from_text(links_or_text)
+    else:
+        links = links_or_text
+    if any(link.requirement_id == requirement.id for link in links):
         return "direct"
-    if not requirement.subtopics and f"{requirement.id}." in traceability:
+    if not requirement.subtopics and any(link.requirement_id.startswith(f"{requirement.id}.") for link in links):
         return "child"
-    if f"{requirement.document}.{requirement.section}.*" in traceability:
-        return "area"
     return "missing"
 
 
@@ -1802,6 +1845,39 @@ def matching_terms(text: str, terms: list[str]) -> list[str]:
     return [term for term in terms if contains_term(lowered, term)]
 
 
+def term_occurrence_pattern(term: str) -> str:
+    escaped = re.escape(term)
+    if any(character in term for character in "/-"):
+        return escaped
+    return rf"\b{escaped}\b"
+
+
+def broad_term_occurrence_statuses(text: str) -> tuple[list[str], list[str], list[str]]:
+    active: list[str] = []
+    acknowledged: list[str] = []
+    mixed: list[str] = []
+    for term in UNBOUNDED_REQUIREMENT_TERMS:
+        term_pattern = term_occurrence_pattern(term)
+        occurrences = [match.span() for match in re.finditer(term_pattern, text, flags=re.IGNORECASE)]
+        if not occurrences:
+            continue
+        emphasized = {
+            match.span("term")
+            for match in re.finditer(
+                rf"(?<!\*)\*(?!\*)(?P<term>{term_pattern})\*(?!\*)",
+                text,
+                flags=re.IGNORECASE,
+            )
+        }
+        if emphasized:
+            acknowledged.append(term)
+            if any(span not in emphasized for span in occurrences):
+                mixed.append(term)
+        else:
+            active.append(term)
+    return active, acknowledged, mixed
+
+
 def likely_compound_requirement(requirement: Requirement) -> bool:
     body = requirement.body
     bullet_lines = [line for line in body.splitlines() if re.match(r"\s*(?:[-*]|\d+\.)\s+", line)]
@@ -1812,42 +1888,19 @@ def likely_compound_requirement(requirement: Requirement) -> bool:
 def audit_requirement(
     model: ManagementModel,
     requirement: Requirement,
-    traceability: str,
+    _traceability: str,
     duplicate_titles: dict[str, list[Requirement]],
     duplicate_bodies: dict[str, list[Requirement]],
 ) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
-    text = requirement_text(requirement)
     body = requirement.body.strip()
     body_words = words_in(body)
-    work_items = requirement_work_items(model, requirement)
-    completed_items = completed_work_items(work_items)
-    active_items = open_work_items(work_items)
 
     def add(severity: str, category: str, message: str) -> None:
         findings.append(AuditFinding(severity, requirement, category, message))
 
     if not body or body.lower() in {"tbd", "todo"}:
         add("BLOCKER", "clarity", "requirement body is empty or TBD")
-    elif len(body_words) < 8:
-        add("REVIEW", "clarity", "requirement body is very short")
-
-    unbounded = matching_terms(text, UNBOUNDED_REQUIREMENT_TERMS)
-    if unbounded:
-        add("REVIEW", "boundedness", f"contains broad terms that need explicit bounds: {', '.join(unbounded[:5])}")
-
-    implementation_terms = matching_terms(text, IMPLEMENTATION_REQUIREMENT_TERMS)
-    if implementation_terms:
-        add("REVIEW", "outcome-focus", f"mentions implementation terms; confirm this is intended: {', '.join(implementation_terms[:5])}")
-
-    if not matching_terms(text, ACTOR_TERMS):
-        add("REVIEW", "actor", "actor or responsible subject is not obvious")
-
-    if likely_compound_requirement(requirement):
-        add("REVIEW", "scope", "may combine multiple obligations that could need separate sub-requirements")
-
-    if re.search(r"\b(?:must|should|needs?|allow|support|persist|store|route)\b", text.lower()) and not matching_terms(text, FAILURE_BEHAVIOR_TERMS):
-        add("INFO", "failure-behavior", "no explicit failure or unavailable-path behavior detected")
 
     title_key = " ".join(words_in(requirement.title))
     title_duplicates = duplicate_titles.get(title_key, [])
@@ -1861,21 +1914,68 @@ def audit_requirement(
         others = ", ".join(item.id for item in body_duplicates if item.id != requirement.id)
         add("REVIEW", "redundancy", f"body matches another requirement: {others}")
 
-    if not work_items:
-        add("REVIEW", "planning", "no backlog work item maps to this requirement")
-    elif not active_items and not completed_items:
-        add("REVIEW", "planning", "only rejected or cancelled work maps to this requirement")
-
-    status = traceability_status(requirement, traceability)
-    if status == "missing":
-        add("REVIEW", "traceability", "not mentioned in TRACEABILITY.md")
-    elif status == "area":
-        add("REVIEW", "traceability", "listed only through an unmapped requirement area in TRACEABILITY.md")
-
-    if work_items and not completed_items:
-        add("INFO", "evidence", "no merged or rolled-out work item maps to this requirement yet")
-
     return findings
+
+
+def requirement_semantic_prompts(requirement: Requirement) -> list[SemanticPrompt]:
+    text = requirement_text(requirement)
+    body = requirement.body.strip()
+    if not body or body.lower() in {"tbd", "todo"}:
+        return []
+
+    prompts: list[SemanticPrompt] = []
+
+    def add(
+        category: str,
+        message: str,
+        terms: list[str] | tuple[str, ...] = (),
+        status: str = "active",
+        mixed_terms: list[str] | tuple[str, ...] = (),
+    ) -> None:
+        prompts.append(SemanticPrompt(status, requirement, category, message, tuple(terms), tuple(mixed_terms)))
+
+    if len(words_in(body)) < 8:
+        add("clarity", "requirement body is very short; confirm that it is sufficiently articulated")
+
+    active_broad_terms, acknowledged_broad_terms, mixed_broad_terms = broad_term_occurrence_statuses(text)
+    if active_broad_terms:
+        add(
+            "boundedness",
+            f"broad terms need semantic bounds review: {', '.join(active_broad_terms[:5])}",
+            active_broad_terms[:5],
+        )
+    if acknowledged_broad_terms:
+        mixed_note = (
+            f"; the requirement-level acknowledgement also covers plain occurrences of: {', '.join(mixed_broad_terms[:5])}"
+            if mixed_broad_terms
+            else ""
+        )
+        add(
+            "boundedness",
+            f"author emphasis acknowledges intentional broad terms: {', '.join(acknowledged_broad_terms[:5])}{mixed_note}",
+            acknowledged_broad_terms[:5],
+            status="acknowledged",
+            mixed_terms=mixed_broad_terms[:5],
+        )
+
+    implementation_terms = matching_terms(text, IMPLEMENTATION_REQUIREMENT_TERMS)
+    if implementation_terms:
+        add(
+            "outcome-focus",
+            f"implementation terms need semantic outcome review: {', '.join(implementation_terms[:5])}",
+            implementation_terms[:5],
+        )
+
+    if not matching_terms(text, ACTOR_TERMS):
+        add("actor", "confirm that the actor or responsible subject is clear in context")
+
+    if likely_compound_requirement(requirement):
+        add("scope", "confirm whether the combined obligations should remain coordinated or become sub-requirements")
+
+    if re.search(r"\b(?:must|should|needs?|allow|support|persist|store|route)\b", text.lower()) and not matching_terms(text, FAILURE_BEHAVIOR_TERMS):
+        add("failure-behavior", "no explicit failure clause was detected; determine semantically whether one is applicable or defined elsewhere")
+
+    return prompts
 
 
 def duplicate_requirement_groups(requirements: list[Requirement], key_func) -> dict[str, list[Requirement]]:
@@ -1891,13 +1991,59 @@ def requirement_references(text: str) -> list[str]:
     return sorted(set(re.findall(r"\b[BEO]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*\b", text)))
 
 
-def traceability_links() -> list[TraceabilityLink]:
-    path = MANAGEMENT_DIR / "TRACEABILITY.md"
-    if not path.exists():
-        return []
+def traceability_current_links_section_bounds(lines: list[str]) -> tuple[int, int] | None:
+    headings = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip() == TRACEABILITY_CURRENT_LINKS_HEADING
+    ]
+    if len(headings) != 1:
+        return None
+    heading_index = headings[0]
+    end_index = next(
+        (
+            index
+            for index in range(heading_index + 1, len(lines))
+            if LEVEL_TWO_HEADING_RE.match(lines[index].strip())
+        ),
+        len(lines),
+    )
+    return heading_index, end_index
 
+
+def traceability_current_links_table_bounds(lines: list[str]) -> tuple[int, int, int, int] | None:
+    section = traceability_current_links_section_bounds(lines)
+    if section is None:
+        return None
+    heading_index, end_index = section
+    nonblank = [index for index in range(heading_index + 1, end_index) if lines[index].strip()]
+    if len(nonblank) < 2:
+        return None
+    header_index, separator_index = nonblank[:2]
+    if (
+        lines[header_index].strip() != TRACEABILITY_TABLE_HEADER
+        or lines[separator_index].strip() != TRACEABILITY_TABLE_SEPARATOR
+        or separator_index != header_index + 1
+    ):
+        return None
+    return heading_index, header_index, separator_index, end_index
+
+
+def traceability_current_link_lines(text: str) -> list[tuple[int, str]]:
+    lines = text.splitlines()
+    table = traceability_current_links_table_bounds(lines)
+    if table is None:
+        return []
+    _, _, separator_index, end_index = table
+    return [
+        (index + 1, lines[index])
+        for index in range(separator_index + 1, end_index)
+    ]
+
+
+def traceability_links_from_text(text: str) -> list[TraceabilityLink]:
     links: list[TraceabilityLink] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, line in traceability_current_link_lines(text):
         stripped = line.strip()
         if not stripped.startswith("| `"):
             continue
@@ -1917,6 +2063,13 @@ def traceability_links() -> list[TraceabilityLink]:
     return links
 
 
+def traceability_links() -> list[TraceabilityLink]:
+    path = MANAGEMENT_DIR / "TRACEABILITY.md"
+    if not path.exists():
+        return []
+    return traceability_links_from_text(path.read_text(encoding="utf-8"))
+
+
 def traceability_links_for(requirement: Requirement, links: list[TraceabilityLink]) -> list[TraceabilityLink]:
     return [link for link in links if requirement_matches_id(requirement, link.requirement_id)]
 
@@ -1924,6 +2077,186 @@ def traceability_links_for(requirement: Requirement, links: list[TraceabilityLin
 def evidence_paths(link: TraceabilityLink) -> list[str]:
     paths = re.findall(r"`([^`]+)`", link.evidence)
     return [path for path in paths if "/" in path or "." in Path(path).name]
+
+
+def unmapped_requirement_area_acknowledgements_from_text(text: str) -> list[CoverageAcknowledgement]:
+    acknowledgements: list[CoverageAcknowledgement] = []
+    in_unmapped_areas = False
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith("## ") and not stripped.startswith("### "):
+            in_unmapped_areas = stripped == "## Unmapped Requirement Areas"
+            continue
+        if not in_unmapped_areas:
+            continue
+        match = re.match(
+            r"^(?:[-*]|\d+\.)\s+`(?P<pattern>[BEO]\.[A-Za-z][A-Za-z0-9]*\.(?:\d{2}(?:\.[a-z]+)*|\*))`\s*(?:--\s*)?(?P<description>.*)$",
+            stripped,
+        )
+        if match:
+            acknowledgements.append(
+                CoverageAcknowledgement(
+                    pattern=match.group("pattern"),
+                    description=match.group("description").strip(),
+                    line=line_number,
+                )
+            )
+    return acknowledgements
+
+
+def unmapped_requirement_area_acknowledgements() -> list[CoverageAcknowledgement]:
+    path = MANAGEMENT_DIR / "TRACEABILITY.md"
+    if not path.exists():
+        return []
+    return unmapped_requirement_area_acknowledgements_from_text(path.read_text(encoding="utf-8"))
+
+
+def coverage_acknowledgement_matches(requirement: Requirement, acknowledgement: CoverageAcknowledgement) -> bool:
+    if acknowledgement.pattern.endswith(".*"):
+        return requirement.id.startswith(f"{acknowledgement.pattern[:-2]}.")
+    return requirement.id == acknowledgement.pattern
+
+
+def requirement_coverage_acknowledgements(
+    requirement: Requirement,
+    acknowledgements: list[CoverageAcknowledgement] | None = None,
+) -> list[dict[str, object]]:
+    candidates = acknowledgements if acknowledgements is not None else unmapped_requirement_area_acknowledgements()
+    return [
+        {
+            "pattern": acknowledgement.pattern,
+            "description": acknowledgement.description,
+            "line": acknowledgement.line,
+        }
+        for acknowledgement in candidates
+        if coverage_acknowledgement_matches(requirement, acknowledgement)
+    ]
+
+
+def requirement_work_coverage(model: ManagementModel, requirement: Requirement) -> dict[str, object]:
+    items = requirement_work_items(model, requirement)
+    completed = completed_work_items(items)
+    abandoned = [
+        item
+        for item in items
+        if item.state in {"Rejected", "Cancelled"} or superseded_work_id(item.state) is not None
+    ]
+    active = [item for item in items if item not in completed and item not in abandoned]
+    if not items:
+        status = "unplanned"
+    elif active:
+        status = "active"
+    elif completed and abandoned:
+        status = "mixed"
+    elif completed:
+        status = "completed"
+    else:
+        status = "abandoned"
+
+    by_state = {
+        state: sum(1 for item in items if item.state == state)
+        for state in sorted({item.state for item in items})
+    }
+    by_motivation = {
+        motivation: sum(1 for item in items if item.motivation == motivation)
+        for motivation in VALID_MOTIVATIONS
+        if any(item.motivation == motivation for item in items)
+    }
+    item_payloads = [
+        {
+            "id": item.id,
+            "requirement_id": item.requirement_id,
+            "relation": "direct" if item.requirement_id == requirement.id else "descendant",
+            "state": item.state,
+            "motivation": item.motivation,
+        }
+        for item in items
+    ]
+    return {
+        "status": status,
+        "count": len(items),
+        "direct_count": sum(1 for item in items if item.requirement_id == requirement.id),
+        "descendant_count": sum(1 for item in items if item.requirement_id != requirement.id),
+        "active_count": len(active),
+        "completed_count": len(completed),
+        "abandoned_count": len(abandoned),
+        "by_state": by_state,
+        "by_motivation": by_motivation,
+        "items": item_payloads,
+    }
+
+
+def existing_evidence_paths_for_link(link: TraceabilityLink) -> list[str]:
+    existing: list[str] = []
+    for path in evidence_paths(link):
+        try:
+            canonical = canonical_repo_path(path)
+        except ValueError:
+            continue
+        if (REPO_ROOT / canonical).exists():
+            existing.append(canonical)
+    return sorted(set(existing))
+
+
+def requirement_evidence_coverage(
+    model: ManagementModel,
+    requirement: Requirement,
+    links: list[TraceabilityLink] | None = None,
+) -> dict[str, object]:
+    all_links = links if links is not None else traceability_links()
+    requirement_links = traceability_links_for(requirement, all_links)
+    work_coverage = requirement_work_coverage(model, requirement)
+    item_ids = {item["id"] for item in work_coverage["items"]}
+    completed_ids = {
+        item["id"]
+        for item in work_coverage["items"]
+        if item["state"] in {"Merged", "Rolled Out"}
+    }
+    active_ids = {
+        item["id"]
+        for item in work_coverage["items"]
+        if item["state"] not in {"Merged", "Rolled Out", "Rejected", "Cancelled"}
+        and not str(item["state"]).startswith("Superseded by ")
+    }
+    links_by_work: dict[str, list[TraceabilityLink]] = {
+        work_item_id: [link for link in requirement_links if link.work_item_id == work_item_id]
+        for work_item_id in item_ids
+    }
+    missing_rows = sorted(work_item_id for work_item_id in completed_ids if not links_by_work[work_item_id])
+    missing_evidence = sorted(
+        work_item_id
+        for work_item_id in completed_ids
+        if links_by_work[work_item_id]
+        and not any(existing_evidence_paths_for_link(link) for link in links_by_work[work_item_id])
+    )
+    if not item_ids or work_coverage["status"] == "abandoned":
+        status = "not_applicable"
+    elif missing_rows or missing_evidence:
+        status = "gap"
+    elif active_ids:
+        status = "pending"
+    elif completed_ids:
+        status = "evidenced"
+    else:
+        status = "not_applicable"
+    return {
+        "status": status,
+        "completed_work_item_ids": sorted(completed_ids),
+        "pending_work_item_ids": sorted(active_ids),
+        "missing_traceability_work_item_ids": missing_rows,
+        "missing_evidence_work_item_ids": missing_evidence,
+        "links": [
+            {
+                "requirement_id": link.requirement_id,
+                "work_item_id": link.work_item_id,
+                "state": link.state,
+                "evidence": link.evidence,
+                "line": link.line,
+                "existing_evidence_paths": existing_evidence_paths_for_link(link),
+            }
+            for link in requirement_links
+        ],
+    }
 
 
 def requirement_source_terms(requirement: Requirement) -> list[str]:
@@ -1991,21 +2324,64 @@ def estimate_effort_band(score: int) -> str:
     return "80+"
 
 
-def requirement_complexity_score(requirement: Requirement, work_items: list[WorkItem], audit_findings: list[AuditFinding]) -> int:
+def requirement_structural_complexity_score(requirement: Requirement) -> int:
     text = requirement_text(requirement)
     bullet_count = len([line for line in requirement.body.splitlines() if re.match(r"\s*(?:[-*]|\d+\.)\s+", line)])
     score = 2
     score += min(6, len(words_in(text)) // 25)
     score += min(4, bullet_count // 2)
     score += min(4, len(requirement_references(text)))
-    score += 2 if not work_items else 0
-    score += sum(2 for finding in audit_findings if finding.severity == "BLOCKER")
-    score += min(4, sum(1 for finding in audit_findings if finding.severity == "REVIEW"))
-    if matching_terms(text, IMPLEMENTATION_REQUIREMENT_TERMS):
-        score += 2
-    if matching_terms(text, UNBOUNDED_REQUIREMENT_TERMS):
-        score += 2
     return score
+
+
+def requirement_estimate_decision(
+    requirement: Requirement,
+    quality_findings: list[AuditFinding],
+    prompts: list[SemanticPrompt],
+) -> EstimateDecision:
+    blockers = [finding for finding in quality_findings if finding.severity == "BLOCKER"]
+    reviews = [finding for finding in quality_findings if finding.severity == "REVIEW"]
+    active_prompts = [prompt for prompt in prompts if prompt.status == "active"]
+    acknowledged_sizing_prompts = [
+        prompt
+        for prompt in prompts
+        if prompt.status == "acknowledged" and prompt.category in {"boundedness", "scope"}
+    ]
+
+    if blockers:
+        readiness = "NOT READY"
+    elif active_prompts:
+        readiness = "SEMANTIC REVIEW REQUIRED"
+    elif reviews:
+        readiness = "NEEDS REFINEMENT"
+    else:
+        readiness = "READY FOR PLANNING"
+
+    uncertainty_drivers = [
+        "deterministic structural signals do not establish delivery scope, dependencies, or effort"
+    ]
+    if blockers:
+        uncertainty_drivers.append("deterministic quality blockers must be resolved before delivery sizing")
+    uncertainty_drivers.extend(
+        f"active {prompt.category} prompt requires semantic disposition"
+        for prompt in active_prompts
+    )
+    for prompt in acknowledged_sizing_prompts:
+        detail = f": {', '.join(prompt.terms)}" if prompt.terms else ""
+        uncertainty_drivers.append(f"intentional {prompt.category} is acknowledged{detail}")
+
+    structural_score = requirement_structural_complexity_score(requirement)
+    structural_effort_band = estimate_effort_band(structural_score)
+    delivery_estimate = "WITHHELD -- semantic sizing required"
+    confidence = "NOT ASSESSED"
+    return EstimateDecision(
+        readiness=readiness,
+        delivery_estimate=delivery_estimate,
+        structural_score=structural_score,
+        structural_effort_band=structural_effort_band,
+        confidence=confidence,
+        uncertainty_drivers=tuple(uncertainty_drivers),
+    )
 
 
 def evidence_path_statuses(paths: list[str]) -> list[tuple[str, str]]:
@@ -2204,12 +2580,43 @@ def validate_traceability(model: ManagementModel) -> None:
     path = MANAGEMENT_DIR / "TRACEABILITY.md"
     if not path.exists():
         return
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    current_link_headings = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip() == TRACEABILITY_CURRENT_LINKS_HEADING
+    ]
+    if len(current_link_headings) != 1:
+        if not current_link_headings:
+            model.error(path, 1, "traceability must contain exactly one `## Current Links` section")
+        else:
+            model.error(
+                path,
+                current_link_headings[1] + 1,
+                "traceability contains more than one `## Current Links` section",
+            )
+        return
+
+    table = traceability_current_links_table_bounds(lines)
+    if table is None:
+        model.error(
+            path,
+            current_link_headings[0] + 1,
+            "Current Links must begin with the canonical traceability table header and separator",
+        )
+        return
+
+    _, _, separator_index, end_index = table
     seen_pairs: dict[tuple[str, str], int] = {}
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for index in range(separator_index + 1, end_index):
+        line_number = index + 1
+        line = lines[index]
         stripped = line.strip()
-        if not stripped.startswith("|") or stripped.startswith("| ---") or stripped.startswith("| Requirement"):
+        if not stripped:
             continue
-        if "<" in stripped and ">" in stripped:
+        if not stripped.startswith("|"):
+            model.error(path, line_number, "Current Links may contain only traceability table rows")
             continue
         columns = [column.strip() for column in stripped.strip("|").split("|")]
         if len(columns) != 4:
@@ -2234,7 +2641,7 @@ def validate_traceability(model: ManagementModel) -> None:
             model.error(path, line_number, f"traceability references missing requirement {requirement_id_value}")
         if work_item is None:
             model.error(path, line_number, f"traceability references missing work item {work_item_id}")
-        if requirement and work_item and not requirement_matches_id(requirement, work_item.requirement_id):
+        if requirement and work_item and work_item.requirement_id != requirement_id_value:
             model.error(path, line_number, f"{work_item_id} maps to {work_item.requirement_id}, not {requirement_id_value}")
         if work_item and state != work_item.state:
             model.error(path, line_number, f"traceability state {state} does not match {work_item_id} backlog state {work_item.state}")
@@ -2511,7 +2918,7 @@ def traceability_gaps(model: ManagementModel) -> list[Requirement]:
     return [
         requirement
         for requirement in sorted(model.requirements.values(), key=lambda candidate: candidate.id)
-        if not traceability_links_for(requirement, links)
+        if requirement_evidence_coverage(model, requirement, links)["status"] == "gap"
     ]
 
 
@@ -2579,7 +2986,7 @@ def render_management_dashboard(output_dir: Path, model: ManagementModel, stale_
     cards = [
         ("Requirements", str(len(model.requirements))),
         ("Work Items", str(len(model.work_items))),
-        ("Trace Gaps", str(len(gaps))),
+        ("Evidence Gaps", str(len(gaps))),
         ("Unmapped", str(len(unmapped))),
         ("Stale Work", str(len(stale))),
         ("Open Risks", str(len(risks))),
@@ -2619,7 +3026,7 @@ def render_management_dashboard(output_dir: Path, model: ManagementModel, stale_
 <section><h2>Architecture Diagrams</h2><ul><li><a href="./diagrams/architecture-real.svg">Current architecture</a></li><li><a href="./diagrams/architecture-planned.svg">Architecture with planned and unplanned work</a></li><li><a href="./diagrams/module-dependencies.svg">Rust module dependencies</a></li></ul></section>
 <section><h2>Work by State</h2>{html_table(["State", "Count"], state_rows)}</section>
 <section><h2>Stale Work</h2>{html_table(["Work Item", "State", "Owner", "Date", "Age", "Reason"], stale_rows)}</section>
-<section><h2>Traceability Gaps</h2>{html_table(["Requirement", "Title", "Source"], trace_rows)}</section>
+<section><h2>Evidence Coverage Gaps</h2>{html_table(["Requirement", "Title", "Source"], trace_rows)}</section>
 <section><h2>Risks</h2>{html_table(["Risk", "Title", "Status"], risk_rows)}</section>
 <section><h2>Incidents</h2>{html_table(["Incident", "Title", "Status"], incident_rows)}</section>
 <section><h2>Experiments</h2>{html_table(["Experiment", "Title", "Status"], experiment_rows)}</section>
@@ -3074,17 +3481,87 @@ def traceability_evidence_text(paths: list[str], note: str | None) -> str:
 def append_or_update_traceability(requirement_id_value: str, work_item: WorkItem, paths: list[str], note: str | None, state: str | None) -> str:
     path = MANAGEMENT_DIR / "TRACEABILITY.md"
     with management_write_lock():
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
         new_evidence = traceability_evidence_text(paths, note)
         row_state = state or work_item.state
+        row = f"| `{requirement_id_value}` | `{work_item.id}` | {row_state} | {new_evidence} |"
 
-        for index, line in enumerate(lines):
-            stripped = line.strip()
-            if not stripped.startswith("| `"):
+        heading_indexes = [
+            index
+            for index, line in enumerate(lines)
+            if line.strip() == TRACEABILITY_CURRENT_LINKS_HEADING
+        ]
+        if not heading_indexes:
+            if any(line.strip().startswith("|") for line in lines):
+                raise ValueError(
+                    "cannot safely create Current Links while traceability table content exists outside that section"
+                )
+            while lines and not lines[-1].strip():
+                lines.pop()
+            lines.extend(
+                [
+                    "",
+                    TRACEABILITY_CURRENT_LINKS_HEADING,
+                    "",
+                    TRACEABILITY_TABLE_HEADER,
+                    TRACEABILITY_TABLE_SEPARATOR,
+                    row,
+                ]
+            )
+            atomic_write_text(path, "\n".join(lines).rstrip() + "\n")
+            return "appended"
+        if len(heading_indexes) != 1:
+            raise ValueError("cannot safely update traceability with multiple `## Current Links` sections")
+
+        section = traceability_current_links_section_bounds(lines)
+        if section is None:
+            raise ValueError("cannot locate the unique `## Current Links` section")
+        heading_index, section_end = section
+        table = traceability_current_links_table_bounds(lines)
+        if table is None:
+            nonblank_section_lines = [
+                lines[index].strip()
+                for index in range(heading_index + 1, section_end)
+                if lines[index].strip()
+            ]
+            repairable = not nonblank_section_lines or all(
+                line.startswith("| Requirement") or set(line) <= {"|", " ", "-", ":"}
+                for line in nonblank_section_lines
+            )
+            if not repairable:
+                raise ValueError(
+                    "cannot safely repair the canonical Current Links table while rows or prose are present"
+                )
+            lines[heading_index + 1 : section_end] = [
+                "",
+                TRACEABILITY_TABLE_HEADER,
+                TRACEABILITY_TABLE_SEPARATOR,
+                row,
+                "",
+            ]
+            atomic_write_text(path, "\n".join(lines).rstrip() + "\n")
+            return "appended"
+
+        _, _, separator_index, section_end = table
+        current_link_indexes: list[int] = []
+        for index in range(separator_index + 1, section_end):
+            stripped = lines[index].strip()
+            if not stripped:
                 continue
             columns = [column.strip() for column in stripped.strip("|").split("|")]
-            if len(columns) < 4:
-                continue
+            if (
+                not stripped.startswith("| `")
+                or len(columns) != 4
+                or re.fullmatch(r"`[^`]+`", columns[0]) is None
+                or re.fullmatch(r"`[^`]+`", columns[1]) is None
+            ):
+                raise ValueError("cannot safely update a malformed Current Links table")
+            current_link_indexes.append(index)
+
+        for index in current_link_indexes:
+            stripped = lines[index].strip()
+            columns = [column.strip() for column in stripped.strip("|").split("|")]
             if columns[0].strip("`") == requirement_id_value and columns[1].strip("`") == work_item.id:
                 existing_evidence = columns[3]
                 evidence = existing_evidence
@@ -3094,15 +3571,8 @@ def append_or_update_traceability(requirement_id_value: str, work_item: WorkItem
                 atomic_write_text(path, "\n".join(lines).rstrip() + "\n")
                 return "updated"
 
-        insert_index = len(lines)
-        for index, line in enumerate(lines):
-            if line.startswith("## Unmapped Requirement Areas"):
-                insert_index = index
-                break
-        while insert_index > 0 and not lines[insert_index - 1].strip():
-            insert_index -= 1
-        row = f"| `{requirement_id_value}` | `{work_item.id}` | {row_state} | {new_evidence} |"
-        lines[insert_index:insert_index] = [row, ""]
+        insert_index = current_link_indexes[-1] + 1 if current_link_indexes else separator_index + 1
+        lines.insert(insert_index, row)
         atomic_write_text(path, "\n".join(lines).rstrip() + "\n")
         return "appended"
 
@@ -3547,33 +4017,41 @@ def cmd_estimate_requirement(args: argparse.Namespace) -> int:
     duplicate_titles = duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.title)))
     duplicate_bodies = duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.body)))
     findings = audit_requirement(model, requirement, traceability_text, duplicate_titles, duplicate_bodies)
+    prompts = requirement_semantic_prompts(requirement)
+    active_prompts = [prompt for prompt in prompts if prompt.status == "active"]
+    acknowledged_prompts = [prompt for prompt in prompts if prompt.status == "acknowledged"]
     work_items = requirement_work_items(model, requirement)
-    links = traceability_links_for(requirement, traceability_links())
+    all_links = traceability_links()
+    all_area_acknowledgements = unmapped_requirement_area_acknowledgements()
+    links = traceability_links_for(requirement, all_links)
+    work_coverage = requirement_work_coverage(model, requirement)
+    evidence_coverage = requirement_evidence_coverage(model, requirement, all_links)
+    coverage_acknowledgements = requirement_coverage_acknowledgements(requirement, all_area_acknowledgements)
     references = [reference for reference in requirement_references(requirement_text(requirement)) if reference != requirement.id]
     child_requirements = [
         candidate
         for candidate in all_requirements
         if candidate.id.startswith(f"{requirement.id}.") and candidate.id != requirement.id
     ]
-    score = requirement_complexity_score(requirement, work_items, findings)
-    effort_band = estimate_effort_band(score)
-    blockers = [finding for finding in findings if finding.severity == "BLOCKER"]
-    reviews = [finding for finding in findings if finding.severity == "REVIEW"]
-
-    if blockers:
-        readiness = "NOT READY"
-    elif reviews:
-        readiness = "NEEDS REFINEMENT"
-    else:
-        readiness = "READY FOR PLANNING"
+    estimate = requirement_estimate_decision(requirement, findings, prompts)
 
     print("Requirement Estimate")
     print("====================")
     print_requirement(requirement)
     print()
-    print(f"Readiness:          {readiness}")
-    print(f"Estimated effort:   {effort_band} senior engineer-hours")
-    print(f"Complexity score:   {score}")
+    print(f"Readiness:                {estimate.readiness}")
+    print(f"Delivery estimate:        {estimate.delivery_estimate}")
+    print(
+        "Structural sizing signal: "
+        f"{estimate.structural_effort_band} senior engineer-hours "
+        "(not a delivery estimate)"
+    )
+    print(f"Structural score:         {estimate.structural_score}")
+    print(f"Estimate confidence:      {estimate.confidence}")
+    if estimate.uncertainty_drivers:
+        print("Uncertainty drivers:")
+        for driver in estimate.uncertainty_drivers:
+            print(f"  - {driver}")
     print()
     print("Existing work:")
     if work_items:
@@ -3581,6 +4059,7 @@ def cmd_estimate_requirement(args: argparse.Namespace) -> int:
             print(f"  - {item.id}: {item.state} -- {item.title}")
     else:
         print("  - none")
+    print(f"Planning coverage: {work_coverage['status']}")
     print()
     print("Traceability:")
     if links:
@@ -3588,6 +4067,12 @@ def cmd_estimate_requirement(args: argparse.Namespace) -> int:
             print(f"  - {link.requirement_id} -> {link.work_item_id}: {link.state}; {link.evidence}")
     else:
         print("  - no direct traceability link")
+    print(f"Evidence coverage: {evidence_coverage['status']}")
+    for acknowledgement in coverage_acknowledgements:
+        print(
+            f"  - acknowledged unmapped area {acknowledgement['pattern']} at management/TRACEABILITY.md:{acknowledgement['line']}: "
+            f"{acknowledgement['description'] or 'no description'}"
+        )
     print()
     print("Dependency signals:")
     if references:
@@ -3600,12 +4085,23 @@ def cmd_estimate_requirement(args: argparse.Namespace) -> int:
     if not references and not child_requirements:
         print("  - none detected")
     print()
-    print("Quality signals:")
+    print("Quality findings:")
     if findings:
         for finding in findings:
             print(f"  - {finding.severity}: {finding.category}: {finding.message}")
     else:
-        print("  - no local audit findings")
+        print("  - none")
+    print()
+    print("Semantic prompts:")
+    if active_prompts:
+        for prompt in active_prompts:
+            print(f"  - {prompt.category}: {prompt.message}")
+    else:
+        print("  - none")
+    if acknowledged_prompts:
+        print("Acknowledged semantic prompts:")
+        for prompt in acknowledged_prompts:
+            print(f"  - {prompt.category}: {prompt.message}")
     print()
     print("Planning prompt:")
     print(
@@ -3629,7 +4125,11 @@ def cmd_sync_requirement(args: argparse.Namespace) -> int:
 
     work_items = requirement_work_items(model, requirement)
     completed_items = completed_work_items(work_items)
-    links = traceability_links_for(requirement, traceability_links())
+    all_links = traceability_links()
+    links = traceability_links_for(requirement, all_links)
+    work_coverage = requirement_work_coverage(model, requirement)
+    evidence_coverage = requirement_evidence_coverage(model, requirement, all_links)
+    coverage_acknowledgements = requirement_coverage_acknowledgements(requirement)
     paths = sorted({path for link in links for path in evidence_paths(link)})
     path_statuses = evidence_path_statuses(paths)
     missing_paths = [path for path, status in path_statuses if status == "missing"]
@@ -3638,14 +4138,29 @@ def cmd_sync_requirement(args: argparse.Namespace) -> int:
     term_mentions = source_files_mentioning(requirement_source_terms(requirement), args.limit, implementation_only=True)
     signals: list[str] = []
 
-    if not work_items:
-        signals.append(issue_line("REVIEW", "no backlog work item maps to this requirement"))
-    if work_items and not completed_items:
-        signals.append(issue_line("REVIEW", "no merged or rolled-out work item maps to this requirement yet"))
-    if not links:
-        signals.append(issue_line("REVIEW", "no TRACEABILITY.md row maps to this requirement"))
-    if links and not paths:
-        signals.append(issue_line("REVIEW", "traceability rows do not list concrete evidence paths"))
+    if work_coverage["status"] == "unplanned":
+        signals.append(issue_line("INFO", "requirement is not yet mapped to backlog work"))
+    elif work_coverage["status"] == "abandoned":
+        signals.append(issue_line("INFO", "only rejected, cancelled, or superseded work maps to this requirement"))
+    if evidence_coverage["status"] == "pending":
+        signals.append(issue_line("INFO", "mapped work has not reached Merged or Rolled Out; evidence coverage is pending"))
+    elif evidence_coverage["status"] == "gap":
+        if evidence_coverage["missing_traceability_work_item_ids"]:
+            signals.append(
+                issue_line(
+                    "REVIEW",
+                    "completed work has no TRACEABILITY.md row: "
+                    + ", ".join(evidence_coverage["missing_traceability_work_item_ids"]),
+                )
+            )
+        if evidence_coverage["missing_evidence_work_item_ids"]:
+            signals.append(
+                issue_line(
+                    "REVIEW",
+                    "completed work has no existing concrete evidence path: "
+                    + ", ".join(evidence_coverage["missing_evidence_work_item_ids"]),
+                )
+            )
     if missing_paths:
         signals.append(issue_line("BLOCKER", f"traceability references missing evidence paths: {', '.join(missing_paths[:4])}"))
     if untracked_paths:
@@ -3673,6 +4188,7 @@ def cmd_sync_requirement(args: argparse.Namespace) -> int:
             print(f"  - {item.id}: {item.state} -- {item.title}")
     else:
         print("  - none")
+    print(f"Planning coverage: {work_coverage['status']}")
     print()
     print("Traceability rows:")
     if links:
@@ -3680,6 +4196,14 @@ def cmd_sync_requirement(args: argparse.Namespace) -> int:
             print(f"  - line {link.line}: {link.requirement_id} -> {link.work_item_id}: {link.state}; {link.evidence}")
     else:
         print("  - none")
+    print(f"Evidence coverage: {evidence_coverage['status']}")
+    if coverage_acknowledgements:
+        print("Acknowledged unmapped coverage:")
+        for acknowledgement in coverage_acknowledgements:
+            print(
+                f"  - {acknowledgement['pattern']} at management/TRACEABILITY.md:{acknowledgement['line']}: "
+                f"{acknowledgement['description'] or 'no description'}"
+            )
     print()
     print("Evidence path status:")
     if path_statuses:
@@ -3769,7 +4293,7 @@ def cmd_management_status(args: argparse.Namespace) -> int:
     print("=================")
     print(f"Requirements:       {len(model.requirements)}")
     print(f"Work items:         {len(model.work_items)}")
-    print(f"Traceability gaps:  {len(gaps)}")
+    print(f"Evidence gaps:      {len(gaps)}")
     print(f"Unmapped reqs:      {len(unmapped)}")
     print(f"Stale work:         {len(stale)}")
     print(f"Open risks:         {len(risks)}")
@@ -3789,7 +4313,7 @@ def cmd_management_status(args: argparse.Namespace) -> int:
     else:
         print("  - none")
     print()
-    print("Dashboard sections: work state, stale work, traceability gaps, risks, incidents, experiments, decisions, tech debt leads.")
+    print("Dashboard sections: work state, stale work, evidence coverage gaps, risks, incidents, experiments, decisions, tech debt leads.")
 
     if args.html:
         target = render_management_dashboard(Path(args.html), model, args.stale_days)
@@ -3869,8 +4393,12 @@ def cmd_trace_requirement(args: argparse.Namespace) -> int:
         print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
         return 1
 
-    links = traceability_links_for(requirement, traceability_links())
+    all_links = traceability_links()
+    links = traceability_links_for(requirement, all_links)
     work_items = requirement_work_items(model, requirement)
+    work_coverage = requirement_work_coverage(model, requirement)
+    evidence_coverage = requirement_evidence_coverage(model, requirement, all_links)
+    coverage_acknowledgements = requirement_coverage_acknowledgements(requirement)
     paths = sorted({path for link in links for path in evidence_paths(link)})
     mentions = source_files_mentioning(requirement_source_terms(requirement), args.limit, implementation_only=True)
     all_requirements = sorted(model.requirements.values(), key=lambda candidate: candidate.id)
@@ -3878,6 +4406,7 @@ def cmd_trace_requirement(args: argparse.Namespace) -> int:
     duplicate_bodies = duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.body)))
     traceability_text = (MANAGEMENT_DIR / "TRACEABILITY.md").read_text(encoding="utf-8") if (MANAGEMENT_DIR / "TRACEABILITY.md").exists() else ""
     findings = audit_requirement(model, requirement, traceability_text, duplicate_titles, duplicate_bodies)
+    prompts = requirement_semantic_prompts(requirement)
 
     print("Requirement Trace")
     print("=================")
@@ -3889,6 +4418,7 @@ def cmd_trace_requirement(args: argparse.Namespace) -> int:
             print(f"  - {item.id}: {item.state} -- {item.title}")
     else:
         print("  - none")
+    print(f"Planning coverage: {work_coverage['status']}")
     print()
     print("Traceability links:")
     if links:
@@ -3896,6 +4426,14 @@ def cmd_trace_requirement(args: argparse.Namespace) -> int:
             print(f"  - line {link.line}: {link.requirement_id} -> {link.work_item_id}: {link.state}; {link.evidence}")
     else:
         print("  - none")
+    print(f"Evidence coverage: {evidence_coverage['status']}")
+    if coverage_acknowledgements:
+        print("Acknowledged unmapped coverage:")
+        for acknowledgement in coverage_acknowledgements:
+            print(
+                f"  - {acknowledgement['pattern']} at management/TRACEABILITY.md:{acknowledgement['line']}: "
+                f"{acknowledgement['description'] or 'no description'}"
+            )
     print()
     print("Evidence paths:")
     statuses = evidence_path_statuses(paths)
@@ -3912,12 +4450,25 @@ def cmd_trace_requirement(args: argparse.Namespace) -> int:
     else:
         print("  - none")
     print()
-    print("Audit signals:")
+    print("Quality findings:")
     if findings:
         for finding in findings:
             print(f"  - {finding.severity}: {finding.category}: {finding.message}")
     else:
         print("  - none")
+    print()
+    print("Semantic prompts:")
+    active_prompts = [prompt for prompt in prompts if prompt.status == "active"]
+    acknowledged_prompts = [prompt for prompt in prompts if prompt.status == "acknowledged"]
+    if active_prompts:
+        for prompt in active_prompts:
+            print(f"  - {prompt.category}: {prompt.message}")
+    else:
+        print("  - none")
+    if acknowledged_prompts:
+        print("Acknowledged semantic prompts:")
+        for prompt in acknowledged_prompts:
+            print(f"  - {prompt.category}: {prompt.message}")
     print()
     print("Scope note: trace output is a knowledge-base view. It helps humans and AI navigate evidence; it does not prove behavior.")
     return 0
@@ -3938,7 +4489,7 @@ def cmd_link_evidence(args: argparse.Namespace) -> int:
     if work_item is None:
         print(f"unknown work item: {args.work_item_id}", file=sys.stderr)
         return 1
-    if not requirement_matches_id(requirement, work_item.requirement_id):
+    if work_item.requirement_id != requirement.id:
         print(f"error: {work_item.id} maps to {work_item.requirement_id}, not {requirement.id}", file=sys.stderr)
         return 1
     try:
@@ -4005,7 +4556,7 @@ def cmd_prepare_release(args: argparse.Namespace) -> int:
     if open_incidents:
         blockers.append(f"{len(open_incidents)} open incident(s)")
     if gaps:
-        reviews.append(f"{len(gaps)} requirement(s) without traceability")
+        reviews.append(f"{len(gaps)} requirement evidence coverage gap(s)")
     if stale:
         reviews.append(f"{len(stale)} stale work item(s)")
     if open_risks:
@@ -4327,14 +4878,14 @@ def cmd_meeting_packet(args: argparse.Namespace) -> int:
     print()
     print("Needs attention:")
     print(f"  - Stale work: {len(stale)}")
-    print(f"  - Traceability gaps: {len(gaps)}")
+    print(f"  - Evidence coverage gaps: {len(gaps)}")
     print(f"  - Open risks: {len(risks)}")
     print(f"  - Open incidents: {len(incidents)}")
     print(f"  - Active experiments: {len(experiments)}")
     print()
     print("Suggested agenda:")
     print("  - Confirm blocked or stale work owners and next actions.")
-    print("  - Review requirement traceability gaps before accepting new work.")
+    print("  - Review requirement evidence coverage gaps before accepting new work.")
     print("  - Review open incidents and release-impacting risks.")
     print("  - Decide whether active experiments continue, close, or become requirement-backed work.")
     print("  - Confirm release readiness if a tag is planned.")
@@ -4404,12 +4955,35 @@ def cmd_audit_requirements(args: argparse.Namespace) -> int:
     duplicate_bodies = duplicate_requirement_groups(requirements, lambda requirement: " ".join(words_in(requirement.body)))
 
     findings: list[AuditFinding] = []
+    prompts: list[SemanticPrompt] = []
+    work_coverage: list[tuple[Requirement, dict[str, object]]] = []
+    evidence_coverage: list[tuple[Requirement, dict[str, object]]] = []
+    coverage_acknowledgements: list[tuple[Requirement, list[dict[str, object]]]] = []
+    all_links = traceability_links()
+    all_area_acknowledgements = unmapped_requirement_area_acknowledgements()
     for requirement in requirements:
         findings.extend(audit_requirement(model, requirement, traceability, duplicate_titles, duplicate_bodies))
+        prompts.extend(requirement_semantic_prompts(requirement))
+        work_coverage.append((requirement, requirement_work_coverage(model, requirement)))
+        evidence_coverage.append((requirement, requirement_evidence_coverage(model, requirement, all_links)))
+        acknowledgements = requirement_coverage_acknowledgements(requirement, all_area_acknowledgements)
+        if acknowledgements:
+            coverage_acknowledgements.append((requirement, acknowledgements))
 
     severity_order = {severity: index for index, severity in enumerate(AUDIT_SEVERITIES)}
     findings.sort(key=lambda finding: (severity_order.get(finding.severity, 99), finding.requirement.id, finding.category))
+    prompts.sort(key=lambda prompt: (prompt.status, prompt.requirement.id, prompt.category))
     counts = {severity: sum(1 for finding in findings if finding.severity == severity) for severity in AUDIT_SEVERITIES}
+    active_prompts = [prompt for prompt in prompts if prompt.status == "active"]
+    acknowledged_prompts = [prompt for prompt in prompts if prompt.status == "acknowledged"]
+    work_status_counts = {
+        status: sum(1 for _, coverage in work_coverage if coverage["status"] == status)
+        for status in ("unplanned", "active", "completed", "mixed", "abandoned")
+    }
+    evidence_status_counts = {
+        status: sum(1 for _, coverage in evidence_coverage if coverage["status"] == status)
+        for status in ("not_applicable", "pending", "evidenced", "gap")
+    }
 
     print("Requirement Audit")
     print("=================")
@@ -4419,11 +4993,23 @@ def cmd_audit_requirements(args: argparse.Namespace) -> int:
     print(f"Work items:           {len(model.work_items)}")
     print(f"Traceability source:  {relative(traceability_path)}")
     print()
-    print("Summary:")
+    print("Quality summary:")
     for severity in AUDIT_SEVERITIES:
         print(f"  {severity}: {counts[severity]}")
+    print(f"Semantic prompts:      {len(active_prompts)} active; {len(acknowledged_prompts)} acknowledged")
+    print(
+        "Planning coverage:     "
+        + "; ".join(
+            f"{status} {work_status_counts[status]}"
+            for status in ("unplanned", "active", "completed", "mixed", "abandoned")
+        )
+    )
+    print(
+        "Evidence coverage:     "
+        + "; ".join(f"{status} {evidence_status_counts[status]}" for status in ("not_applicable", "pending", "evidenced", "gap"))
+    )
     print()
-    print("Findings:")
+    print("Quality findings:")
     if not findings:
         print("  - none")
     else:
@@ -4433,7 +5019,32 @@ def cmd_audit_requirements(args: argparse.Namespace) -> int:
         if args.limit > 0 and len(findings) > args.limit:
             print(f"  - ... {len(findings) - args.limit} more")
     print()
-    print("Scope note: this is a local heuristic audit over management files. Market fit, competitor analysis, code-semantic drift, and final requirement wording remain human PM/manager decisions.")
+    print("Semantic prompts:")
+    printable_prompts = active_prompts if args.limit <= 0 else active_prompts[: args.limit]
+    if printable_prompts:
+        for prompt in printable_prompts:
+            print(f"  - {prompt.format()}")
+        if args.limit > 0 and len(active_prompts) > args.limit:
+            print(f"  - ... {len(active_prompts) - args.limit} more")
+    else:
+        print("  - none")
+    if acknowledged_prompts:
+        print("Acknowledged semantic prompts:")
+        printable_acknowledged = acknowledged_prompts if args.limit <= 0 else acknowledged_prompts[: args.limit]
+        for prompt in printable_acknowledged:
+            print(f"  - {prompt.format()}")
+        if args.limit > 0 and len(acknowledged_prompts) > args.limit:
+            print(f"  - ... {len(acknowledged_prompts) - args.limit} more")
+    if coverage_acknowledgements:
+        print("Acknowledged unmapped coverage:")
+        for requirement, acknowledgements in coverage_acknowledgements:
+            for acknowledgement in acknowledgements:
+                print(
+                    f"  - {requirement.id}: {acknowledgement['pattern']} at management/TRACEABILITY.md:{acknowledgement['line']}: "
+                    f"{acknowledgement['description'] or 'no description'}"
+                )
+    print()
+    print("Scope note: quality findings are deterministic observations. Semantic prompts are lexical review leads, while planning and evidence coverage report lifecycle facts. Market fit, code-semantic drift, and final requirement wording remain human decisions.")
 
     if args.strict and (counts["BLOCKER"] or counts["REVIEW"]):
         return 1
@@ -4687,6 +5298,30 @@ def traceability_json(link: TraceabilityLink) -> dict[str, object]:
     }
 
 
+def audit_finding_json(finding: AuditFinding) -> dict[str, object]:
+    return {
+        "severity": finding.severity,
+        "requirement_id": finding.requirement.id,
+        "category": finding.category,
+        "message": finding.message,
+        "path": relative(finding.requirement.path),
+        "line": finding.requirement.line,
+    }
+
+
+def semantic_prompt_json(prompt: SemanticPrompt) -> dict[str, object]:
+    return {
+        "status": prompt.status,
+        "requirement_id": prompt.requirement.id,
+        "category": prompt.category,
+        "message": prompt.message,
+        "terms": list(prompt.terms),
+        "mixed_terms": list(prompt.mixed_terms),
+        "path": relative(prompt.requirement.path),
+        "line": prompt.requirement.line,
+    }
+
+
 def issue_json(issue: Issue) -> dict[str, object]:
     return {
         "severity": issue.severity,
@@ -4737,6 +5372,7 @@ def semantic_context_payload(args: argparse.Namespace) -> tuple[dict[str, object
         return payload, 1
 
     all_links = traceability_links()
+    all_area_acknowledgements = unmapped_requirement_area_acknowledgements()
     limit = args.limit
     reference = args.reference
     if workflow in {"plan", "review", "verification"}:
@@ -4819,20 +5455,39 @@ def semantic_context_payload(args: argparse.Namespace) -> tuple[dict[str, object
                 duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.title))),
                 duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.body))),
             )
-            score = requirement_complexity_score(requirement, work_items, findings)
+            prompts = requirement_semantic_prompts(requirement)
+            active_prompts = [prompt for prompt in prompts if prompt.status == "active"]
+            acknowledged_prompts = [prompt for prompt in prompts if prompt.status == "acknowledged"]
+            estimate = requirement_estimate_decision(requirement, findings, prompts)
             payload["observations"] = {
                 "explicit_requirement_references": requirement_references(requirement_text(requirement)),
-                "local_complexity_score": score,
-                "heuristic_effort_band": estimate_effort_band(score),
-                "local_quality_signals": [finding.format() for finding in findings],
+                "local_complexity_score": estimate.structural_score,
+                "heuristic_effort_band": estimate.structural_effort_band,
+                "estimate_decision": dataclasses.asdict(estimate),
+                "quality_findings": [audit_finding_json(finding) for finding in findings],
+                "semantic_prompts": [semantic_prompt_json(prompt) for prompt in active_prompts],
+                "acknowledged_semantic_prompts": [semantic_prompt_json(prompt) for prompt in acknowledged_prompts],
+                "work_coverage": requirement_work_coverage(model, requirement),
+                "evidence_coverage": requirement_evidence_coverage(model, requirement, all_links),
+                "acknowledged_unmapped_coverage": requirement_coverage_acknowledgements(requirement, all_area_acknowledgements),
             }
-            payload["candidate_signals"] = ["The effort band is a lexical planning aid; inspect implementation scope, dependencies, risks, and market context before estimating semantically."]
+            payload["candidate_signals"] = [
+                *[prompt.format() for prompt in active_prompts],
+                (
+                    "The structural effort band is not a delivery estimate; resolve the listed uncertainty drivers before making a commitment."
+                    if estimate.uncertainty_drivers
+                    else "The delivery range is a structural heuristic; inspect implementation scope, dependencies, risks, and market context before committing."
+                ),
+            ]
         else:
             paths = sorted({path for link in links for path in evidence_paths(link)})
             payload["observations"] = {
                 "evidence_path_status": [{"path": path, "status": status} for path, status in evidence_path_statuses(paths)],
                 "exact_requirement_id_mentions": source_files_mentioning([requirement.id], limit, implementation_only=True),
                 "requirement_term_mentions": source_files_mentioning(requirement_source_terms(requirement), limit, implementation_only=True),
+                "work_coverage": requirement_work_coverage(model, requirement),
+                "evidence_coverage": requirement_evidence_coverage(model, requirement, all_links),
+                "acknowledged_unmapped_coverage": requirement_coverage_acknowledgements(requirement, all_area_acknowledgements),
             }
             payload["candidate_signals"] = ["Compare the requirement semantically with implementation, tests, evidence, and relevant git history; lexical mentions do not prove conformance."]
         return payload, 0
@@ -4862,11 +5517,42 @@ def semantic_context_payload(args: argparse.Namespace) -> tuple[dict[str, object
                 if any(requirement_matches_id(requirement, link.requirement_id) for requirement in requirements)
             ],
         }
-        candidate_signals = [
-            finding.format()
+        quality_findings = [
+            finding
             for requirement in requirements
             for finding in audit_requirement(model, requirement, traceability_text, duplicate_titles, duplicate_bodies)
         ]
+        prompts = [prompt for requirement in requirements for prompt in requirement_semantic_prompts(requirement)]
+        active_prompts = [prompt for prompt in prompts if prompt.status == "active"]
+        acknowledged_prompts = [prompt for prompt in prompts if prompt.status == "acknowledged"]
+        payload["observations"]["quality_findings"] = [audit_finding_json(finding) for finding in quality_findings]
+        payload["observations"]["semantic_prompts"] = [semantic_prompt_json(prompt) for prompt in active_prompts]
+        payload["observations"]["acknowledged_semantic_prompts"] = [
+            semantic_prompt_json(prompt) for prompt in acknowledged_prompts
+        ]
+        payload["observations"]["work_coverage"] = [
+            {
+                "requirement_id": requirement.id,
+                **requirement_work_coverage(model, requirement),
+            }
+            for requirement in requirements
+        ]
+        payload["observations"]["evidence_coverage"] = [
+            {
+                "requirement_id": requirement.id,
+                **requirement_evidence_coverage(model, requirement, all_links),
+            }
+            for requirement in requirements
+        ]
+        payload["observations"]["acknowledged_unmapped_coverage"] = [
+            {
+                "requirement_id": requirement.id,
+                "acknowledgements": requirement_coverage_acknowledgements(requirement, all_area_acknowledgements),
+            }
+            for requirement in requirements
+            if requirement_coverage_acknowledgements(requirement, all_area_acknowledgements)
+        ]
+        candidate_signals = [prompt.format() for prompt in active_prompts]
         payload["candidate_signals"] = candidate_signals if limit <= 0 else candidate_signals[:limit]
         return payload, 0
 

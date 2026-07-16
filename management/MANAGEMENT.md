@@ -83,7 +83,12 @@ This project is conducted under a formal management procedure. The top-level rul
         - if it seems like a good fit for the current state of things, taking the market and competitors into account;
         - tells if this can be promptly implemented or if other requirements must be tackled first – either existing or not – helping creating a "dependency list", if any.
         - give effort estimations in senior developer / hour terms.
-      - `audit_requirements`: A good pass over all requirements to infer:
+      - `audit_requirements`: Requirement audits keep four dimensions distinct:
+        - Deterministic quality findings are structural or grammar facts that tooling can prove without semantic judgment.
+        - Semantic prompts are lexical review candidates, never conclusions. Each prompt is `active` or `acknowledged`. Exact single-emphasis around a matched broad term (`*broad-term*`, for example `*all*`) acknowledges that term for the whole requirement: keep the acknowledgement visible, but produce no active prompt for that term. If plain occurrences also exist, report the mixed usage without reactivating the prompt.
+        - `work_coverage` records whether and how a requirement maps to backlog work, independently of wording quality and evidence; its lifecycle summary distinguishes unplanned, active, completed, mixed completed/abandoned, and abandoned mappings.
+        - Lifecycle-aware `evidence_coverage` is `not_applicable`, `pending`, `evidenced`, or `gap`. A missing obligation for completed work is a `gap`; otherwise active work is `pending`, even when earlier completed work is evidenced. Only rows in the canonical Current Links table supply evidence, and each row names the exact requirement governing its work item. Unmapped Requirement Areas are coverage acknowledgements, never evidence rows.
+        A semantic pass may then infer:
         - as above, also tells if any requirement is not too clear and articulated, or if it needs rephrasing for better understanding;
         - are there any redundant requirements? which ones? and why?
         - conflicting requirements;
@@ -94,7 +99,8 @@ This project is conducted under a formal management procedure. The top-level rul
         - requirements with undefined failure behavior;
         - requirements with unbounded terms such as “fast,” “reliable,” or “appropriate”;
         - requirements whose acceptance would contradict another deployment;
-        - requirements with no work and no evidence of implementation;
+        - requirements with no mapped work;
+        - completed work whose traceability row supplies no required evidence;
         - implemented behavior with no governing requirement;
         - stale requirements referring to removed components;
         - requirements whose deadlines, versions, or market assumptions have expired.

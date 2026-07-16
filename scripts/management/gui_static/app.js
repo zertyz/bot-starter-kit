@@ -84,17 +84,54 @@ function auditPill(findings) {
   return pill(`${severity} ${count}`, severityKind(severity), issueTitle(findings));
 }
 
-function tracePill(req) {
-  const auditTrace = req.audit_findings.filter((finding) => finding.category === "traceability");
-  const title = [
-    req.traceability_detail,
-    req.traceability_lines.length ? `Rows: ${req.traceability_lines.join(", ")}` : "",
-    issueTitle(auditTrace),
+function qualityFindings(req) {
+  return req.quality_findings ?? req.audit_findings ?? [];
+}
+
+function qualityPill(req) {
+  const findings = qualityFindings(req);
+  if (!findings.length) return pill("OK", "green", "No deterministic requirement-quality finding.");
+  return auditPill(findings);
+}
+
+function workCoverageTitle(coverage) {
+  const motivation = coverage.by_motivation ?? {};
+  const items = (coverage.items ?? [])
+    .map((item) => `${item.id}: ${item.state} (${item.relation}, ${item.motivation})`)
+    .join("\n");
+  return [
+    `Mapped: ${coverage.count} total; ${coverage.direct_count} direct; ${coverage.descendant_count} descendant`,
+    `Lifecycle: ${coverage.active_count} active; ${coverage.completed_count} completed; ${coverage.abandoned_count} abandoned`,
+    `Motivation: N ${motivation.N ?? 0}; R ${motivation.R ?? 0}; F ${motivation.F ?? 0}; X ${motivation.X ?? 0}`,
+    items ? `Items:\n${items}` : "No backlog work is mapped yet.",
+  ].join("\n");
+}
+
+function workCoveragePill(coverage) {
+  const title = workCoverageTitle(coverage);
+  if (!coverage.count) return pill("0 · Unplanned", "orange", title);
+  if (coverage.status === "completed") return pill(`${coverage.count} · Completed`, "green", title);
+  if (coverage.status === "mixed") return pill(`${coverage.count} · Mixed`, "orange", title);
+  if (coverage.status === "abandoned") return pill(`${coverage.count} · Abandoned`, "muted", title);
+  return pill(`${coverage.count} · Active`, "blue", title);
+}
+
+function evidenceCoverageTitle(coverage) {
+  return [
+    coverage.detail,
+    coverage.completed_work_items?.length ? `Completed: ${coverage.completed_work_items.join(", ")}` : "",
+    coverage.pending_work_items?.length ? `Pending: ${coverage.pending_work_items.join(", ")}` : "",
+    coverage.missing_rows?.length ? `Missing rows: ${coverage.missing_rows.join(", ")}` : "",
+    coverage.missing_evidence?.length ? `Missing evidence: ${coverage.missing_evidence.join(", ")}` : "",
   ].filter(Boolean).join("\n");
-  if (req.traceability_status === "direct") return pill("linked", "green", title);
-  if (req.traceability_status === "child") return pill("child", "blue", title);
-  if (req.traceability_status === "area") return pill("area", "orange", title);
-  return pill("gap", "orange", title);
+}
+
+function evidenceCoveragePill(coverage) {
+  const title = evidenceCoverageTitle(coverage);
+  if (coverage.status === "evidenced") return pill("Evidenced", "green", title);
+  if (coverage.status === "gap") return pill("Evidence gap", "red", title);
+  if (coverage.status === "pending") return pill("Pending", "blue", title);
+  return pill("Not applicable", "muted", title);
 }
 
 function rowClassForIssues(items) {
@@ -139,6 +176,7 @@ function render() {
   renderAttention();
   renderRequirements();
   renderWorkItems();
+  renderTraceability();
   renderSelects();
   renderLedgers();
   renderTechDebt();
@@ -186,14 +224,15 @@ function renderMetrics() {
   const labels = [
     ["requirements", "Requirements"],
     ["work_items", "Work Items"],
-    ["traceability_gaps", "Trace Gaps"],
-    ["unmapped_requirements", "Unmapped"],
+    ["unplanned_requirements", "Unplanned Requirements"],
+    ["evidence_gaps", "Evidence Gaps"],
+    ["evidence_pending", "Evidence Pending"],
     ["stale_work", "Stale Work"],
     ["open_risks", "Open Risks"],
     ["open_incidents", "Open Incidents"],
     ["active_experiments", "Experiments"],
-    ["audit_blockers", "Audit Blockers"],
-    ["audit_reviews", "Audit Reviews"],
+    ["quality_findings", "Quality Findings"],
+    ["active_semantic_prompts", "Advisory Prompts"],
     ["tech_debt_findings", "Debt Leads"],
   ];
   $("#metrics").innerHTML = labels.map(([key, label]) => `
@@ -226,21 +265,21 @@ function renderAttention() {
   for (const item of state.model.stale_work.slice(0, 8)) {
     items.push(`<div class="list-item"><strong>${escapeHtml(item.id)}</strong><span>${escapeHtml(item.reason)}</span></div>`);
   }
-  for (const finding of state.model.audit_findings.filter((item) => item.severity === "BLOCKER").slice(0, 8)) {
+  for (const finding of state.model.quality_findings.filter((item) => item.severity === "BLOCKER").slice(0, 8)) {
     items.push(`<div class="list-item"><strong class="error">${escapeHtml(finding.requirement_id)} ${escapeHtml(finding.category)}</strong><span>${escapeHtml(finding.message)} · ${escapeHtml(finding.edit_hint)}</span></div>`);
   }
-  for (const req of state.model.traceability_gaps.slice(0, 8)) {
-    items.push(`<div class="list-item"><strong>${escapeHtml(req)}</strong><span>Missing traceability link</span></div>`);
+  for (const req of state.model.requirements.filter((item) => item.evidence_coverage.status === "gap").slice(0, 8)) {
+    items.push(`<div class="list-item"><strong class="error">${escapeHtml(req.id)} evidence gap</strong><span>${escapeHtml(req.evidence_coverage.detail)}</span></div>`);
   }
   $("#attention").innerHTML = `<div class="list">${items.join("") || '<p class="empty">None</p>'}</div>`;
 }
 
 function requirementById(id) {
-  return state.model.requirements.find((item) => item.id === id);
+  return state.model.requirements?.find((item) => item.id === id) ?? null;
 }
 
 function workById(id) {
-  return state.model.work_items.find((item) => item.id === id);
+  return state.model.work_items?.find((item) => item.id === id) ?? null;
 }
 
 function blockHistoryText(item) {
@@ -264,19 +303,19 @@ function historyExceptionText(item) {
 function renderRequirements() {
   const filter = $("#requirement-filter").value.toLowerCase();
   const rows = state.model.requirements
-    .filter((req) => `${req.id} ${req.title} ${req.body}`.toLowerCase().includes(filter))
+    .filter((req) => `${req.id} ${req.title} ${req.body} ${workCoverageTitle(req.work_coverage)} ${evidenceCoverageTitle(req.evidence_coverage)}`.toLowerCase().includes(filter))
     .map((req) => `
-      <tr class="${rowClassForIssues(req.audit_findings)}" title="${attr(issueTitle(req.audit_findings))}">
+      <tr class="${rowClassForIssues(qualityFindings(req))}" title="${attr(issueTitle(qualityFindings(req)))}">
         <td><button type="button" data-select-requirement="${escapeHtml(req.id)}">${escapeHtml(req.id)}</button></td>
         <td>${escapeHtml(req.title)}</td>
-        <td>${auditPill(req.audit_findings)}</td>
-        <td>${req.work_items.length}</td>
-        <td>${tracePill(req)}</td>
+        <td>${qualityPill(req)}</td>
+        <td>${workCoveragePill(req.work_coverage)}</td>
+        <td>${evidenceCoveragePill(req.evidence_coverage)}</td>
         <td class="actions">
           <button type="button" data-action="show-requirement" data-requirement-id="${escapeHtml(req.id)}" title="Show requirement text and source location.">Show</button>
-          <button type="button" class="${highestSeverity(req.audit_findings) === "BLOCKER" ? "danger" : highestSeverity(req.audit_findings) === "REVIEW" ? "warn" : ""}" data-action="estimate-requirement" data-requirement-id="${escapeHtml(req.id)}" title="${attr(issueTitle(req.audit_findings))}">Estimate</button>
-          <button type="button" class="${req.traceability_status === "missing" || req.traceability_status === "area" ? "warn" : ""}" data-action="sync-requirement" data-requirement-id="${escapeHtml(req.id)}" title="${attr(req.traceability_detail)}">Sync</button>
-          <button type="button" class="${req.traceability_status === "missing" || req.traceability_status === "area" ? "warn" : ""}" data-action="trace-requirement" data-requirement-id="${escapeHtml(req.id)}" title="${attr(req.traceability_detail)}">Trace</button>
+          <button type="button" class="${highestSeverity(qualityFindings(req)) === "BLOCKER" ? "danger" : ""}" data-action="estimate-requirement" data-requirement-id="${escapeHtml(req.id)}" title="${attr(issueTitle(qualityFindings(req)))}">Estimate</button>
+          <button type="button" class="${req.evidence_coverage.status === "gap" ? "warn" : ""}" data-action="sync-requirement" data-requirement-id="${escapeHtml(req.id)}" title="${attr(evidenceCoverageTitle(req.evidence_coverage))}">Sync</button>
+          <button type="button" class="${req.evidence_coverage.status === "gap" ? "warn" : ""}" data-action="trace-requirement" data-requirement-id="${escapeHtml(req.id)}" title="${attr(evidenceCoverageTitle(req.evidence_coverage))}">Trace</button>
         </td>
       </tr>
     `).join("");
@@ -305,6 +344,79 @@ function renderWorkItems() {
       </tr>
     `).join("");
   $("#work-table").innerHTML = rows || `<tr><td colspan="7" class="empty">None</td></tr>`;
+}
+
+function coverageDetail(req) {
+  const coverage = req.evidence_coverage;
+  const notes = [coverage.detail];
+  if (coverage.missing_rows?.length) notes.push(`Missing rows: ${coverage.missing_rows.join(", ")}`);
+  if (coverage.missing_evidence?.length) notes.push(`Missing evidence: ${coverage.missing_evidence.join(", ")}`);
+  if (req.coverage_acknowledgements?.length) {
+    notes.push(...req.coverage_acknowledgements.map((item) => `Acknowledged coverage note: ${item.message}`));
+  }
+  return notes.filter(Boolean).join("\n");
+}
+
+function renderTraceability() {
+  const filter = $("#traceability-filter").value.toLowerCase();
+  const workCoverageCounts = [
+    ["unplanned", "Unplanned"],
+    ["active", "Active"],
+    ["completed", "Completed"],
+    ["mixed", "Mixed"],
+    ["abandoned", "Abandoned"],
+  ];
+  const evidenceCoverageCounts = [
+    ["not_applicable", "Not Applicable"],
+    ["pending", "Pending"],
+    ["evidenced", "Evidenced"],
+    ["gap", "Evidence Gap"],
+  ];
+  $("#work-coverage-metrics").innerHTML = workCoverageCounts.map(([status, label]) => `
+    <div class="metric"><strong>${state.model.requirements.filter((req) => req.work_coverage.status === status).length}</strong><span>${escapeHtml(label)}</span></div>
+  `).join("");
+  $("#evidence-coverage-metrics").innerHTML = evidenceCoverageCounts.map(([status, label]) => `
+    <div class="metric"><strong>${state.model.requirements.filter((req) => req.evidence_coverage.status === status).length}</strong><span>${escapeHtml(label)}</span></div>
+  `).join("");
+
+  const coverageRows = state.model.requirements
+    .filter((req) => `${req.id} ${req.title} ${workCoverageTitle(req.work_coverage)} ${coverageDetail(req)}`.toLowerCase().includes(filter))
+    .map((req) => `
+      <tr>
+        <td><button type="button" data-select-requirement="${escapeHtml(req.id)}">${escapeHtml(req.id)}</button></td>
+        <td>
+          ${workCoveragePill(req.work_coverage)}
+          <span class="coverage-breakdown">${req.work_coverage.direct_count} direct · ${req.work_coverage.descendant_count} descendant · ${req.work_coverage.active_count} active · ${req.work_coverage.completed_count} completed · ${req.work_coverage.abandoned_count} abandoned</span>
+        </td>
+        <td>${evidenceCoveragePill(req.evidence_coverage)}</td>
+        <td class="coverage-detail">${escapeHtml(coverageDetail(req))}</td>
+      </tr>
+    `).join("");
+  $("#coverage-table").innerHTML = coverageRows || `<tr><td colspan="4" class="empty">None</td></tr>`;
+
+  const traceRows = (state.model.traceability ?? [])
+    .filter((link) => `${link.requirement_id} ${link.work_item_id} ${link.trace_state} ${link.work_state ?? ""} ${link.evidence} ${(link.evidence_paths ?? []).join(" ")}`.toLowerCase().includes(filter))
+    .map((link) => {
+      const currentState = link.work_state ?? "Unknown work item";
+      const linkedRequirement = requirementById(link.requirement_id);
+      const lifecycleTitle = link.state_matches
+        ? `Traceability and backlog both report ${currentState}.`
+        : `Traceability reports ${link.trace_state}; backlog reports ${currentState}.`;
+      const lifecycleTone = link.work_state === null || link.state_matches === false ? "orange" : stateKind(currentState);
+      const requirementCell = linkedRequirement
+        ? `<button type="button" data-select-requirement="${escapeHtml(link.requirement_id)}">${escapeHtml(link.requirement_id)}</button>`
+        : `<span class="missing-reference" title="This traceability row names a requirement that is not present in the current model.">${escapeHtml(link.requirement_id)}</span>`;
+      return `
+        <tr class="${link.state_matches === false ? "row-review" : ""}">
+          <td>${requirementCell}</td>
+          <td>${escapeHtml(link.work_item_id)}</td>
+          <td>${pill(link.trace_state, lifecycleTone, lifecycleTitle)}${link.state_matches ? "" : `<span class="coverage-breakdown">Current: ${escapeHtml(currentState)}</span>`}</td>
+          <td class="evidence-text">${escapeHtml(link.evidence)}</td>
+          <td>${escapeHtml(link.source_path)}:${link.line}</td>
+        </tr>
+      `;
+    }).join("");
+  $("#traceability-table").innerHTML = traceRows || `<tr><td colspan="5" class="empty">None</td></tr>`;
 }
 
 function renderSelects() {
@@ -416,24 +528,87 @@ function renderSelection() {
   }
   if (state.selected.type === "requirement") {
     const req = requirementById(state.selected.id);
+    if (!req) {
+      target.innerHTML = `<p class="empty">Requirement ${escapeHtml(state.selected.id)} is not present in the current model.</p>`;
+      return;
+    }
+    const activePrompts = req.semantic_prompts.filter((prompt) => prompt.status === "active");
+    const acknowledgedPrompts = req.semantic_prompts.filter((prompt) => prompt.status === "acknowledged");
+    const motivation = req.work_coverage.by_motivation;
     target.innerHTML = `
       <div class="kv"><span>ID</span><strong>${escapeHtml(req.id)}</strong></div>
       <div class="kv"><span>Title</span><span>${escapeHtml(req.title)}</span></div>
       <div class="kv"><span>Source</span><span>${escapeHtml(req.path)}:${req.line}</span></div>
-      <div class="kv"><span>Work</span><span>${escapeHtml(req.work_items.join(", ") || "None")}</span></div>
-      <div class="kv"><span>Audit</span><span>${auditPill(req.audit_findings)}</span></div>
-      <div class="kv"><span>Trace</span><span>${tracePill(req)}</span></div>
-      <div class="list">${req.audit_findings.map((finding) => `
-        <div class="list-item" title="${attr(finding.edit_hint)}">
-          <strong>${escapeHtml(finding.severity)} ${escapeHtml(finding.category)}</strong>
-          <span>${escapeHtml(finding.message)} · ${escapeHtml(finding.edit_hint)}</span>
+      <div class="kv"><span>Quality</span><span>${qualityPill(req)}</span></div>
+      <div class="kv"><span>Work</span><span>${workCoveragePill(req.work_coverage)}</span></div>
+      <div class="kv"><span>Evidence</span><span>${evidenceCoveragePill(req.evidence_coverage)}</span></div>
+      <section class="inspector-section">
+        <h3>Deterministic Quality</h3>
+        <div class="list">${qualityFindings(req).map((finding) => `
+          <div class="list-item" title="${attr(finding.edit_hint)}">
+            <strong>${escapeHtml(finding.severity)} ${escapeHtml(finding.category)}</strong>
+            <span>${escapeHtml(finding.message)} · ${escapeHtml(finding.edit_hint)}</span>
+          </div>
+        `).join("") || '<p class="empty">No deterministic quality finding</p>'}</div>
+      </section>
+      <section class="inspector-section">
+        <h3>Active Semantic Prompts</h3>
+        <p class="section-note">Advisory lexical signals for human interpretation; they do not change the Quality grade.</p>
+        <div class="list">${activePrompts.map((prompt) => `
+          <div class="list-item">
+            <strong>${escapeHtml(prompt.category)}</strong>
+            <span>${escapeHtml(prompt.message)}${prompt.terms.length ? ` · Terms: ${escapeHtml(prompt.terms.join(", "))}` : ""}</span>
+          </div>
+        `).join("") || '<p class="empty">None</p>'}</div>
+      </section>
+      <section class="inspector-section">
+        <h3>Acknowledged Semantic Prompts</h3>
+        <p class="section-note">Explicit author acknowledgements, including broad terms surrounded by asterisks.</p>
+        <div class="list">${acknowledgedPrompts.map((prompt) => `
+          <div class="list-item prompt-acknowledged" title="${attr([prompt.message, prompt.mixed_terms.length ? `Also appears without emphasis: ${prompt.mixed_terms.join(", ")}` : ""].filter(Boolean).join("\n"))}">
+            <strong>${escapeHtml(prompt.category)} · acknowledged</strong>
+            <span>${escapeHtml(prompt.message)}${prompt.terms.length ? ` · Terms: ${escapeHtml(prompt.terms.join(", "))}` : ""}${prompt.mixed_terms.length ? ` · Also appears without emphasis: ${escapeHtml(prompt.mixed_terms.join(", "))}` : ""}</span>
+          </div>
+        `).join("") || '<p class="empty">None</p>'}</div>
+      </section>
+      <section class="inspector-section">
+        <h3>Work Coverage</h3>
+        <div class="list-item">
+          <strong>${req.work_coverage.count} mapped backlog item(s)</strong>
+          <span>${req.work_coverage.direct_count} direct · ${req.work_coverage.descendant_count} descendant<br>${req.work_coverage.active_count} active · ${req.work_coverage.completed_count} completed · ${req.work_coverage.abandoned_count} abandoned<br>N ${motivation.N ?? 0} · R ${motivation.R ?? 0} · F ${motivation.F ?? 0} · X ${motivation.X ?? 0}</span>
         </div>
-      `).join("") || '<p class="empty">No audit finding</p>'}</div>
+        <div class="list">${req.work_coverage.items.map((item) => `
+          <div class="list-item">
+            <strong>${escapeHtml(item.id)} · ${escapeHtml(item.relation)}</strong>
+            <span>${escapeHtml(item.state)} · ${escapeHtml(item.motivation)} · ${escapeHtml(item.requirement_id)}</span>
+          </div>
+        `).join("") || '<p class="empty">No backlog work is mapped yet</p>'}</div>
+      </section>
+      <section class="inspector-section">
+        <h3>Traceability and Evidence</h3>
+        <p class="section-note">${escapeHtml(req.evidence_coverage.detail)}</p>
+        <div class="list">${req.evidence_coverage.links.map((link) => `
+          <div class="list-item">
+            <strong>${escapeHtml(link.requirement_id)} → ${escapeHtml(link.work_item_id)} · ${escapeHtml(link.trace_state)}</strong>
+            <span>${escapeHtml(link.evidence)} · ${escapeHtml(link.source_path)}:${link.line}</span>
+          </div>
+        `).join("") || '<p class="empty">No parsed traceability row</p>'}</div>
+        <div class="list">${req.coverage_acknowledgements.map((item) => `
+          <div class="list-item prompt-acknowledged">
+            <strong>${escapeHtml(item.category)}</strong>
+            <span>${escapeHtml(item.message)} · ${escapeHtml(item.source_path)}:${item.line}</span>
+          </div>
+        `).join("")}</div>
+      </section>
       <div class="list-item"><strong>Body</strong><span>${escapeHtml(req.body || "No body")}</span></div>
     `;
     return;
   }
   const item = workById(state.selected.id);
+  if (!item) {
+    target.innerHTML = `<p class="empty">Work item ${escapeHtml(state.selected.id)} is not present in the current model.</p>`;
+    return;
+  }
   target.innerHTML = `
     <div class="kv"><span>ID</span><strong>${escapeHtml(item.id)}</strong></div>
     <div class="kv"><span>Requirement</span><span>${escapeHtml(item.requirement_id)}</span></div>
@@ -569,6 +744,7 @@ function wireEvents() {
   $("#clear-output").addEventListener("click", () => { $("#command-output").textContent = ""; });
   $("#requirement-filter").addEventListener("input", renderRequirements);
   $("#work-filter").addEventListener("input", renderWorkItems);
+  $("#traceability-filter").addEventListener("input", renderTraceability);
   $("#tech-debt-filter").addEventListener("input", renderTechDebt);
   $("#advance-state-work").addEventListener("change", renderAdvanceStateTargets);
 
@@ -588,13 +764,17 @@ function wireEvents() {
   document.addEventListener("click", (event) => {
     const selectRequirement = event.target.closest("[data-select-requirement]");
     if (selectRequirement) {
-      state.selected = { type: "requirement", id: selectRequirement.dataset.selectRequirement };
+      const requirementId = selectRequirement.dataset.selectRequirement;
+      if (!requirementById(requirementId)) return;
+      state.selected = { type: "requirement", id: requirementId };
       renderSelection();
       return;
     }
     const selectWork = event.target.closest("[data-select-work]");
     if (selectWork) {
-      state.selected = { type: "work", id: selectWork.dataset.selectWork };
+      const workId = selectWork.dataset.selectWork;
+      if (!workById(workId)) return;
+      state.selected = { type: "work", id: workId };
       renderSelection();
       return;
     }

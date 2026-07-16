@@ -4,12 +4,17 @@ Use the common workflow in `SKILL.md`, then apply only the section matching the 
 
 ## Audit Requirement Drift
 
+- Review deterministic quality findings separately from semantic prompts, work coverage, and evidence coverage.
+- Resolve each active prompt in the report as a concern, covered elsewhere, not applicable, or still unknown. Preserve acknowledged prompts as author decisions unless contrary evidence requires human review, and keep parent and descendant dispositions separate.
+- Treat unplanned work as planning coverage and reserve evidence gaps for completed work missing required parsed evidence.
 - Compare the current requirement text and recorded decisions with the implementation, tests, configuration, and user-visible behavior.
 - Check whether code implements an older interpretation, adds unrequested behavior, or omits a stated constraint.
 - Distinguish deliberate divergence recorded in a decision from accidental drift.
 
 ## Estimate Work
 
+- Do not increase requirement-quality severity merely because work is unplanned or evidence is not yet applicable.
+- Treat a withheld deterministic delivery estimate as an instruction to size the work semantically, not as a requirement defect. Do not reuse the structural sizing signal as the final range.
 - Identify affected components, interfaces, data migrations, tests, documentation, deployment steps, and external dependencies.
 - Inspect analogous completed work and relevant history when available.
 - Return assumptions, uncertainty drivers, and a range or decomposition rather than false precision.
@@ -29,7 +34,7 @@ Use the common workflow in `SKILL.md`, then apply only the section matching the 
 ## Verify Evidence
 
 - Re-run the narrowest relevant tests and checks where practical.
-- Confirm traceability paths exist and substantively support the claimed requirement.
+- Confirm parsed Current Links paths exist and substantively support the claimed requirement; do not treat Unmapped Requirement Areas as evidence.
 - Separate passing automation from behavioral evidence that still needs human acceptance.
 
 ## Synchronize Management State

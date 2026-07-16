@@ -115,6 +115,12 @@ class ManagementToolTest(unittest.TestCase):
         )
         for name in SUPPORTING_FILES:
             (self.management / name).write_text(f"# {name}\n", encoding="utf-8")
+        (self.management / "TRACEABILITY.md").write_text(
+            "# Traceability\n\n## Current Links\n\n"
+            "| Requirement | Work Item | State | Evidence |\n"
+            "| --- | --- | --- | --- |\n",
+            encoding="utf-8",
+        )
 
     def write_rust_architecture_files(self) -> None:
         (self.root / "Cargo.toml").write_text(
@@ -168,7 +174,7 @@ class ManagementToolTest(unittest.TestCase):
 
     def write_traceability(self, *rows: str) -> None:
         (self.management / "TRACEABILITY.md").write_text(
-            "# Traceability\n\n| Requirement | Work Item | State | Evidence |\n| --- | --- | --- | --- |\n"
+            "# Traceability\n\n## Current Links\n\n| Requirement | Work Item | State | Evidence |\n| --- | --- | --- | --- |\n"
             + "\n".join(rows)
             + "\n",
             encoding="utf-8",
@@ -279,26 +285,397 @@ class ManagementToolTest(unittest.TestCase):
         self.assertIn("--engineer must be a single line", engineer.stderr)
         self.assertEqual(backlog.read_bytes(), original)
 
-    def test_audit_requirements_reports_findings(self) -> None:
+    def test_audit_requirements_separates_quality_prompts_and_coverage(self) -> None:
         audit = self.tool_run("audit-requirements", "--document", "E", "--limit", "0")
         self.assertIn("Requirement Audit", audit.stdout)
         self.assertIn("Requirements checked: 3", audit.stdout)
         self.assertIn("E.MCP.02.b", audit.stdout)
-        self.assertIn("no backlog work item maps to this requirement", audit.stdout)
+        self.assertIn("Quality findings:\n  - none", audit.stdout)
+        self.assertIn("Semantic prompts:", audit.stdout)
+        self.assertIn("Planning coverage:     unplanned 1", audit.stdout)
+        self.assertIn("mixed 0", audit.stdout)
+        self.assertIn("Evidence coverage:     not_applicable 1; pending 2", audit.stdout)
+        self.assertNotIn("REVIEW: E.MCP.02.b: planning", audit.stdout)
+        self.assertNotIn("REVIEW: E.MCP.02.b: traceability", audit.stdout)
         self.assertIn("Scope note:", audit.stdout)
 
-    def test_audit_requirements_strict_fails_on_review_findings(self) -> None:
+    def test_audit_requirements_strict_ignores_prompts_and_coverage_but_fails_quality_findings(self) -> None:
+        clean = self.tool_run("audit-requirements", "--document", "E", "--strict")
+        self.assertIn("Semantic prompts:", clean.stdout)
+        engineering = self.management / "ENGINEERING.md"
+        engineering.write_text(
+            engineering.read_text(encoding="utf-8").replace("## 02.b) Platform inquiry", "## 02.b) Per User Routing"),
+            encoding="utf-8",
+        )
         audit = self.tool_run("audit-requirements", "--document", "E", "--strict", expected=1)
         self.assertIn("Requirement Audit", audit.stdout)
-        self.assertIn("REVIEW:", audit.stdout)
+        self.assertIn("REVIEW: E.MCP.01: redundancy: title matches another requirement: E.MCP.02.b", audit.stdout)
+
+    def test_semantic_prompts_acknowledge_single_emphasis_for_the_whole_requirement(self) -> None:
+        (self.management / "BUSINESS.md").write_text(
+            textwrap.dedent(
+                """\
+                # Business "Biz"
+
+                ## 01) Feature Scope
+
+                The system must support *all* platform features and all documented extensions.
+                It may accept *any* supported payload and use **appropriate** defaults.
+                """
+            ),
+            encoding="utf-8",
+        )
+        module = self.load_tool_module()
+        requirement = module.load_model().requirements["B.Biz.01"]
+        prompts = module.requirement_semantic_prompts(requirement)
+        active_boundedness = [
+            prompt for prompt in prompts if prompt.category == "boundedness" and prompt.status == "active"
+        ]
+        acknowledged_boundedness = [
+            prompt for prompt in prompts if prompt.category == "boundedness" and prompt.status == "acknowledged"
+        ]
+
+        self.assertEqual([("appropriate",)], [prompt.terms for prompt in active_boundedness])
+        self.assertEqual(1, len(acknowledged_boundedness))
+        self.assertEqual(("all", "any"), acknowledged_boundedness[0].terms)
+        self.assertEqual(("all",), acknowledged_boundedness[0].mixed_terms)
+        self.assertIn("plain occurrences", acknowledged_boundedness[0].message)
+
+        payload = json.loads(self.tool_run("semantic-context", "audit", "B.Biz.01", "--limit", "0").stdout)
+        acknowledged = payload["observations"]["acknowledged_semantic_prompts"][0]
+        self.assertEqual(["all", "any"], acknowledged["terms"])
+        self.assertEqual(["all"], acknowledged["mixed_terms"])
+        self.assertFalse(
+            any("all" in prompt["terms"] for prompt in payload["observations"]["semantic_prompts"])
+        )
+
+    def test_traceability_uses_current_link_rows_and_keeps_unmapped_areas_separate(self) -> None:
+        module = self.load_tool_module()
+        model = module.load_model()
+        requirement = model.requirements["E.MCP.02.b"]
+        text = textwrap.dedent(
+            """\
+            # Traceability
+
+            ## Current Links
+
+            | Requirement | Work Item | State | Evidence |
+            | --- | --- | --- | --- |
+
+            ## Unmapped Requirement Areas
+
+            1. `E.MCP.02.b` -- inquiry work has not been planned.
+            2. `E.MCP.*` -- messaging coverage is acknowledged.
+
+            ## Notes
+
+            | `E.MCP.02.b` | `EN.MCP.02.b-999` | Merged | `src/ignored.rs` |
+            """
+        )
+        links = module.traceability_links_from_text(text)
+        self.assertEqual([], links)
+        self.assertEqual("missing", module.traceability_status(requirement, text))
+        acknowledgements = module.unmapped_requirement_area_acknowledgements_from_text(text)
+        matched = module.requirement_coverage_acknowledgements(requirement, acknowledgements)
+        self.assertEqual(["E.MCP.02.b", "E.MCP.*"], [item["pattern"] for item in matched])
+        (self.management / "TRACEABILITY.md").write_text(text, encoding="utf-8")
+        self.tool_run("lint")
+
+        linked_text = text.replace(
+            "| --- | --- | --- | --- |\n",
+            "| --- | --- | --- | --- |\n| `E.MCP.02.b` | `EN.MCP.02.b-999` | Merged | `src/lib.rs` |\n",
+            1,
+        )
+        self.assertEqual("direct", module.traceability_status(requirement, linked_text))
+        self.assertEqual(["E.MCP.02.b"], [link.requirement_id for link in module.traceability_links_from_text(linked_text)])
+
+    def test_traceability_requires_one_canonical_current_links_table(self) -> None:
+        module = self.load_tool_module()
+        traceability = self.management / "TRACEABILITY.md"
+        legacy = textwrap.dedent(
+            """\
+            # Traceability
+
+            | Requirement | Work Item | State | Evidence |
+            | --- | --- | --- | --- |
+            | `E.MCP.01` | `EN.MCP.01-001` | Started | `src/lib.rs` |
+            """
+        )
+        self.assertEqual([], module.traceability_links_from_text(legacy))
+        traceability.write_text(legacy, encoding="utf-8")
+        missing_section = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("exactly one `## Current Links` section", missing_section.stderr)
+
+        malformed_schema = legacy.replace(
+            "| Requirement | Work Item | State | Evidence |",
+            "## Current Links\n\n| Requirement | Work Item | State | Proof |",
+        )
+        traceability.write_text(malformed_schema, encoding="utf-8")
+        malformed_table = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("canonical traceability table header and separator", malformed_table.stderr)
+        self.assertEqual([], module.traceability_links_from_text(malformed_schema))
+
+        self.write_traceability()
+        traceability.write_text(
+            traceability.read_text(encoding="utf-8")
+            + "\n## Current Links\n\n"
+            + "| Requirement | Work Item | State | Evidence |\n"
+            + "| --- | --- | --- | --- |\n",
+            encoding="utf-8",
+        )
+        duplicate = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("more than one `## Current Links` section", duplicate.stderr)
+
+        self.write_traceability(
+            "| `E.MCP.01` | `EN.MCP.01-001` | Rolled Out | `src/lib.rs`; <placeholder> |"
+        )
+        placeholder = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("does not match EN.MCP.01-001 backlog state Started", placeholder.stderr)
+
+    def test_traceability_writer_creates_repairs_or_rejects_without_partial_writes(self) -> None:
+        module = self.load_tool_module()
+        traceability = self.management / "TRACEABILITY.md"
+        item = module.load_model().work_items["EN.MCP.01-001"]
+
+        traceability.write_text("# Traceability\n\n## Notes\n\nNo links yet.\n", encoding="utf-8")
+        self.assertEqual(
+            "appended",
+            module.append_or_update_traceability("E.MCP.01", item, ["src/lib.rs"], None, None),
+        )
+        created = traceability.read_text(encoding="utf-8")
+        self.assertIn("## Current Links", created)
+        self.assertIn("| Requirement | Work Item | State | Evidence |", created)
+        self.assertEqual(["EN.MCP.01-001"], [link.work_item_id for link in module.traceability_links_from_text(created)])
+
+        traceability.write_text(
+            "# Traceability\n\n## Current Links\n\n"
+            "| Requirement | Work Item | State | Proof |\n"
+            "| -- | -- | -- | -- |\n\n"
+            "## Notes\n\nKeep this note.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            "appended",
+            module.append_or_update_traceability("E.MCP.01", item, ["src/lib.rs"], None, None),
+        )
+        repaired = traceability.read_text(encoding="utf-8")
+        self.assertIn("| Requirement | Work Item | State | Evidence |", repaired)
+        self.assertIn("## Notes\n\nKeep this note.", repaired)
+
+        unsafe = repaired.replace(
+            "| Requirement | Work Item | State | Evidence |",
+            "| Requirement | Work Item | State | Proof |",
+        )
+        traceability.write_text(unsafe, encoding="utf-8")
+        original = traceability.read_bytes()
+        with self.assertRaisesRegex(ValueError, "cannot safely repair"):
+            module.append_or_update_traceability("E.MCP.01", item, ["src/lib.rs"], None, None)
+        self.assertEqual(original, traceability.read_bytes())
+
+    def test_traceability_rows_must_match_the_work_items_exact_requirement(self) -> None:
+        engineering = self.management / "ENGINEERING.md"
+        engineering.write_text(
+            engineering.read_text(encoding="utf-8").replace(
+                "## 02.a) Common MO and MT Models",
+                "## 02) Messaging Capabilities\n\nMessaging capabilities exist.\n\n## 02.a) Common MO and MT Models",
+            ),
+            encoding="utf-8",
+        )
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text("pub fn models() {}\n", encoding="utf-8")
+        traceability = self.management / "TRACEABILITY.md"
+        original = traceability.read_bytes()
+
+        parent_link = self.tool_run(
+            "link-evidence",
+            "E.MCP.02",
+            "ER.MCP.02.a-001",
+            "src/lib.rs",
+            expected=1,
+        )
+        self.assertIn("maps to E.MCP.02.a, not E.MCP.02", parent_link.stderr)
+        self.assertEqual(original, traceability.read_bytes())
+
+        self.write_traceability(
+            "| `E.MCP.02` | `ER.MCP.02.a-001` | Planned | `src/lib.rs` |"
+        )
+        invalid_row = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("maps to E.MCP.02.a, not E.MCP.02", invalid_row.stderr)
+
+        self.write_traceability()
+        exact_link = self.tool_run(
+            "link-evidence",
+            "E.MCP.02.a",
+            "ER.MCP.02.a-001",
+            "src/lib.rs",
+        )
+        self.assertIn("Requirement: E.MCP.02.a", exact_link.stdout)
+        self.assertIn("| `E.MCP.02.a` | `ER.MCP.02.a-001` |", traceability.read_text(encoding="utf-8"))
+
+    def test_work_and_evidence_coverage_are_structured_and_lifecycle_aware(self) -> None:
+        module = self.load_tool_module()
+        model = module.load_model()
+        parent = module.Requirement(
+            id="E.MCP.02",
+            document="E",
+            section="MCP",
+            section_title="Messaging Communications Paradigm",
+            number="02",
+            subtopics="",
+            title="Messaging capabilities",
+            path=self.management / "ENGINEERING.md",
+            line=7,
+            body_lines=["The system exposes messaging capabilities."],
+        )
+        completed = module.WorkItem(
+            id="EN.MCP.02-001",
+            requirement_id=parent.id,
+            document="E",
+            motivation="N",
+            section="MCP",
+            number="02",
+            subtopics="",
+            sequence="001",
+            title="Implement messaging capabilities",
+            state="Merged",
+            path=self.management / "ENGINEERING.backlog.md",
+            line=1,
+        )
+        model.requirements[parent.id] = parent
+        model.work_items[completed.id] = completed
+
+        work = module.requirement_work_coverage(model, parent)
+        self.assertEqual("active", work["status"])
+        self.assertEqual(2, work["count"])
+        self.assertEqual(1, work["direct_count"])
+        self.assertEqual(1, work["descendant_count"])
+        self.assertEqual({"Merged": 1, "Planned": 1}, work["by_state"])
+        self.assertEqual({"N": 1, "R": 1}, work["by_motivation"])
+        self.assertEqual({"direct", "descendant"}, {item["relation"] for item in work["items"]})
+
+        missing_row = module.requirement_evidence_coverage(model, parent, [])
+        self.assertEqual("gap", missing_row["status"])
+        self.assertEqual([completed.id], missing_row["missing_traceability_work_item_ids"])
+
+        note_only = module.TraceabilityLink(parent.id, completed.id, "Merged", "Review completed", 8)
+        missing_evidence = module.requirement_evidence_coverage(model, parent, [note_only])
+        self.assertEqual("gap", missing_evidence["status"])
+        self.assertEqual([completed.id], missing_evidence["missing_evidence_work_item_ids"])
+
+        source = self.root / "src" / "evidence.rs"
+        source.parent.mkdir()
+        source.write_text("pub fn evidence() {}\n", encoding="utf-8")
+        evidenced_link = module.TraceabilityLink(parent.id, completed.id, "Merged", "`src/evidence.rs`", 8)
+        evidenced = module.requirement_evidence_coverage(model, parent, [evidenced_link])
+        self.assertEqual("pending", evidenced["status"])
+        self.assertEqual(["ER.MCP.02.a-001"], evidenced["pending_work_item_ids"])
+        self.assertEqual(["src/evidence.rs"], evidenced["links"][0]["existing_evidence_paths"])
+
+        model.work_items["ER.MCP.02.a-001"].state = "Cancelled"
+        mixed = module.requirement_work_coverage(model, parent)
+        self.assertEqual("mixed", mixed["status"])
+        self.assertEqual(1, mixed["completed_count"])
+        self.assertEqual(1, mixed["abandoned_count"])
+        fully_evidenced = module.requirement_evidence_coverage(model, parent, [evidenced_link])
+        self.assertEqual("evidenced", fully_evidenced["status"])
+
+        unplanned = module.requirement_evidence_coverage(model, model.requirements["B.Biz.01"], [])
+        self.assertEqual("not_applicable", unplanned["status"])
 
     def test_estimate_requirement_prints_planning_packet(self) -> None:
         estimate = self.tool_run("estimate-requirement", "E.MCP.02.b")
         self.assertIn("Requirement Estimate", estimate.stdout)
-        self.assertIn("Readiness:", estimate.stdout)
-        self.assertIn("Estimated effort:", estimate.stdout)
+        self.assertIn("Readiness:                SEMANTIC REVIEW REQUIRED", estimate.stdout)
+        self.assertIn("Delivery estimate:        WITHHELD -- semantic sizing required", estimate.stdout)
+        self.assertIn("Structural sizing signal:", estimate.stdout)
+        self.assertIn("(not a delivery estimate)", estimate.stdout)
+        self.assertIn("Estimate confidence:      NOT ASSESSED", estimate.stdout)
+        self.assertIn(
+            "deterministic structural signals do not establish delivery scope, dependencies, or effort",
+            estimate.stdout,
+        )
+        self.assertIn("active clarity prompt requires semantic disposition", estimate.stdout)
+        self.assertIn("Planning coverage: unplanned", estimate.stdout)
+        self.assertIn("Evidence coverage: not_applicable", estimate.stdout)
+        self.assertIn("Quality findings:\n  - none", estimate.stdout)
+        self.assertIn("Semantic prompts:", estimate.stdout)
         self.assertIn("Dependency signals:", estimate.stdout)
         self.assertIn("Planning prompt:", estimate.stdout)
+
+    def test_estimate_withholds_semantically_uncertain_scope_without_quality_failure(self) -> None:
+        business = self.management / "BUSINESS.md"
+        business.write_text(
+            textwrap.dedent(
+                """\
+                # Business "Biz"
+
+                ## 01) Supported Features
+
+                The BOT must support *all* features every Messaging Platform provides apart from text exchange.
+                The list is intentionally delegated to the platform because it grows over time.
+                """
+            ),
+            encoding="utf-8",
+        )
+        uncertain = self.tool_run("estimate-requirement", "B.Biz.01")
+        self.assertIn("Readiness:                SEMANTIC REVIEW REQUIRED", uncertain.stdout)
+        self.assertIn("Delivery estimate:        WITHHELD -- semantic sizing required", uncertain.stdout)
+        self.assertIn("active failure-behavior prompt requires semantic disposition", uncertain.stdout)
+        self.assertIn("intentional boundedness is acknowledged: all", uncertain.stdout)
+        self.assertIn("Quality findings:\n  - none", uncertain.stdout)
+        self.assertIn("Acknowledged semantic prompts:", uncertain.stdout)
+
+        context = json.loads(self.tool_run("semantic-context", "estimate", "B.Biz.01").stdout)
+        decision = context["observations"]["estimate_decision"]
+        self.assertEqual("SEMANTIC REVIEW REQUIRED", decision["readiness"])
+        self.assertEqual("WITHHELD -- semantic sizing required", decision["delivery_estimate"])
+        self.assertEqual("NOT ASSESSED", decision["confidence"])
+        self.assertEqual(context["observations"]["heuristic_effort_band"], decision["structural_effort_band"])
+
+        business.write_text(
+            textwrap.dedent(
+                """\
+                # Business "Biz"
+
+                ## 01) Supported Features
+
+                The BOT must support *all* documented platform features. When a provider is unavailable,
+                the BOT reports the provider failure and preserves the original request for retry.
+                """
+            ),
+            encoding="utf-8",
+        )
+        acknowledged_only = self.tool_run("estimate-requirement", "B.Biz.01")
+        self.assertIn("Readiness:                READY FOR PLANNING", acknowledged_only.stdout)
+        self.assertIn("Delivery estimate:        WITHHELD -- semantic sizing required", acknowledged_only.stdout)
+        self.assertIn("Quality findings:\n  - none", acknowledged_only.stdout)
+        semantic_section = acknowledged_only.stdout.split("Semantic prompts:", 1)[1].split(
+            "Acknowledged semantic prompts:", 1
+        )[0]
+        self.assertIn("  - none", semantic_section)
+
+        business.write_text(
+            textwrap.dedent(
+                """\
+                # Business "Biz"
+
+                ## 01) Bounded Capability Lookup
+
+                The system lets an operator query the documented capabilities of one selected messaging platform.
+                When the provider is unavailable, the system reports the provider failure.
+                """
+            ),
+            encoding="utf-8",
+        )
+        bounded = self.tool_run("estimate-requirement", "B.Biz.01")
+        self.assertIn("Readiness:                READY FOR PLANNING", bounded.stdout)
+        self.assertIn("Delivery estimate:        WITHHELD -- semantic sizing required", bounded.stdout)
+        self.assertIn("Estimate confidence:      NOT ASSESSED", bounded.stdout)
+        self.assertIn(
+            "deterministic structural signals do not establish delivery scope, dependencies, or effort",
+            bounded.stdout,
+        )
 
     def test_sync_requirement_prints_traceability_packet(self) -> None:
         sync = self.tool_run("sync-requirement", "E.MCP.01")
@@ -308,10 +685,12 @@ class ManagementToolTest(unittest.TestCase):
         self.assertIn("Signals:", sync.stdout)
         self.assertIn("Verdict:", sync.stdout)
 
-    def test_sync_requirement_strict_fails_on_review_signals(self) -> None:
-        sync = self.tool_run("sync-requirement", "E.MCP.02.b", "--strict", expected=1)
+    def test_sync_requirement_treats_unplanned_work_and_inapplicable_evidence_as_information(self) -> None:
+        sync = self.tool_run("sync-requirement", "E.MCP.02.b", "--strict")
         self.assertIn("Requirement Sync", sync.stdout)
-        self.assertIn("REVIEW:", sync.stdout)
+        self.assertIn("INFO: requirement is not yet mapped to backlog work", sync.stdout)
+        self.assertIn("Evidence coverage: not_applicable", sync.stdout)
+        self.assertIn("Verdict: LOCALLY COHERENT", sync.stdout)
 
     def test_chase_techdebts_reports_review_leads(self) -> None:
         src = self.root / "src"
@@ -343,7 +722,8 @@ class ManagementToolTest(unittest.TestCase):
         dashboard = (dashboard_dir / "index.html").read_text(encoding="utf-8")
         self.assertIn("Management Dashboard", dashboard)
         self.assertIn("Architecture Diagrams", dashboard)
-        self.assertIn("Traceability Gaps", dashboard)
+        self.assertIn("Evidence gaps:", status.stdout)
+        self.assertIn("Evidence Coverage Gaps", dashboard)
 
     def test_diagram_commands_render_static_svg(self) -> None:
         self.write_rust_architecture_files()
@@ -668,6 +1048,7 @@ class ManagementToolTest(unittest.TestCase):
         meeting = self.tool_run("meeting-packet", "--stale-days", "0")
         self.assertIn("Meeting Packet", meeting.stdout)
         self.assertIn("Suggested agenda:", meeting.stdout)
+        self.assertIn("Evidence coverage gaps:", meeting.stdout)
         acceptance = self.tool_run("acceptance-packet", "EN.MCP.01-001")
         self.assertIn("Acceptance Packet", acceptance.stdout)
         self.assertIn("Acceptance checklist:", acceptance.stdout)
@@ -1648,8 +2029,17 @@ class ManagementToolTest(unittest.TestCase):
                         ["B.Biz.01", "B.Biz.01.a"],
                     )
                     self.assertTrue(
-                        any("title matches another requirement: E.MCP.01" in signal for signal in payload["candidate_signals"])
+                        any(
+                            finding["category"] == "redundancy"
+                            and "title matches another requirement: E.MCP.01" in finding["message"]
+                            for finding in payload["observations"]["quality_findings"]
+                        )
                     )
+                    self.assertIn("semantic_prompts", payload["observations"])
+                    self.assertIn("acknowledged_semantic_prompts", payload["observations"])
+                    self.assertIn("work_coverage", payload["observations"])
+                    self.assertIn("evidence_coverage", payload["observations"])
+                    self.assertFalse(any("title matches another requirement" in signal for signal in payload["candidate_signals"]))
                 if workflow in {"estimate", "sync"}:
                     self.assertEqual(payload["focus"]["requirement"]["id"], "B.Biz.01")
                     self.assertEqual(

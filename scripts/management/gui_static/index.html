@@ -27,6 +27,7 @@
       <button class="nav-item active" data-view="overview" type="button" aria-current="page">Overview</button>
       <button class="nav-item" data-view="requirements" type="button">Requirements</button>
       <button class="nav-item" data-view="work" type="button">Work</button>
+      <button class="nav-item" data-view="traceability" type="button">Traceability</button>
       <button class="nav-item" data-view="workflows" type="button">Workflows</button>
       <button class="nav-item" data-view="ledgers" type="button">Ledgers</button>
       <button class="nav-item" data-view="tech-debt" type="button">Tech Debt</button>
@@ -63,12 +64,12 @@
           <table>
             <thead>
               <tr>
-                <th>ID</th>
-                <th>Title</th>
-                <th>Audit</th>
-                <th>Work</th>
-                <th>Trace</th>
-                <th>Actions</th>
+                <th>ID <button class="header-help" type="button" title="Stable requirement identifier." data-tooltip="Stable requirement identifier." aria-label="ID help: Stable requirement identifier.">?</button></th>
+                <th>Title <button class="header-help" type="button" title="Requirement title from its authoritative management document." data-tooltip="Requirement title from its authoritative management document." aria-label="Title help: Requirement title from its authoritative management document.">?</button></th>
+                <th>Quality <button class="header-help" type="button" title="Deterministic requirement-quality findings. Lexical prompts are advisory and appear in the Selection inspector." data-tooltip="Deterministic requirement-quality findings. Lexical prompts are advisory and appear in the Selection inspector." aria-label="Quality help: Deterministic requirement-quality findings. Lexical prompts are advisory and appear in the Selection inspector.">?</button></th>
+                <th>Work <button class="header-help" type="button" title="Backlog items mapped directly to this requirement or, for a parent, through descendant requirements. The detail includes lifecycle and motivation counts." data-tooltip="Backlog items mapped directly to this requirement or, for a parent, through descendant requirements. The detail includes lifecycle and motivation counts." aria-label="Work help: Backlog items mapped directly to this requirement or, for a parent, through descendant requirements. The detail includes lifecycle and motivation counts.">?</button></th>
+                <th>Evidence <button class="header-help" type="button" title="Lifecycle-aware evidence coverage. Evidence is required for completed work; unplanned requirements are not evidence gaps." data-tooltip="Lifecycle-aware evidence coverage. Evidence is required for completed work; unplanned requirements are not evidence gaps." aria-label="Evidence help: Lifecycle-aware evidence coverage. Evidence is required for completed work; unplanned requirements are not evidence gaps.">?</button></th>
+                <th>Actions <button class="header-help" type="button" title="Read-only inspection and local management actions." data-tooltip="Read-only inspection and local management actions." aria-label="Actions help: Read-only inspection and local management actions.">?</button></th>
               </tr>
             </thead>
             <tbody id="requirements-table"></tbody>
@@ -97,6 +98,59 @@
             <tbody id="work-table"></tbody>
           </table>
         </div>
+      </section>
+
+      <section class="view" id="view-traceability">
+        <div class="toolbar">
+          <input id="traceability-filter" type="search" placeholder="Filter coverage and evidence" aria-label="Filter traceability coverage and evidence">
+        </div>
+        <div class="coverage-summary-grid">
+          <section class="coverage-summary" aria-labelledby="work-coverage-heading">
+            <h2 id="work-coverage-heading">Work Coverage</h2>
+            <p class="section-note">How backlog work currently covers requirements.</p>
+            <div class="metric-grid" id="work-coverage-metrics"></div>
+          </section>
+          <section class="coverage-summary" aria-labelledby="evidence-coverage-heading">
+            <h2 id="evidence-coverage-heading">Evidence Coverage</h2>
+            <p class="section-note">Whether lifecycle-appropriate delivery evidence is available.</p>
+            <div class="metric-grid" id="evidence-coverage-metrics"></div>
+          </section>
+        </div>
+        <section class="coverage-section">
+          <h2>Coverage by Requirement</h2>
+          <p class="section-note">Planning coverage and delivery evidence are tracked independently from requirement quality.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Requirement <button class="header-help" type="button" title="Stable requirement identifier." data-tooltip="Stable requirement identifier." aria-label="Requirement help: Stable requirement identifier.">?</button></th>
+                  <th>Work coverage <button class="header-help" type="button" title="Direct and descendant backlog mappings, grouped by lifecycle." data-tooltip="Direct and descendant backlog mappings, grouped by lifecycle." aria-label="Work coverage help: Direct and descendant backlog mappings, grouped by lifecycle.">?</button></th>
+                  <th>Evidence coverage <button class="header-help" type="button" title="Lifecycle-aware status of traceability rows and concrete evidence." data-tooltip="Lifecycle-aware status of traceability rows and concrete evidence." aria-label="Evidence coverage help: Lifecycle-aware status of traceability rows and concrete evidence.">?</button></th>
+                  <th>Details <button class="header-help" type="button" title="Why the current evidence status applies." data-tooltip="Why the current evidence status applies." aria-label="Details help: Why the current evidence status applies.">?</button></th>
+                </tr>
+              </thead>
+              <tbody id="coverage-table"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="coverage-section">
+          <h2>Parsed Traceability Rows</h2>
+          <p class="section-note">These are the requirement-to-work-to-evidence records currently parsed from <code>management/TRACEABILITY.md</code>.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Requirement <button class="header-help" type="button" title="Requirement named by the traceability row." data-tooltip="Requirement named by the traceability row." aria-label="Requirement help: Requirement named by the traceability row.">?</button></th>
+                  <th>Work item <button class="header-help" type="button" title="Backlog work item named by the traceability row." data-tooltip="Backlog work item named by the traceability row." aria-label="Work item help: Backlog work item named by the traceability row.">?</button></th>
+                  <th>Lifecycle <button class="header-help" type="button" title="Recorded traceability state compared with the current backlog state." data-tooltip="Recorded traceability state compared with the current backlog state." aria-label="Lifecycle help: Recorded traceability state compared with the current backlog state.">?</button></th>
+                  <th>Evidence <button class="header-help" type="button" title="Evidence recorded for this requirement and work item." data-tooltip="Evidence recorded for this requirement and work item." aria-label="Evidence help: Evidence recorded for this requirement and work item.">?</button></th>
+                  <th>Source <button class="header-help" type="button" title="Source row in management/TRACEABILITY.md." data-tooltip="Source row in management/TRACEABILITY.md." aria-label="Source help: Source row in management/TRACEABILITY.md.">?</button></th>
+                </tr>
+              </thead>
+              <tbody id="traceability-table"></tbody>
+            </table>
+          </div>
+        </section>
       </section>
 
       <section class="view" id="view-workflows">

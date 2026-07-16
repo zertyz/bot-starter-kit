@@ -194,6 +194,32 @@ p {
   margin-bottom: 14px;
 }
 
+.coverage-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 14px;
+}
+
+.coverage-summary {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.coverage-summary h2 {
+  font-size: 15px;
+}
+
+.coverage-summary .section-note {
+  margin-top: 3px;
+}
+
+.coverage-summary .metric-grid {
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+  margin: 10px 0 0;
+}
+
 .metric {
   min-height: 80px;
   border: 1px solid var(--line);
@@ -294,6 +320,60 @@ th {
   text-transform: uppercase;
 }
 
+.header-help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  min-height: 18px;
+  margin-left: 3px;
+  border-color: #8c959f;
+  border-radius: 50%;
+  padding: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  text-transform: none;
+  vertical-align: middle;
+}
+
+.header-help::after {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  z-index: 30;
+  width: max-content;
+  max-width: 280px;
+  border-radius: 5px;
+  background: #17202a;
+  padding: 6px 8px;
+  color: #ffffff;
+  content: attr(data-tooltip);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  text-align: left;
+  text-transform: none;
+  transform: translateX(-50%);
+  visibility: hidden;
+  white-space: normal;
+}
+
+.header-help:hover,
+.header-help:focus-visible {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.header-help:hover::after,
+.header-help:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+}
+
 td.actions {
   white-space: nowrap;
 }
@@ -355,6 +435,61 @@ button.local-only {
 .pill.red {
   border-color: #fda29b;
   background: var(--red-soft);
+}
+
+.pill.muted {
+  color: var(--muted);
+}
+
+.coverage-section {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.coverage-section h2 {
+  font-size: 15px;
+}
+
+.section-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.evidence-text,
+.coverage-detail {
+  min-width: 220px;
+  white-space: pre-wrap;
+}
+
+.coverage-breakdown {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.missing-reference {
+  color: var(--orange);
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.inspector-section {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.inspector-section h3 {
+  font-size: 13px;
+}
+
+.list-item.prompt-acknowledged {
+  border-color: #86efac;
+  background: var(--green-soft);
 }
 
 .list {

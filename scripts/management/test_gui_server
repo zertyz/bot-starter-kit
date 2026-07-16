@@ -166,16 +166,154 @@ class ManagementGuiServerTest(unittest.TestCase):
         self.assertIn("ledgers", payload)
         self.assertIn("diagrams", payload)
         self.assertIn("audit_findings", payload)
+        self.assertIn("quality_findings", payload)
+        self.assertIn("semantic_prompts", payload)
+        self.assertIn("traceability", payload)
         self.assertIn("tech_debts", payload)
         self.assertIn("audit_blockers", payload["counts"])
+        self.assertIn("quality_blockers", payload["counts"])
+        self.assertIn("quality_findings", payload["counts"])
+        self.assertIn("unplanned_requirements", payload["counts"])
+        self.assertIn("evidence_gaps", payload["counts"])
+        self.assertIn("evidence_pending", payload["counts"])
+        self.assertIn("active_semantic_prompts", payload["counts"])
         self.assertIn("tech_debt_findings", payload["counts"])
 
     def test_requirement_payload_contains_proactive_audit_context(self) -> None:
         payload = self.gui.model_payload()
         requirement = payload["requirements"][0]
         self.assertIn("audit_findings", requirement)
+        self.assertIn("quality_findings", requirement)
+        self.assertIn("semantic_prompts", requirement)
+        self.assertIn("work_coverage", requirement)
+        self.assertIn("evidence_coverage", requirement)
+        self.assertIn("coverage_acknowledgements", requirement)
         self.assertIn("traceability_status", requirement)
         self.assertIn("edit_hint", requirement)
+
+    def test_requirement_payload_separates_quality_planning_prompts_and_evidence(self) -> None:
+        payload = self.gui.model_payload()
+        requirement = next(item for item in payload["requirements"] if item["id"] == "B.MsgP.02")
+
+        self.assertEqual([], requirement["quality_findings"])
+        self.assertFalse(
+            {"planning", "traceability", "evidence"}
+            & {finding["category"] for finding in requirement["audit_findings"]}
+        )
+        self.assertEqual("unplanned", requirement["work_coverage"]["status"])
+        self.assertEqual(0, requirement["work_coverage"]["count"])
+        self.assertEqual({"N": 0, "R": 0, "F": 0, "X": 0}, requirement["work_coverage"]["by_motivation"])
+        self.assertEqual("not_applicable", requirement["evidence_coverage"]["status"])
+        self.assertEqual([], requirement["evidence_coverage"]["missing_rows"])
+        self.assertTrue(
+            any(
+                prompt["category"] == "boundedness" and prompt["status"] == "acknowledged" and prompt["terms"] == ["all"]
+                for prompt in requirement["semantic_prompts"]
+            )
+        )
+        acknowledged = next(
+            prompt
+            for prompt in requirement["semantic_prompts"]
+            if prompt["category"] == "boundedness" and prompt["status"] == "acknowledged"
+        )
+        self.assertEqual(["all"], acknowledged["mixed_terms"])
+        self.assertFalse(
+            any(
+                prompt["category"] == "boundedness" and prompt["status"] == "active" and "all" in prompt["terms"]
+                for prompt in requirement["semantic_prompts"]
+            )
+        )
+        self.assertTrue(
+            any(note["pattern"] == "B.MsgP.*" for note in requirement["coverage_acknowledgements"])
+        )
+
+    def test_work_coverage_distinguishes_parent_descendant_and_motivation(self) -> None:
+        payload = self.gui.model_payload()
+        requirement = next(item for item in payload["requirements"] if item["id"] == "E.MCP.02")
+        coverage = requirement["work_coverage"]
+
+        self.assertEqual(1, coverage["count"])
+        self.assertEqual(0, coverage["direct_count"])
+        self.assertEqual(1, coverage["descendant_count"])
+        self.assertEqual(1, coverage["active_count"])
+        self.assertEqual(0, coverage["completed_count"])
+        self.assertEqual(0, coverage["abandoned_count"])
+        self.assertEqual({"N": 0, "R": 1, "F": 0, "X": 0}, coverage["by_motivation"])
+        self.assertEqual("descendant", coverage["items"][0]["relation"])
+
+    def test_evidence_coverage_is_lifecycle_aware_and_exposes_rows(self) -> None:
+        payload = self.gui.model_payload()
+        requirements = {item["id"]: item for item in payload["requirements"]}
+
+        self.assertEqual("evidenced", requirements["E.MCP.01"]["evidence_coverage"]["status"])
+        self.assertEqual("pending", requirements["E.Demo.02"]["evidence_coverage"]["status"])
+        self.assertEqual("not_applicable", requirements["B.MsgP.02"]["evidence_coverage"]["status"])
+        self.assertTrue(requirements["E.MCP.01"]["evidence_coverage"]["links"])
+        trace = next(item for item in payload["traceability"] if item["work_item_id"] == "EN.MCP.01-001")
+        self.assertEqual("Merged", trace["trace_state"])
+        self.assertEqual("Merged", trace["work_state"])
+        self.assertTrue(trace["state_matches"])
+        self.assertIn("src/messaging/user_router.rs", trace["existing_evidence_paths"])
+        self.assertEqual("management/TRACEABILITY.md", trace["source_path"])
+
+    def test_pending_evidence_detail_handles_completed_and_active_work(self) -> None:
+        model = self.gui.tool.load_model()
+        requirement = next(iter(model.requirements.values()))
+        evidence = {
+            "status": "pending",
+            "completed_work_item_ids": ["EN.Test.01-001"],
+            "pending_work_item_ids": ["EN.Test.01-002"],
+            "missing_traceability_work_item_ids": [],
+            "missing_evidence_work_item_ids": [],
+        }
+        work = {"status": "active"}
+
+        with mock.patch.object(self.gui.tool, "requirement_evidence_coverage", return_value=evidence):
+            with mock.patch.object(self.gui.tool, "requirement_work_coverage", return_value=work):
+                coverage = self.gui.evidence_coverage_payload(model, requirement, [])
+
+        self.assertIn("Active mapped work remains", coverage["detail"])
+        self.assertIn("completed work may already have evidence", coverage["detail"])
+        self.assertNotIn("has not reached Merged", coverage["detail"])
+
+    def test_completed_work_without_traceability_is_an_evidence_gap(self) -> None:
+        requirement = self.gui.tool.Requirement(
+            id="E.Test.01",
+            document="E",
+            section="Test",
+            section_title="Test",
+            number="01",
+            subtopics="",
+            title="Test requirement",
+            path=self.gui.tool.MANAGEMENT_DIR / "ENGINEERING.md",
+            line=1,
+            body_lines=["The system must provide a test behavior."],
+        )
+        work_item = self.gui.tool.WorkItem(
+            id="EN.Test.01-001",
+            requirement_id=requirement.id,
+            document="E",
+            motivation="N",
+            section="Test",
+            number="01",
+            subtopics="",
+            sequence="001",
+            title="Test work",
+            state="Merged",
+            path=self.gui.tool.MANAGEMENT_DIR / "ENGINEERING.backlog.md",
+            line=1,
+        )
+        model = self.gui.tool.ManagementModel(
+            requirements={requirement.id: requirement},
+            work_items={work_item.id: work_item},
+        )
+
+        coverage = self.gui.evidence_coverage_payload(model, requirement, [])
+
+        self.assertEqual("gap", coverage["status"])
+        self.assertEqual([work_item.id], coverage["completed_work_items"])
+        self.assertEqual([work_item.id], coverage["missing_rows"])
+        self.assertIn("missing traceability rows", coverage["detail"])
 
     def test_work_payload_contains_attention_context(self) -> None:
         payload = self.gui.model_payload()
@@ -671,6 +809,62 @@ class ManagementGuiServerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             index_path = self.gui.export_management_report(root / "management", stale_days=0)
+            interaction_script = """
+  <script>
+    window.addEventListener("load", () => {
+      const isVisible = (element) => Boolean(element && element.getClientRects().length);
+      const selection = document.querySelector("#selection");
+      state.selected = {type: "requirement", id: "E.Missing.01"};
+      renderSelection();
+      const missingRequirementGuarded = selection.textContent.includes("is not present in the current model");
+      state.selected = {type: "work", id: "EN.Missing.01-001"};
+      renderSelection();
+      const missingWorkGuarded = selection.textContent.includes("is not present in the current model");
+      state.model.traceability.push({
+        requirement_id: "E.Missing.01",
+        work_item_id: "EN.Missing.01-001",
+        trace_state: "Merged",
+        work_state: null,
+        state_matches: null,
+        evidence: "Missing-model reference",
+        evidence_paths: [],
+        source_path: "management/TRACEABILITY.md",
+        line: 999,
+      });
+      renderTraceability();
+      const missingTraceReference = Array.from(document.querySelectorAll("#traceability-table .missing-reference"))
+        .find((item) => item.textContent === "E.Missing.01");
+      document.querySelector('[data-view="traceability"]')?.click();
+      document.querySelector('#coverage-table [data-select-requirement="B.MsgP.02"]')?.click();
+
+      const traceView = document.querySelector("#view-traceability");
+      const acknowledged = Array.from(selection?.querySelectorAll(".prompt-acknowledged") ?? [])
+        .find((item) => item.textContent.includes("boundedness") && item.textContent.includes("acknowledged"));
+      const visibleTraceRows = Array.from(document.querySelectorAll("#traceability-table tr"))
+        .filter((row) => isVisible(row) && !row.querySelector(".empty"));
+      const result = document.createElement("output");
+      result.id = "browser-interaction-result";
+      result.dataset.traceViewVisible = String(isVisible(traceView) && traceView.classList.contains("active"));
+      result.dataset.traceRowsVisible = String(visibleTraceRows.length);
+      result.dataset.selectedRequirement = selection?.querySelector(".kv strong")?.textContent.trim() ?? "";
+      result.dataset.missingRequirementGuarded = String(missingRequirementGuarded);
+      result.dataset.missingWorkGuarded = String(missingWorkGuarded);
+      result.dataset.missingTraceIsText = String(
+        Boolean(missingTraceReference) && !missingTraceReference.closest("td").querySelector("button")
+      );
+      result.dataset.acknowledgedAllVisible = String(
+        isVisible(acknowledged) && acknowledged.textContent.includes("Terms: all")
+      );
+      result.dataset.mixedAllVisible = String(
+        isVisible(acknowledged) && acknowledged.textContent.includes("Also appears without emphasis: all")
+      );
+      result.textContent = "browser interaction complete";
+      document.body.appendChild(result);
+    });
+  </script>
+"""
+            index = index_path.read_text(encoding="utf-8")
+            index_path.write_text(index.replace("</body>", f"{interaction_script}</body>", 1), encoding="utf-8")
             return_code, dom, stderr = browser_dom(browser, index_path.as_uri(), root)
             if return_code != 0 and "Operation not permitted" in stderr:
                 self.skipTest("headless browser process isolation is unavailable in this sandbox")
@@ -679,6 +873,20 @@ class ManagementGuiServerTest(unittest.TestCase):
             self.assertIn("<title>Management Report</title>", dom)
             self.assertIn(">Static offline report</span>", dom)
             self.assertIn(f">{self.gui.REPO_ROOT.name} (static export)</p>", dom)
+            self.assertIn('id="view-traceability"', dom)
+            self.assertIn("0 · Unplanned", dom)
+            self.assertIn("Not applicable", dom)
+            self.assertIn("Parsed Traceability Rows", dom)
+            self.assertIn("src/messaging/user_router.rs", dom)
+            self.assertIn('id="browser-interaction-result"', dom)
+            self.assertIn('data-trace-view-visible="true"', dom)
+            self.assertRegex(dom, r'data-trace-rows-visible="[1-9][0-9]*"')
+            self.assertIn('data-selected-requirement="B.MsgP.02"', dom)
+            self.assertIn('data-missing-requirement-guarded="true"', dom)
+            self.assertIn('data-missing-work-guarded="true"', dom)
+            self.assertIn('data-missing-trace-is-text="true"', dom)
+            self.assertIn('data-acknowledged-all-visible="true"', dom)
+            self.assertIn('data-mixed-all-visible="true"', dom)
             self.assertRegex(dom, r'<button id="refresh"[^>]*disabled=""[^>]*class="local-only"')
             self.assertRegex(dom, r'<button[^>]*data-action="lint"[^>]*disabled=""')
             self.assertNotRegex(dom, r'id="local-only-explanation"[^>]*\shidden(?:=|\s|>)')
@@ -705,7 +913,17 @@ class ManagementGuiServerTest(unittest.TestCase):
         self.assertIn('aria-live="polite"', index)
         self.assertIn('aria-label="Filter requirements"', index)
         self.assertIn('aria-label="Filter work items"', index)
+        self.assertIn('aria-label="Filter traceability coverage and evidence"', index)
         self.assertIn('aria-label="Filter tech debt"', index)
+        self.assertIn('data-view="traceability"', index)
+        self.assertIn('id="view-traceability"', index)
+        self.assertIn('aria-label="Quality help: Deterministic requirement-quality findings.', index)
+        self.assertIn('aria-label="Work help: Backlog items mapped directly', index)
+        self.assertIn('aria-label="Evidence help: Lifecycle-aware evidence coverage.', index)
+        self.assertIn('class="header-help"', index)
+        self.assertIn('data-tooltip="Lifecycle-aware evidence coverage.', index)
+        self.assertIn('id="work-coverage-metrics"', index)
+        self.assertIn('id="evidence-coverage-metrics"', index)
         self.assertIn('name="override_gate"', index)
         self.assertIn('data-form-action="block-work"', index)
         self.assertIn('data-form-action="unblock-work"', index)
@@ -722,6 +940,17 @@ class ManagementGuiServerTest(unittest.TestCase):
         self.assertIn("item.block_history", app)
         self.assertIn("item.gate_overrides", app)
         self.assertIn("item.history_exceptions", app)
+        self.assertIn('pill("0 · Unplanned", "orange"', app)
+        self.assertIn('`${coverage.count} · Mixed`, "orange"', app)
+        self.assertIn("workCoverageTitle", app)
+        self.assertIn('`${coverage.count} · Active`', app)
+        self.assertIn('["not_applicable", "Not Applicable"]', app)
+        self.assertIn('["abandoned", "Abandoned"]', app)
+        self.assertIn("evidenceCoveragePill", app)
+        self.assertIn("Acknowledged Semantic Prompts", app)
+        self.assertIn("req.evidence_coverage.links", app)
+        self.assertIn("state.model.traceability", app)
+        self.assertIn("prompt-acknowledged", SOURCE_CSS.read_text(encoding="utf-8"))
         self.assertIn("`Superseded by ${item.id}`", app)
         self.assertIn("PYTHONDONTWRITEBYTECODE", gui_wrapper)
         self.assertTrue(self.gui.sys.dont_write_bytecode)

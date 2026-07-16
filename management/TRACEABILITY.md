@@ -1,22 +1,23 @@
 # Traceability
 
-Traceability connects requirements, work items, implementation, and verification evidence. It is a management aid; the requirement files remain authoritative for desired behavior.
+Traceability connects requirements, work items, implementation, and verification evidence. It is a management aid; the requirement files remain authoritative for desired behavior. Only parsed rows in the single canonical `## Current Links` table supply management evidence.
 
 
 ## Current Links
 
-| Requirement | Work Item | State | Evidence |
-| --- | --- | --- | --- |
-| `E.MCP.01` | `EN.MCP.01-001` | Merged | `src/messaging/user_router.rs`; messaging tests in the same module |
-| `E.Demo.01` | `EN.Demo.01-001` | Rolled Out | `src/logic/telegram_demoscene.rs`; Telegram gateway code |
-| `E.Demo.02` | `EN.Demo.02-001` | Started | No implementation evidence yet |
-| `E.MCP.02.a` | `ER.MCP.02.a-001` | Planned | Existing messaging contracts are implementation context; final model update is not complete |
+| Requirement | Work Item | State | Evidence                                                                                                                                                                                                                      |
+| --- | --- | --- |-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `E.MCP.01` | `EN.MCP.01-001` | Merged | `src/messaging/user_router.rs`; messaging tests in the same module                                                                                                                                                            |
+| `E.Demo.01` | `EN.Demo.01-001` | Rolled Out | `src/logic/telegram_demoscene.rs`; Telegram gateway code                                                                                                                                                                      |
+| `E.Demo.02` | `EN.Demo.02-001` | Started | No implementation evidence yet                                                                                                                                                                                                |
+| `E.MCP.02.a` | `ER.MCP.02.a-001` | Planned | Existing messaging contracts are implementation context; final model update is not complete                                                                                                                                   |
 | `E.Gov.01` | `EN.Gov.01-001` | Started | `scripts/management/management_tool`; `scripts/management/gui_server`; `scripts/management/test_management_tool`; `scripts/management/test_gui_server`; `.agents/skills/analyze-management/SKILL.md`; `management/TOOLING.md` |
+| `E.Gov.01` | `EN.Gov.01-001` | QA         | Issues found by Luiz                                                                                                                                                                                                          |
 
 
 ## Unmapped Requirement Areas
 
-The following requirement areas currently need backlog mapping or evidence review:
+The following entries acknowledge requirement areas whose work or evidence coverage still needs review. They are coverage metadata: they do not create work mappings, are not traceability rows, and never supply implementation or verification evidence.
 
 1. `B.MsgP.*` -- supported messaging platforms and feature follow-up.
 2. `B.UsrMgn.*` -- user-management behavior.
@@ -32,4 +33,6 @@ The following requirement areas currently need backlog mapping or evidence revie
 3. Operations scripts, deployment logs, and monitoring records are evidence of operational behavior.
 4. Code in `main` is evidence of actual behavior.
 5. Code outside `main` is evidence of behavior under development.
-6. Missing evidence does not invalidate a requirement; it identifies a traceability gap.
+6. A row's requirement must exactly match its work item's governing requirement. Parent requirement views may aggregate rows belonging to descendants, but the row itself remains attached to the child.
+7. Evidence coverage is lifecycle-aware, with `gap` taking precedence when completed work lacks required evidence and `pending` taking precedence while any work remains active. Otherwise use `evidenced` for completed work with concrete existing evidence in a parsed row and `not_applicable` when no lifecycle evidence obligation exists.
+8. Missing evidence does not invalidate a requirement or prove that implementation is absent.

@@ -116,7 +116,7 @@ scripts/management/semantic_context verification EN.Gov.01-001
 scripts/management/semantic_context tech-debt --limit 20
 ```
 
-The command emits versioned JSON containing deterministic management facts and review signals. It never presents lexical or path-based signals as a semantic verdict. Pass that context to the repo-local `$analyze-management` skill when the task requires judgment about requirements, plans, implementation quality, verification, drift, or technical debt.
+The command emits versioned JSON that keeps deterministic quality findings, lexical semantic prompts, `work_coverage`, and lifecycle-aware `evidence_coverage` separate. Prompts are `active` or `acknowledged`; they are review leads, never semantic verdicts. Pass that context to the repo-local `$analyze-management` skill when the task requires judgment about requirements, plans, implementation quality, verification, drift, or technical debt.
 
 An optional requirement on `audit` includes that parent requirement and its descendants. `estimate` and `sync` expose descendants alongside their exact focus. An optional repository path on `tech-debt` narrows candidates to that path prefix.
 
@@ -151,7 +151,7 @@ scripts/management/audit_requirements --document E
 scripts/management/audit_requirements --strict
 ```
 
-The command reports local heuristic findings across requirements, backlog links, and `TRACEABILITY.md`: missing or thin requirement text, unbounded wording, implementation-heavy wording, unclear actors, likely compound scope, missing work, and missing traceability. It is an audit aid; market fit, competitor analysis, code-semantic drift, and final wording remain human PM/manager decisions.
+The command reports four independent dimensions: deterministic quality findings; active and acknowledged semantic prompts; work coverage; and lifecycle-aware evidence coverage. Exact single-emphasis around a broad term, such as `*all*`, acknowledges that term for the whole requirement without erasing the observation. `--strict` fails only on deterministic `BLOCKER` or `REVIEW` quality findings; unplanned work, pending evidence, and lexical prompts do not make requirement quality fail. Market fit, code-semantic drift, and final wording remain human PM/manager decisions.
 
 
 ## Estimate a Requirement
@@ -160,7 +160,7 @@ The command reports local heuristic findings across requirements, backlog links,
 scripts/management/estimate_requirement E.MCP.02.b
 ```
 
-The command prints a planning packet for one requirement: local readiness signals, existing work, traceability links, dependency signals, and a senior-engineer-hour effort band. The estimate is based on repo-local structure and wording; product value, market timing, and final commitment remain PM/manager decisions.
+The command prints a planning packet for one requirement: deterministic readiness findings, semantic prompts, work coverage, parsed traceability links, evidence coverage, dependency signals, and a structural sizing signal. Active prompts require semantic review but do not become quality findings; acknowledged boundedness or scope remains an author decision. The deterministic command always withholds a finite delivery estimate: lexical silence cannot establish scope, dependencies, implementation context, or effort, and the structural heuristic is never relabeled as a commitment. Product value, market timing, semantic disposition, and final estimation remain PM/manager decisions.
 
 
 ## Sync a Requirement
