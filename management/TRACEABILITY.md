@@ -9,7 +9,7 @@ Traceability connects requirements, work items, implementation, and verification
 | --- | --- |-------------|---------------------------------------------------------------------------------------------|
 | `E.MCP.01` | `EN.MCP.01-001` | Rolled Out  | `src/messaging/user_router.rs`; messaging tests in the same module                          |
 | `E.Demo.01` | `EN.Demo.01-001` | Rolled Out  | `src/logic/telegram_demoscene.rs`; Telegram gateway code                                    |
-| `E.Demo.02` | `EN.Demo.02-001` | Started     | `examples/whatsapp_demoscene.rs`; `src/resources.rs`; focused tests in both modules          |
+| `E.Demo.02` | `EN.Demo.02-001` | Rolled Out | `examples/whatsapp_demoscene.rs`; `src/resources.rs`; focused tests in both modules |
 | `E.MCP.02.a` | `ER.MCP.02.a-001` | Planned     | Existing messaging contracts are implementation context; final model update is not complete |
 | `E.Gov.01` | `EN.Gov.01-001` | Rolled Out  | `scripts/management`; Issues found by Luiz, then fixed by Codex                             |
 

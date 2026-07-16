@@ -10,14 +10,7 @@
 
 # Started
 
-## EN.Demo.02-001 -- Do the WhatsApp Demoscene version
-1. Use the `whatsapp-business-rs` crate and explore everything it has to offer
-2. Document any issues found – such as bad security, bad concurrency, poor features support, etc.
-   ==> Luiz. Planned: 2026-07-05; Started: 2026-07-06
-
-
 # "In Code Review"
-
 
 # "Integrated"
 
@@ -26,7 +19,6 @@
 
 
 # Merged
-
 
 # Rolled Out
 
@@ -48,5 +40,12 @@
 4. Add adversarial policy, storage, HTTP, concurrency, export, and browser-facing tests.
 5. Keep the current production deployment workflow unchanged, as explicitly directed for this early development phase.
    ==> Codex. Planned: 2026-07-15; Started: 2026-07-15; In Code Review: 2026-07-15; Merged: 2026-07-15; Rolled Out: 2026-07-15;
+
+## EN.Demo.02-001 -- Do the WhatsApp Demoscene version
+1. Use the `whatsapp-business-rs` crate and explore everything it has to offer
+2. Document any issues found – such as bad security, bad concurrency, poor features support, etc.
+   ==> Luiz. Planned: 2026-07-05; Started: 2026-07-06; In Code Review: 2026-07-16; Merged: 2026-07-16; Rolled Out: 2026-07-16;
+==> Gate override for Rolled Out: 2026-07-16; Reason: Still in auto-release phase; QA done by Luiz
+
 
    

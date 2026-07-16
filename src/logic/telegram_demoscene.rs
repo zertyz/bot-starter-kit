@@ -183,11 +183,11 @@ pub async fn run(config: BotConfig) -> Result<()> {
 fn main_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![InlineKeyboardButton::callback("💩 Show Your Chat ID", callbacks::CHAT_ID), InlineKeyboardButton::callback("📈 Live Trade Simulation", callbacks::FOLLOW_ASSET)],
+        vec![InlineKeyboardButton::callback("🧪 Progress demo", callbacks::RUN), InlineKeyboardButton::callback("🖼️ Swap media demo", callbacks::RENDER)],
         vec![
             InlineKeyboardButton::callback("🎞️ Additional Media", callbacks::ADDITIONAL_MEDIA),
             InlineKeyboardButton::callback("🧠 Heed Benchmarks", callbacks::HEED_BENCHMARK),
         ],
-        vec![InlineKeyboardButton::callback("🧪 Progress demo", callbacks::RUN), InlineKeyboardButton::callback("🖼️ Swap media demo", callbacks::RENDER)],
         vec![
             InlineKeyboardButton::callback("🪶 SQLite Benchmarks", callbacks::SQLITE_BENCHMARK),
             InlineKeyboardButton::callback("🦀 ReDB Benchmarks", callbacks::REDB_BENCHMARK),
