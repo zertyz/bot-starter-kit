@@ -169,7 +169,7 @@ use url::Url;
 use whatsapp_business_rs::{
     Client, Fields, WebhookHandler,
     app::SubscriptionField,
-    message::{Content, Draft, InteractiveAction, InteractiveContent, InteractiveMessage, Media, Message, MessageCreate},
+    message::{Content, Draft, InteractiveAction, InteractiveContent, InteractiveMessage, Location, Media, Message, MessageCreate},
     server::{ErrorContext, EventContext, IncomingMessage, MessageUpdate, WabaEvent},
     webhook_service::WebhookService,
 };
@@ -177,6 +177,9 @@ use whatsapp_business_rs::{
 const DEFAULT_WEBHOOK_BIND_ADDR: &str = "127.0.0.1:8080";
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const META_INTERACTIVE_FOOTER_MAX_CHARS: usize = 60;
+const EARTH_MEAN_RADIUS_METERS: f64 = 6_371_008.8;
+const LOCATION_REPLY_SHIFT_METERS: f64 = 100.0;
+const BOT_STARTER_KIT_REPOSITORY_URL: &str = "https://github.com/zertyz/bot-starter-kit";
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1034,6 +1037,10 @@ async fn execute_demo_action(incoming: &IncomingMessage, action: Result<DemoActi
 }
 
 fn response_for(message: &Message) -> Result<DemoAction> {
+    if let Content::Location(location) = &message.content {
+        return Ok(DemoAction::Reply(shifted_location_draft(location)?));
+    }
+
     let command = message
         .content
         .button_click()
@@ -1093,7 +1100,7 @@ fn list_draft() -> Draft {
         .add_list_option("demo:quote", "Quoted reply", "Reply with the selected message as context")
         .add_list_section("Interactive")
         .add_list_option("demo:location", "Location", "Latitude/longitude with a name and address")
-        .add_list_option("demo:location-request", "Request location", "Ask the mobile client to share its location")
+        .add_list_option("demo:location-request", "Request location", "Share a location; receive a point about 100 m south")
         .add_list_option("demo:cta", "CTA URL", "A native call-to-action link button")
         .add_list_option("demo:inspect", "Inspect", "Show safe metadata for the selected message")
         .with_biz_opaque_callback_data("whatsapp-demoscene:list")
@@ -1101,9 +1108,9 @@ fn list_draft() -> Draft {
 
 fn cta_draft() -> Draft {
     Draft::new()
-        .body("Open the SDK repository used by this demoscene.")
+        .body("Open the OgreRobot bot-starter-kit repository.")
         .footer("CTA buttons open a URL and do not send a callback.")
-        .with_cta_url("https://github.com/veecore/whatsapp-business-rs", "Open SDK")
+        .with_cta_url(BOT_STARTER_KIT_REPOSITORY_URL, "Open repository")
         .with_biz_opaque_callback_data("whatsapp-demoscene:cta")
 }
 
@@ -1153,8 +1160,29 @@ fn location_draft() -> Draft {
         .with_biz_opaque_callback_data("whatsapp-demoscene:location")
 }
 
+fn shifted_location_draft(location: &Location) -> Result<Draft> {
+    if !location
+        .latitude
+        .is_finite()
+        || !location
+            .longitude
+            .is_finite()
+        || !(-90.0..=90.0).contains(&location.latitude)
+        || !(-180.0..=180.0).contains(&location.longitude)
+    {
+        return Err(anyhow!("received location coordinates are outside the valid latitude/longitude ranges"));
+    }
+
+    let latitude_shift = (LOCATION_REPLY_SHIFT_METERS / EARTH_MEAN_RADIUS_METERS).to_degrees();
+    let shifted_latitude = (location.latitude - latitude_shift).max(-90.0);
+    Ok(Draft::location(shifted_latitude, location.longitude)
+        .location_name("About 100 m south of your location")
+        .location_address(format!("Original: {:.6}, {:.6}", location.latitude, location.longitude))
+        .with_biz_opaque_callback_data("whatsapp-demoscene:location-shifted-south"))
+}
+
 fn location_request_draft() -> Draft {
-    Draft::interactive(InteractiveMessage::new(InteractiveAction::LocationRequest, "Tap the button to share your current location."))
+    Draft::interactive(InteractiveMessage::new(InteractiveAction::LocationRequest, "Share your location. The demo replies with a point about 100 m south."))
         .with_biz_opaque_callback_data("whatsapp-demoscene:location-request")
 }
 
@@ -1305,6 +1333,44 @@ mod tests {
         for draft in [menu_draft(), list_draft(), cta_draft(), location_request_draft()] {
             validate_demo_draft(&draft).unwrap();
         }
+    }
+
+    #[test]
+    fn cta_opens_the_bot_starter_kit_repository() {
+        let Content::Interactive(InteractiveContent::Message(interactive)) = cta_draft().content else {
+            panic!("CTA draft must be an outgoing interactive message");
+        };
+        let InteractiveAction::Cta(button) = interactive.action else {
+            panic!("CTA draft must use a URL action");
+        };
+
+        assert_eq!(button.url, BOT_STARTER_KIT_REPOSITORY_URL);
+    }
+
+    #[test]
+    fn inbound_location_is_returned_about_one_hundred_meters_south() {
+        let inbound = Location::new(-23.55052, -46.633308);
+        let draft = shifted_location_draft(&inbound).unwrap();
+        let Content::Location(outbound) = draft.content else {
+            panic!("shifted location reply must contain location content");
+        };
+
+        let north_south_distance = (inbound.latitude - outbound.latitude).to_radians() * EARTH_MEAN_RADIUS_METERS;
+        assert!((north_south_distance - LOCATION_REPLY_SHIFT_METERS).abs() < 0.001);
+        assert_eq!(outbound.longitude, inbound.longitude);
+        assert_eq!(
+            outbound
+                .name
+                .as_deref(),
+            Some("About 100 m south of your location")
+        );
+        assert_eq!(
+            outbound
+                .address
+                .as_deref(),
+            Some("Original: -23.550520, -46.633308")
+        );
+        assert!(shifted_location_draft(&Location::new(91.0, 0.0)).is_err());
     }
 
     #[test]
