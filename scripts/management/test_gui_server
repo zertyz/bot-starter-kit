@@ -246,7 +246,7 @@ class ManagementGuiServerTest(unittest.TestCase):
         requirements = {item["id"]: item for item in payload["requirements"]}
 
         self.assertEqual("evidenced", requirements["E.MCP.01"]["evidence_coverage"]["status"])
-        self.assertEqual("pending", requirements["E.Demo.02"]["evidence_coverage"]["status"])
+        self.assertEqual("evidenced", requirements["E.Demo.02"]["evidence_coverage"]["status"])
         self.assertEqual("not_applicable", requirements["B.MsgP.02"]["evidence_coverage"]["status"])
         self.assertTrue(requirements["E.MCP.01"]["evidence_coverage"]["links"])
         trace = next(item for item in payload["traceability"] if item["work_item_id"] == "EN.Demo.01-001")
