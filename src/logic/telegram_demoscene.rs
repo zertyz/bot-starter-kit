@@ -361,6 +361,10 @@ Para quem busca trades de risco agressivo em papéis menores do mercado à vista
 </pre>
 
 <i>Lembre-se sempre de gerenciar seu risco, definir seus stops antes de entrar na operação e acompanhar a abertura dos mercados internacionais para alinhar a tendência macro. Bons trades!</i>"#;
+
+    // escaping
+    let ai_analysis = ai_analysis.replace("<br>", "");
+
     bot.send_message(chat_id, ai_analysis)
         .parse_mode(ParseMode::Html)
         .await
