@@ -48,8 +48,9 @@ Before proposing or editing management work:
 1. Run or inspect `scripts/management/management_tool lint`.
 2. Identify the governing requirement and matching backlog item.
 3. Check whether traceability and ledgers already answer the question.
-4. Prefer dry runs before writes: `draft_plan`, `advance_state`, release tagging, and branch commands all have dry-run paths.
-5. Keep generated dashboard and diagram outputs out of commits unless they are intentionally published artifacts.
+4. For qualitative analysis, run the matching `semantic_context` workflow and use `$analyze-management`; inspect the cited code, tests, and git history rather than treating the packet as a conclusion.
+5. Prefer dry runs before writes: `draft_plan`, `advance_state`, `block_work`, `unblock_work`, release tagging, and branch commands all have dry-run paths.
+6. Keep generated dashboard and diagram outputs out of commits unless they are intentionally published artifacts.
 
 After changing management tooling or management files:
 
@@ -64,12 +65,14 @@ After changing management tooling or management files:
 - `management_status`: summarize the current management state; its compact HTML dashboard mode is compatibility-only.
 - `management_report`: export the static GUI-based Management Report for GitHub Pages or local review.
 - `diagram_architecture_real`, `diagram_architecture_planned`, `diagram_module_dependencies`: render static SVG diagrams for Pages or local review.
+- `semantic_context`: provide versioned deterministic evidence for the repo-local `$analyze-management` semantic workflow.
 - `audit_requirements`: find local requirement quality and planning issues.
 - `estimate_requirement`: prepare PM/manager planning context for one requirement.
 - `sync_requirement` and `trace_requirement`: compare one requirement against backlog, traceability, and implementation signals.
 - `draft_plan`: propose or write an `Under Planning` backlog item.
 - `evaluate_plan`: check whether a proposed work item coheres with its requirement.
 - `advance_state`: move a backlog item through the state model.
+- `block_work` and `unblock_work`: append blocker history without changing lifecycle state.
 - `start_work`, `chat_about`, `verification_check`, `review`, `acceptance_packet`: prepare engineering execution, review, and acceptance context.
 - Ledger commands record and close decisions, risks, incidents, and experiments.
 

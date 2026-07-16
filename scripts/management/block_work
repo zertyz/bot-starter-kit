@@ -2,5 +2,4 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
-exec "$SCRIPT_DIR/gui_server" "$@"
+exec "$SCRIPT_DIR/management_tool" block-work "$@"

@@ -3,16 +3,37 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import http.client
 import importlib.machinery
 import importlib.util
 import json
+import os
+import re
+import signal
+import shutil
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
+
+
+sys.dont_write_bytecode = True
 
 
 SOURCE_GUI = Path(__file__).resolve().parent / "gui_server"
+SOURCE_INDEX = Path(__file__).resolve().parent / "gui_static" / "index.html"
+SOURCE_APP = Path(__file__).resolve().parent / "gui_static" / "app.js"
+SOURCE_CSS = Path(__file__).resolve().parent / "gui_static" / "app.css"
+GENERATION_REFERENCE_RE = re.compile(r'"\./(generations/sha256-[0-9a-f]{64}/[^"<>]+)"')
+
+
+def generation_references(index_html: str) -> set[str]:
+    return set(GENERATION_REFERENCE_RE.findall(index_html))
 
 
 def load_gui_server():
@@ -24,6 +45,112 @@ def load_gui_server():
     sys.modules[loader.name] = module
     loader.exec_module(module)
     return module
+
+
+@contextmanager
+def running_server(gui):
+    try:
+        server = gui.bind_server("127.0.0.1", 0, 1, True, capability_token="test-capability")
+    except PermissionError as err:
+        raise unittest.SkipTest(f"localhost sockets are unavailable: {err}") from err
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def http_request(server, method: str, path: str, body: bytes = b"", headers: dict[str, str] | None = None):
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    connection.request(method, path, body=body, headers=headers or {})
+    response = connection.getresponse()
+    response_body = response.read()
+    response_headers = dict(response.getheaders())
+    connection.close()
+    return response.status, response_headers, response_body
+
+
+def action_headers(server) -> dict[str, str]:
+    authority = f"127.0.0.1:{server.server_port}"
+    return {
+        "Host": authority,
+        "Origin": f"http://{authority}",
+        "Content-Type": "application/json",
+        "X-Management-Capability": "test-capability",
+    }
+
+
+def headless_browser() -> str | None:
+    return next(
+        (
+            executable
+            for name in ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser")
+            if (executable := shutil.which(name)) is not None
+        ),
+        None,
+    )
+
+
+def browser_dom(browser: str, url: str, directory: Path) -> tuple[int, str, str]:
+    profile = directory / "browser-profile"
+    profile.mkdir()
+    dom_path = directory / "browser-dom.html"
+    stderr_path = directory / "browser-stderr.log"
+    command = [
+        browser,
+        "--headless=new",
+        "--disable-background-networking",
+        "--disable-breakpad",
+        "--disable-crash-reporter",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-default-browser-check",
+        "--no-first-run",
+        "--no-sandbox",
+        f"--user-data-dir={profile}",
+        "--virtual-time-budget=3000",
+        "--allow-file-access-from-files",
+        "--dump-dom",
+        url,
+    ]
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "HOME": str(profile),
+            "XDG_CACHE_HOME": str(profile / "cache"),
+            "XDG_CONFIG_HOME": str(profile / "config"),
+        }
+    )
+    with dom_path.open("wb") as dom_file, stderr_path.open("wb") as stderr_file:
+        process = subprocess.Popen(
+            command,
+            cwd=SOURCE_GUI.parents[2],
+            env=environment,
+            stdout=dom_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
+        try:
+            return_code = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+            raise AssertionError("headless browser did not finish within 30 seconds")
+        finally:
+            # Chrome may leave crash/reporting helpers in its isolated process
+            # group after the headless parent has returned its DOM.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    return (
+        return_code,
+        dom_path.read_text(encoding="utf-8", errors="replace"),
+        stderr_path.read_text(encoding="utf-8", errors="replace"),
+    )
 
 
 class ManagementGuiServerTest(unittest.TestCase):
@@ -54,6 +181,10 @@ class ManagementGuiServerTest(unittest.TestCase):
         payload = self.gui.model_payload()
         item = payload["work_items"][0]
         self.assertIn("attention", item)
+        self.assertIn("blocked", item)
+        self.assertIn("block_history", item)
+        self.assertIn("gate_overrides", item)
+        self.assertIn("history_exceptions", item)
         for signal in item["attention"]:
             self.assertIn("severity", signal)
             self.assertIn("message", signal)
@@ -61,6 +192,117 @@ class ManagementGuiServerTest(unittest.TestCase):
     def test_builds_allowlisted_requirement_command(self) -> None:
         args = self.gui.build_management_command("show-requirement", {"requirement_id": "E.MCP.01"})
         self.assertEqual(["show-requirement", "E.MCP.01"], args)
+
+    def test_builds_every_allowlisted_action(self) -> None:
+        cases = [
+            ("lint", {}, "lint"),
+            ("management-status", {}, "management-status"),
+            ("show-requirement", {"requirement_id": "E.MCP.01"}, "show-requirement"),
+            ("show-work", {"ref": "EN.MCP.01-001"}, "show-work"),
+            ("chat-about", {}, "chat-about"),
+            ("verify-branch", {}, "verify-branch"),
+            ("evaluate-plan", {"ref": "EN.MCP.01-001"}, "evaluate-plan"),
+            ("draft-plan", {"requirement_id": "E.MCP.01"}, "draft-plan"),
+            ("advance-state", {"ref": "EN.MCP.01-001"}, "advance-state"),
+            ("block-work", {"ref": "EN.MCP.01-001", "reason": "Waiting"}, "block-work"),
+            ("unblock-work", {"ref": "EN.MCP.01-001", "reason": "Ready"}, "unblock-work"),
+            ("start-work", {"branch": "Luiz/EN.MCP.01-001"}, "start-work"),
+            ("audit-requirements", {}, "audit-requirements"),
+            ("estimate-requirement", {"requirement_id": "E.MCP.01"}, "estimate-requirement"),
+            ("sync-requirement", {"requirement_id": "E.MCP.01"}, "sync-requirement"),
+            ("trace-requirement", {"requirement_id": "E.MCP.01"}, "trace-requirement"),
+            (
+                "link-evidence",
+                {"requirement_id": "E.MCP.01", "work_item_id": "EN.MCP.01-001", "paths": ["src/lib.rs"]},
+                "link-evidence",
+            ),
+            ("prepare-release", {"version": "1.2.3"}, "prepare-release"),
+            ("create-release-tag", {"version": "1.2.3"}, "create-release-tag"),
+            ("chase-techdebts", {}, "chase-techdebts"),
+            (
+                "record-decision",
+                {"title": "Title", "context": "Context", "decision": "Decision", "consequence": "Consequence"},
+                "record-decision",
+            ),
+            (
+                "record-risk",
+                {"title": "Title", "owner": "Owner", "risk": "Risk", "impact": "Impact", "mitigation": "Mitigation"},
+                "record-risk",
+            ),
+            ("close-risk", {"risk_id": "RISK-0001", "evidence": "Evidence"}, "close-risk"),
+            (
+                "record-incident",
+                {
+                    "title": "Title",
+                    "environment": "Staging",
+                    "impact": "Impact",
+                    "timeline": "Timeline",
+                    "mitigation": "Mitigation",
+                },
+                "record-incident",
+            ),
+            ("close-incident", {"incident_id": "INCIDENT-0001", "evidence": "Evidence"}, "close-incident"),
+            (
+                "record-experiment",
+                {
+                    "title": "Title",
+                    "branch": "Luiz/EX.MCP.01-001",
+                    "hypothesis": "Hypothesis",
+                    "expires": "2026-08-01",
+                    "success": "Success",
+                    "failure": "Failure",
+                },
+                "record-experiment",
+            ),
+            (
+                "close-experiment",
+                {"experiment_id": "EXP-0001", "status": "Adopted", "result": "Result"},
+                "close-experiment",
+            ),
+            ("stale-work", {}, "stale-work"),
+            ("meeting-packet", {}, "meeting-packet"),
+            ("acceptance-packet", {"ref": "EN.MCP.01-001"}, "acceptance-packet"),
+            ("verification-check", {}, "verification-check"),
+            ("review", {}, "review"),
+            ("diagram-architecture-real", {}, "diagram-architecture-real"),
+            ("diagram-architecture-planned", {}, "diagram-architecture-planned"),
+            ("diagram-module-dependencies", {}, "diagram-module-dependencies"),
+        ]
+        self.assertEqual(35, len(cases))
+        for action, payload, command in cases:
+            with self.subTest(action=action):
+                self.assertEqual(command, self.gui.build_management_command(action, payload)[0])
+
+    def test_ledger_commands_forward_decision_status_and_incident_environment(self) -> None:
+        decision = self.gui.build_management_command(
+            "record-decision",
+            {
+                "title": "Title",
+                "status": "Superseded",
+                "context": "Context",
+                "decision": "Decision",
+                "consequence": "Consequence",
+            },
+        )
+        incident = self.gui.build_management_command(
+            "record-incident",
+            {
+                "title": "Title",
+                "environment": "Local",
+                "impact": "Impact",
+                "timeline": "Timeline",
+                "mitigation": "Mitigation",
+            },
+        )
+
+        self.assertEqual("Superseded", decision[decision.index("--status") + 1])
+        self.assertEqual("Local", incident[incident.index("--environment") + 1])
+
+    def test_rejects_unknown_action_and_non_object_payload(self) -> None:
+        with self.assertRaisesRegex(self.gui.ClientError, "unknown action"):
+            self.gui.build_management_command("not-allowlisted", {})
+        with self.assertRaisesRegex(self.gui.ClientError, "payload must be an object"):
+            self.gui.execute_action({"action": "lint", "payload": []})
 
     def test_release_tag_execution_requires_version_confirmation(self) -> None:
         with self.assertRaises(self.gui.ClientError):
@@ -71,31 +313,432 @@ class ManagementGuiServerTest(unittest.TestCase):
         )
         self.assertIn("--execute", args)
 
+    def test_mutating_action_classification_preserves_dry_runs(self) -> None:
+        self.assertTrue(self.gui.action_mutates_repository("record-risk", {}))
+        self.assertTrue(self.gui.action_mutates_repository("draft-plan", {"write": True}))
+        self.assertFalse(self.gui.action_mutates_repository("draft-plan", {"write": False}))
+        self.assertTrue(self.gui.action_mutates_repository("advance-state", {"dry_run": False}))
+        self.assertFalse(self.gui.action_mutates_repository("advance-state", {"dry_run": True}))
+        self.assertTrue(self.gui.action_mutates_repository("block-work", {"dry_run": False}))
+        self.assertFalse(self.gui.action_mutates_repository("block-work", {"dry_run": True}))
+        self.assertTrue(self.gui.action_mutates_repository("unblock-work", {"dry_run": False}))
+        self.assertFalse(self.gui.action_mutates_repository("unblock-work", {"dry_run": True}))
+        self.assertTrue(self.gui.action_mutates_repository("create-release-tag", {"execute": True}))
+        self.assertFalse(self.gui.action_mutates_repository("create-release-tag", {"execute": False}))
+
+    def test_non_loopback_bind_requires_explicit_unsafe_flag(self) -> None:
+        self.gui.validate_bind_host("127.0.0.1", False)
+        self.gui.validate_bind_host("::1", False)
+        with self.assertRaisesRegex(self.gui.ClientError, "unsafe-allow-non-loopback"):
+            self.gui.validate_bind_host("0.0.0.0", False)
+        self.gui.validate_bind_host("0.0.0.0", True)
+
+    def test_state_actions_forward_override_block_and_safe_supersession(self) -> None:
+        target_state = "Superseded by EN.MCP.01-002"
+        advance = self.gui.build_management_command(
+            "advance-state",
+            {
+                "ref": "EN.MCP.01-001",
+                "to": target_state,
+                "override_gate": "Accepted evidence gap.",
+                "dry_run": True,
+            },
+        )
+        self.assertIn(target_state, advance)
+        self.assertIn("--override-gate", advance)
+        self.assertIn("Accepted evidence gap.", advance)
+        self.assertIn("--dry-run", advance)
+
+        blocked = self.gui.build_management_command(
+            "block-work",
+            {"ref": "EN.MCP.01-001", "reason": "Waiting for review.", "date": "2026-07-15", "dry_run": True},
+        )
+        self.assertEqual(
+            [
+                "block-work",
+                "EN.MCP.01-001",
+                "--reason",
+                "Waiting for review.",
+                "--date",
+                "2026-07-15",
+                "--dry-run",
+            ],
+            blocked,
+        )
+
     def test_execute_read_only_status_action(self) -> None:
         result = self.gui.execute_action({"action": "management-status", "payload": {"stale_days": "14"}})
         self.assertEqual(0, result["returncode"])
         self.assertIn("Management Status", result["stdout"])
 
+    def test_mutating_actions_are_serialized(self) -> None:
+        counter_lock = threading.Lock()
+        mutation_lock = threading.Lock()
+        start = threading.Barrier(4)
+        active = 0
+        maximum_active = 0
+        results = []
+
+        def fake_run(_args):
+            nonlocal active, maximum_active
+            with counter_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.04)
+            with counter_lock:
+                active -= 1
+            return {"command": "record-risk", "returncode": 0, "stdout": "", "stderr": ""}
+
+        request = {
+            "action": "record-risk",
+            "payload": {
+                "title": "Title",
+                "owner": "Owner",
+                "risk": "Risk",
+                "impact": "Impact",
+                "mitigation": "Mitigation",
+            },
+        }
+
+        def worker():
+            start.wait()
+            results.append(self.gui.execute_action(request, mutation_lock))
+
+        with mock.patch.object(self.gui, "run_management_command", side_effect=fake_run):
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(4, len(results))
+        self.assertEqual(1, maximum_active)
+
+    def test_diagram_cache_generates_once_and_force_refreshes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            diagram_dir = Path(directory) / "diagrams"
+            counter_lock = threading.Lock()
+            calls = 0
+
+            def fake_generate(output_dir, _loaded_model=None):
+                nonlocal calls
+                with counter_lock:
+                    calls += 1
+                time.sleep(0.04)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                for filename in self.gui.DIAGRAM_FILENAMES:
+                    (output_dir / filename).write_text(filename, encoding="utf-8")
+
+            with mock.patch.object(self.gui, "DIAGRAM_DIR", diagram_dir), mock.patch.object(
+                self.gui, "generate_diagrams", side_effect=fake_generate
+            ):
+                self.gui.DIAGRAM_CACHE_READY = False
+                start = threading.Barrier(4)
+
+                def worker():
+                    start.wait()
+                    self.gui.ensure_diagrams()
+
+                threads = [threading.Thread(target=worker) for _ in range(4)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+                self.assertEqual(1, calls)
+                self.assertTrue(all((diagram_dir / name).is_file() for name in self.gui.DIAGRAM_FILENAMES))
+                self.gui.ensure_diagrams(force=True)
+                self.assertEqual(2, calls)
+                self.gui.DIAGRAM_CACHE_READY = False
+
+    def test_explicit_diagram_action_invalidates_cache(self) -> None:
+        self.gui.DIAGRAM_CACHE_READY = True
+        result = {"command": "diagram", "returncode": 0, "stdout": "", "stderr": ""}
+        with mock.patch.object(self.gui, "run_management_command", return_value=result):
+            self.assertEqual(result, self.gui.execute_action({"action": "diagram-architecture-real", "payload": {}}))
+        self.assertFalse(self.gui.DIAGRAM_CACHE_READY)
+
+    def test_http_root_injects_capability_and_security_headers(self) -> None:
+        with running_server(self.gui) as server:
+            authority = f"127.0.0.1:{server.server_port}"
+            status, headers, body = http_request(server, "GET", "/", headers={"Host": authority})
+            self.assertEqual(200, status)
+            self.assertIn('content="test-capability"', body.decode("utf-8"))
+            self.assertNotIn(self.gui.INDEX_CAPABILITY_MARKER.encode("utf-8"), body)
+            self.assertEqual("DENY", headers["X-Frame-Options"])
+            self.assertEqual("nosniff", headers["X-Content-Type-Options"])
+            self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+
+            status, _, body = http_request(server, "GET", "/", headers={"Host": "attacker.invalid"})
+            self.assertEqual(403, status)
+            self.assertEqual("invalid Host header", json.loads(body)["error"])
+
+    def test_http_action_requires_host_origin_json_token_and_size_limit(self) -> None:
+        request_body = json.dumps({"action": "lint", "payload": {}}).encode("utf-8")
+        result = {"command": "lint", "returncode": 0, "stdout": "", "stderr": ""}
+        with mock.patch.object(self.gui, "execute_action", return_value=result) as execute:
+            with running_server(self.gui) as server:
+                headers = action_headers(server)
+                status, _, body = http_request(server, "POST", "/api/action", request_body, headers)
+                self.assertEqual(200, status)
+                self.assertEqual(0, json.loads(body)["returncode"])
+
+                adversarial_cases = []
+                missing_token = dict(headers)
+                missing_token.pop("X-Management-Capability")
+                adversarial_cases.append((missing_token, request_body, 403, "invalid capability token"))
+                missing_origin = dict(headers)
+                missing_origin.pop("Origin")
+                adversarial_cases.append((missing_origin, request_body, 403, "invalid Origin header"))
+                bad_origin = dict(headers)
+                bad_origin["Origin"] = "http://attacker.invalid"
+                adversarial_cases.append((bad_origin, request_body, 403, "invalid Origin header"))
+                bad_host = dict(headers)
+                bad_host["Host"] = "attacker.invalid"
+                adversarial_cases.append((bad_host, request_body, 403, "invalid Host header"))
+                bad_type = dict(headers)
+                bad_type["Content-Type"] = "text/plain"
+                adversarial_cases.append((bad_type, request_body, 415, "Content-Type must be application/json"))
+                adversarial_cases.append((headers, b"{", 400, "invalid JSON request"))
+                adversarial_cases.append(
+                    (headers, b"x" * (self.gui.MAX_ACTION_BODY_BYTES + 1), 413, "request body is too large")
+                )
+
+                for case_headers, case_body, expected_status, expected_error in adversarial_cases:
+                    with self.subTest(expected_error=expected_error):
+                        status, _, body = http_request(server, "POST", "/api/action", case_body, case_headers)
+                        self.assertEqual(expected_status, status)
+                        self.assertEqual(expected_error, json.loads(body)["error"])
+
+                status, _, body = http_request(server, "OPTIONS", "/api/action", headers={"Host": headers["Host"]})
+                self.assertEqual(405, status)
+                self.assertEqual("method not allowed", json.loads(body)["error"])
+
+        self.assertEqual(1, execute.call_count)
+
+    def test_http_unknown_action_returns_stable_client_error(self) -> None:
+        body = json.dumps({"action": "not-allowlisted", "payload": {}}).encode("utf-8")
+        with running_server(self.gui) as server:
+            status, _, response_body = http_request(server, "POST", "/api/action", body, action_headers(server))
+        self.assertEqual(400, status)
+        self.assertEqual("unknown action: not-allowlisted", json.loads(response_body)["error"])
+
     def test_export_management_report_writes_static_gui(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory) / "management"
+            output_dir.mkdir()
+            preserved = output_dir / "keep-me.txt"
+            preserved.write_text("preserve unknown output\n", encoding="utf-8")
             target = self.gui.export_management_report(output_dir, stale_days=0)
             self.assertEqual(output_dir / "index.html", target)
             index = target.read_text(encoding="utf-8")
             model = json.loads((output_dir / "model.json").read_text(encoding="utf-8"))
+            references = generation_references(index)
+            generation_ids = {Path(reference).parts[1] for reference in references}
+            embedded_match = re.search(
+                r'<script id="management-model" type="application/json">\s*(.*?)\s*</script>',
+                index,
+                flags=re.DOTALL,
+            )
 
             self.assertIn("Management Report", index)
             self.assertIn("MANAGEMENT_STATIC_MODE", index)
             self.assertIn('id="management-model"', index)
-            self.assertIn('src="./assets/app.js"', index)
+            self.assertIn('name="management-capability-token" content=""', index)
+            self.assertNotIn(self.gui.INDEX_TITLE_MARKER, index)
+            self.assertNotIn(self.gui.INDEX_CAPABILITY_MARKER, index)
+            self.assertNotIn(self.gui.INDEX_BOOTSTRAP_MARKER, index)
+            self.assertNotIn(self.gui.INDEX_STYLESHEET_MARKER, index)
+            self.assertNotIn(self.gui.INDEX_SCRIPT_MARKER, index)
+            self.assertIsNotNone(embedded_match)
+            self.assertEqual(model, json.loads(embedded_match.group(1)))
             self.assertEqual("static", model["surface"]["mode"])
             self.assertFalse(model["surface"]["actions_enabled"])
-            self.assertEqual("./diagrams/architecture-real.svg", model["diagrams"]["architecture_real"])
-            self.assertTrue((output_dir / "assets" / "app.css").is_file())
-            self.assertTrue((output_dir / "assets" / "app.js").is_file())
+            self.assertEqual(f"{self.gui.REPO_ROOT.name} (static export)", model["repo_root"])
+            self.assertNotIn(str(self.gui.REPO_ROOT), index)
+            self.assertEqual(1, len(generation_ids))
+            generation_id = generation_ids.pop()
+            generation_dir = output_dir / "generations" / generation_id
+            expected_references = {
+                f"generations/{generation_id}/assets/app.css",
+                f"generations/{generation_id}/assets/app.js",
+                f"generations/{generation_id}/model.json",
+                f"generations/{generation_id}/diagrams/architecture-real.svg",
+                f"generations/{generation_id}/diagrams/architecture-planned.svg",
+                f"generations/{generation_id}/diagrams/module-dependencies.svg",
+            }
+            self.assertEqual(expected_references, references)
+            for reference in references:
+                self.assertTrue((output_dir / reference).is_file(), reference)
+            self.assertEqual(
+                f"./generations/{generation_id}/diagrams/architecture-real.svg",
+                model["diagrams"]["architecture_real"],
+            )
+            self.assertEqual(model, json.loads((generation_dir / "model.json").read_text(encoding="utf-8")))
+            self.assertEqual(SOURCE_CSS.read_bytes(), (generation_dir / "assets" / "app.css").read_bytes())
+            self.assertEqual(SOURCE_APP.read_bytes(), (generation_dir / "assets" / "app.js").read_bytes())
+            self.assertTrue((generation_dir / "diagrams" / "index.html").is_file())
+            self.assertEqual(SOURCE_CSS.read_bytes(), (output_dir / "assets" / "app.css").read_bytes())
+            self.assertEqual(SOURCE_APP.read_bytes(), (output_dir / "assets" / "app.js").read_bytes())
             self.assertTrue((output_dir / "diagrams" / "architecture-real.svg").is_file())
             self.assertTrue((output_dir / "diagrams" / "architecture-planned.svg").is_file())
             self.assertTrue((output_dir / "diagrams" / "module-dependencies.svg").is_file())
+            self.assertTrue((output_dir / "diagrams" / "index.html").is_file())
+            self.assertEqual("preserve unknown output\n", preserved.read_text(encoding="utf-8"))
+            self.assertEqual([], list(Path(directory).glob(".management-report-stage-*")))
+
+    def test_export_keeps_old_entrypoint_when_dependency_publication_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "management"
+            index = output_dir / "index.html"
+            self.gui.export_management_report(output_dir, stale_days=0)
+            old_index = index.read_text(encoding="utf-8")
+            old_references = generation_references(old_index)
+            old_contents = {reference: (output_dir / reference).read_bytes() for reference in old_references}
+            old_generation_ids = {Path(reference).parts[1] for reference in old_references}
+            original_replace = self.gui.os.replace
+            original_payload = self.gui.static_report_payload
+
+            def changed_payload(*args, **kwargs):
+                payload = original_payload(*args, **kwargs)
+                payload["generated_at"] = "2099-01-01T00:00:00Z"
+                return payload
+
+            def fail_on_new_generation(source, destination):
+                destination = Path(destination)
+                if destination.parent == output_dir / "generations" and destination.name not in old_generation_ids:
+                    raise OSError("injected generation publication failure")
+                return original_replace(source, destination)
+
+            with mock.patch.object(self.gui, "static_report_payload", side_effect=changed_payload):
+                with mock.patch.object(self.gui.os, "replace", side_effect=fail_on_new_generation):
+                    with self.assertRaisesRegex(OSError, "injected generation publication failure"):
+                        self.gui.export_management_report(output_dir, stale_days=0)
+
+            self.assertEqual(old_index, index.read_text(encoding="utf-8"))
+            for reference, contents in old_contents.items():
+                self.assertEqual(contents, (output_dir / reference).read_bytes())
+            self.assertEqual([], list(Path(directory).glob(".management-report-stage-*")))
+
+    def test_export_atomically_switches_between_complete_generations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "management"
+            index_path = self.gui.export_management_report(output_dir, stale_days=0)
+            old_index = index_path.read_text(encoding="utf-8")
+            old_references = generation_references(old_index)
+            old_contents = {reference: (output_dir / reference).read_bytes() for reference in old_references}
+            original_replace = self.gui.os.replace
+            original_payload = self.gui.static_report_payload
+            observed_switch = []
+
+            def changed_payload(*args, **kwargs):
+                payload = original_payload(*args, **kwargs)
+                payload["generated_at"] = "2099-01-02T00:00:00Z"
+                return payload
+
+            def observe_index_switch(source, destination):
+                if Path(destination) == index_path:
+                    self.assertEqual(old_index, index_path.read_text(encoding="utf-8"))
+                    for reference, contents in old_contents.items():
+                        self.assertEqual(contents, (output_dir / reference).read_bytes())
+                    new_references = generation_references(Path(source).read_text(encoding="utf-8"))
+                    self.assertTrue(new_references)
+                    self.assertNotEqual(
+                        {Path(reference).parts[1] for reference in old_references},
+                        {Path(reference).parts[1] for reference in new_references},
+                    )
+                    for reference in new_references:
+                        self.assertTrue((output_dir / reference).is_file(), reference)
+                    observed_switch.append(True)
+                return original_replace(source, destination)
+
+            with mock.patch.object(self.gui, "static_report_payload", side_effect=changed_payload):
+                with mock.patch.object(self.gui.os, "replace", side_effect=observe_index_switch):
+                    self.gui.export_management_report(output_dir, stale_days=0)
+
+            self.assertEqual([True], observed_switch)
+            self.assertNotEqual(old_index, index_path.read_text(encoding="utf-8"))
+            for reference, contents in old_contents.items():
+                self.assertEqual(contents, (output_dir / reference).read_bytes())
+            self.assertEqual([], list(Path(directory).glob(".management-report-stage-*")))
+
+    def test_headless_browser_renders_static_report_and_disables_local_actions(self) -> None:
+        browser = headless_browser()
+        if browser is None:
+            self.skipTest("Chrome or Chromium is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index_path = self.gui.export_management_report(root / "management", stale_days=0)
+            return_code, dom, stderr = browser_dom(browser, index_path.as_uri(), root)
+            if return_code != 0 and "Operation not permitted" in stderr:
+                self.skipTest("headless browser process isolation is unavailable in this sandbox")
+
+            self.assertEqual(0, return_code, stderr)
+            self.assertIn("<title>Management Report</title>", dom)
+            self.assertIn(">Static offline report</span>", dom)
+            self.assertIn(f">{self.gui.REPO_ROOT.name} (static export)</p>", dom)
+            self.assertRegex(dom, r'<button id="refresh"[^>]*disabled=""[^>]*class="local-only"')
+            self.assertRegex(dom, r'<button[^>]*data-action="lint"[^>]*disabled=""')
+            self.assertNotRegex(dom, r'id="local-only-explanation"[^>]*\shidden(?:=|\s|>)')
+            self.assertNotIn(self.gui.INDEX_TITLE_MARKER, dom)
+            self.assertNotIn(self.gui.INDEX_CAPABILITY_MARKER, dom)
+            self.assertNotIn(self.gui.INDEX_BOOTSTRAP_MARKER, dom)
+
+    def test_browser_contract_contains_security_and_accessibility_hooks(self) -> None:
+        index = SOURCE_INDEX.read_text(encoding="utf-8")
+        app = SOURCE_APP.read_text(encoding="utf-8")
+        gui_wrapper = (SOURCE_GUI.parent / "gui").read_text(encoding="utf-8")
+        local_index = self.gui.local_index_html("test-capability")
+
+        self.assertEqual(2, index.count(self.gui.INDEX_TITLE_MARKER))
+        self.assertEqual(1, index.count(self.gui.INDEX_CAPABILITY_MARKER))
+        self.assertEqual(1, index.count(self.gui.INDEX_BOOTSTRAP_MARKER))
+        self.assertEqual(1, index.count(self.gui.INDEX_STYLESHEET_MARKER))
+        self.assertEqual(1, index.count(self.gui.INDEX_SCRIPT_MARKER))
+        self.assertIn('href="./assets/app.css"', local_index)
+        self.assertIn('src="./assets/app.js"', local_index)
+        self.assertIn('content="test-capability"', local_index)
+        self.assertIn('id="local-only-explanation"', index)
+        self.assertIn('aria-current="page"', index)
+        self.assertIn('aria-live="polite"', index)
+        self.assertIn('aria-label="Filter requirements"', index)
+        self.assertIn('aria-label="Filter work items"', index)
+        self.assertIn('aria-label="Filter tech debt"', index)
+        self.assertIn('name="override_gate"', index)
+        self.assertIn('data-form-action="block-work"', index)
+        self.assertIn('data-form-action="unblock-work"', index)
+        self.assertIn('id="advance-state-target"', index)
+        self.assertIn('<select name="status">', index)
+        self.assertIn('<option value="Accepted" selected>Accepted</option>', index)
+        self.assertIn('<option value="Superseded">Superseded</option>', index)
+        self.assertIn('<select name="environment">', index)
+        for environment in ("Production", "Staging", "Development", "Local"):
+            self.assertIn(f'<option value="{environment}">{environment}</option>', index)
+        self.assertIn('"X-Management-Capability": capabilityToken', app)
+        self.assertIn('control.setAttribute("aria-describedby", "local-only-explanation")', app)
+        self.assertIn("state.actionInFlight", app)
+        self.assertIn("item.block_history", app)
+        self.assertIn("item.gate_overrides", app)
+        self.assertIn("item.history_exceptions", app)
+        self.assertIn("`Superseded by ${item.id}`", app)
+        self.assertIn("PYTHONDONTWRITEBYTECODE", gui_wrapper)
+        self.assertTrue(self.gui.sys.dont_write_bytecode)
+
+    def test_frontend_javascript_syntax(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        result = subprocess.run(
+            [node, "--check", str(SOURCE_APP)],
+            cwd=SOURCE_GUI.parents[2],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
 
 
 if __name__ == "__main__":

@@ -4,14 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import html
 import importlib.machinery
 import importlib.util
+import ipaddress
 import json
 import mimetypes
+import os
+import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,13 +25,62 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
+sys.dont_write_bytecode = True
+
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 MANAGEMENT_TOOL = SCRIPT_DIR / "management_tool"
 STATIC_DIR = SCRIPT_DIR / "gui_static"
-DIAGRAM_DIR = Path(tempfile.gettempdir()) / "bot-starter-kit-management-gui" / "diagrams"
+CHECKOUT_KEY = hashlib.sha256(str(REPO_ROOT).encode("utf-8")).hexdigest()[:12]
+RUNTIME_TEMP_DIR = tempfile.TemporaryDirectory(prefix=f"bot-starter-kit-management-gui-{CHECKOUT_KEY}-")
+DIAGRAM_DIR = Path(RUNTIME_TEMP_DIR.name) / "diagrams"
 DEFAULT_STALE_DAYS = 14
 COMMAND_TIMEOUT_SECONDS = 180
+MAX_ACTION_BODY_BYTES = 64 * 1024
+CAPABILITY_HEADER = "X-Management-Capability"
+INDEX_TITLE_MARKER = "{{MANAGEMENT_TITLE}}"
+INDEX_CAPABILITY_MARKER = "{{MANAGEMENT_CAPABILITY_TOKEN}}"
+INDEX_BOOTSTRAP_MARKER = "<!-- MANAGEMENT_BOOTSTRAP -->"
+INDEX_STYLESHEET_MARKER = "{{MANAGEMENT_STYLESHEET_URL}}"
+INDEX_SCRIPT_MARKER = "{{MANAGEMENT_SCRIPT_URL}}"
+STATIC_GENERATIONS_DIR = "generations"
+DIAGRAM_FILENAMES = (
+    "architecture-real.svg",
+    "architecture-planned.svg",
+    "module-dependencies.svg",
+    "index.html",
+)
+DIAGRAM_ACTIONS = {
+    "diagram-architecture-real",
+    "diagram-architecture-planned",
+    "diagram-module-dependencies",
+}
+ALWAYS_MUTATING_ACTIONS = {
+    "link-evidence",
+    "record-decision",
+    "record-risk",
+    "close-risk",
+    "record-incident",
+    "close-incident",
+    "record-experiment",
+    "close-experiment",
+}
+MUTATION_LOCK = threading.Lock()
+DIAGRAM_LOCK = threading.RLock()
+DIAGRAM_CACHE_READY = False
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; "
+        "frame-ancestors 'none'; object-src 'none'"
+    ),
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), geolocation=(), microphone=()",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+}
 
 
 def load_management_tool():
@@ -130,6 +185,9 @@ def work_attention(item, model, audit_by_requirement: dict[str, list[object]], l
         signals.append({"severity": "INFO", "message": "Evaluate the plan before moving this item to Started", "edit_hint": f"{path_text(item.path)}:{item.line}"})
     if item.state in {"Started", "In Code Review", "Integrated", "QA"} and not item.owner:
         signals.append({"severity": "BLOCKER", "message": "Active work item has no owner", "edit_hint": f"{path_text(item.path)}:{item.line}"})
+    if item.blocked:
+        reason = item.block_events[-1].reason if item.block_events else "No reason recorded"
+        signals.append({"severity": "BLOCKER", "message": f"Work item is blocked: {reason}", "edit_hint": f"{path_text(item.path)}:{item.line}"})
     return signals
 
 
@@ -209,6 +267,29 @@ def work_item_payload(item, model, audit_by_requirement: dict[str, list[object]]
         "body": item.body,
         "owner": item.owner,
         "timeline": item.timeline,
+        "blocked": item.blocked,
+        "block_history": [
+            {"action": event.action, "entered_at": event.entered_at, "reason": event.reason, "line": event.line}
+            for event in item.block_events
+        ],
+        "gate_overrides": [
+            {
+                "target_state": event.target_state,
+                "entered_at": event.entered_at,
+                "reason": event.reason,
+                "line": event.line,
+            }
+            for event in item.gate_overrides
+        ],
+        "history_exceptions": [
+            {
+                "entered_at": event.entered_at,
+                "missing_states": list(event.missing_states),
+                "reason": event.reason,
+                "line": event.line,
+            }
+            for event in item.history_exceptions
+        ],
         "attention": work_attention(item, model, audit_by_requirement, links),
         "edit_hint": f"{path_text(item.path)}:{item.line}",
     }
@@ -247,8 +328,8 @@ def stale_payload(item) -> dict[str, object]:
     }
 
 
-def model_payload(stale_days: int = DEFAULT_STALE_DAYS) -> dict[str, object]:
-    model = tool.load_model()
+def model_payload(stale_days: int = DEFAULT_STALE_DAYS, loaded_model=None) -> dict[str, object]:
+    model = loaded_model or tool.load_model()
     links = tool.traceability_links()
     traceability_path = tool.MANAGEMENT_DIR / "TRACEABILITY.md"
     traceability_text = traceability_path.read_text(encoding="utf-8") if traceability_path.exists() else ""
@@ -326,8 +407,8 @@ def model_payload(stale_days: int = DEFAULT_STALE_DAYS) -> dict[str, object]:
     }
 
 
-def ensure_diagrams(output_dir: Path = DIAGRAM_DIR) -> None:
-    model = tool.load_model()
+def generate_diagrams(output_dir: Path, loaded_model=None) -> None:
+    model = loaded_model or tool.load_model()
     real_nodes, real_edges = tool.real_architecture_graph()
     planned_nodes, planned_edges = tool.planned_architecture_graph(model)
     module_nodes, module_edges = tool.module_dependency_graph()
@@ -366,35 +447,112 @@ def ensure_diagrams(output_dir: Path = DIAGRAM_DIR) -> None:
     )
 
 
+def publish_staged_files(staging_dir: Path, output_dir: Path, entrypoint_last: str | None = None) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sources = sorted(source for source in staging_dir.rglob("*") if source.is_file())
+    if entrypoint_last:
+        entrypoint = staging_dir / entrypoint_last
+        if entrypoint not in sources:
+            raise RuntimeError(f"staged entrypoint is missing: {entrypoint_last}")
+        sources.remove(entrypoint)
+        sources.append(entrypoint)
+    for source in sources:
+        destination = output_dir / source.relative_to(staging_dir)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, destination)
+
+
+def invalidate_diagram_cache() -> None:
+    global DIAGRAM_CACHE_READY
+    with DIAGRAM_LOCK:
+        DIAGRAM_CACHE_READY = False
+
+
+def ensure_diagrams(force: bool = False) -> None:
+    global DIAGRAM_CACHE_READY
+    with DIAGRAM_LOCK:
+        if not force and DIAGRAM_CACHE_READY and all((DIAGRAM_DIR / name).is_file() for name in DIAGRAM_FILENAMES):
+            return
+        DIAGRAM_DIR.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="diagram-stage-", dir=DIAGRAM_DIR.parent) as directory:
+            staging_dir = Path(directory)
+            with tool.management_write_lock():
+                generate_diagrams(staging_dir)
+            publish_staged_files(staging_dir, DIAGRAM_DIR)
+        DIAGRAM_CACHE_READY = True
+
+
 def static_script_json(payload: object) -> str:
     return json.dumps(payload, indent=2, sort_keys=True).replace("</", "<\\/")
 
 
-def static_index_html(payload: dict[str, object]) -> str:
+def render_index_html(
+    title: str,
+    capability_token: str,
+    bootstrap: str,
+    stylesheet_url: str = "./assets/app.css",
+    script_url: str = "./assets/app.js",
+) -> str:
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    index = index.replace("<title>Management Console</title>", "<title>Management Report</title>")
-    index = index.replace("<h1 id=\"app-title\">Management Console</h1>", "<h1 id=\"app-title\">Management Report</h1>")
-    index = index.replace('href="/assets/app.css"', 'href="./assets/app.css"')
-    index = index.replace('src="/assets/app.js"', 'src="./assets/app.js"')
+    expected_markers = {
+        INDEX_TITLE_MARKER: 2,
+        INDEX_CAPABILITY_MARKER: 1,
+        INDEX_BOOTSTRAP_MARKER: 1,
+        INDEX_STYLESHEET_MARKER: 1,
+        INDEX_SCRIPT_MARKER: 1,
+    }
+    for marker, expected_count in expected_markers.items():
+        actual_count = index.count(marker)
+        if actual_count != expected_count:
+            raise RuntimeError(f"expected {expected_count} {marker} marker(s), found {actual_count}")
+    index = index.replace(INDEX_TITLE_MARKER, html.escape(title))
+    index = index.replace(INDEX_CAPABILITY_MARKER, html.escape(capability_token, quote=True))
+    index = index.replace(INDEX_STYLESHEET_MARKER, html.escape(stylesheet_url, quote=True))
+    index = index.replace(INDEX_SCRIPT_MARKER, html.escape(script_url, quote=True))
+    return index.replace(INDEX_BOOTSTRAP_MARKER, bootstrap)
+
+
+def local_index_html(capability_token: str) -> str:
+    return render_index_html("Management Console", capability_token, "")
+
+
+def static_index_html(payload: dict[str, object], generation_url: str) -> str:
+    model_url = f"{generation_url}/model.json"
     static_bootstrap = f"""  <script>
     window.MANAGEMENT_STATIC_MODE = true;
-    window.MANAGEMENT_STATIC_MODEL_URL = "./model.json";
+    window.MANAGEMENT_STATIC_MODEL_URL = {json.dumps(model_url)};
     window.MANAGEMENT_TITLE = "Management Report";
   </script>
   <script id="management-model" type="application/json">
 {static_script_json(payload)}
   </script>
 """
-    return index.replace('  <script src="./assets/app.js"></script>', f"{static_bootstrap}  <script src=\"./assets/app.js\"></script>")
+    return render_index_html(
+        "Management Report",
+        "",
+        static_bootstrap,
+        stylesheet_url=f"{generation_url}/assets/app.css",
+        script_url=f"{generation_url}/assets/app.js",
+    )
 
 
-def static_report_payload(stale_days: int) -> dict[str, object]:
-    payload = model_payload(stale_days)
-    payload["diagrams"] = {
-        "architecture_real": "./diagrams/architecture-real.svg",
-        "architecture_planned": "./diagrams/architecture-planned.svg",
-        "module_dependencies": "./diagrams/module-dependencies.svg",
+def static_diagram_payload(diagram_base_url: str) -> dict[str, str]:
+    base_url = diagram_base_url.rstrip("/")
+    return {
+        "architecture_real": f"{base_url}/architecture-real.svg",
+        "architecture_planned": f"{base_url}/architecture-planned.svg",
+        "module_dependencies": f"{base_url}/module-dependencies.svg",
     }
+
+
+def static_report_payload(
+    stale_days: int,
+    loaded_model=None,
+    diagram_base_url: str = "./diagrams",
+) -> dict[str, object]:
+    payload = model_payload(stale_days, loaded_model)
+    payload["repo_root"] = f"{REPO_ROOT.name} (static export)"
+    payload["diagrams"] = static_diagram_payload(diagram_base_url)
     payload["surface"] = {
         "mode": "static",
         "actions_enabled": False,
@@ -402,19 +560,66 @@ def static_report_payload(stale_days: int) -> dict[str, object]:
     return payload
 
 
+def snapshot_id_for(staging_dir: Path) -> str:
+    digest = hashlib.sha256()
+    for source in sorted(source for source in staging_dir.rglob("*") if source.is_file()):
+        relative = source.relative_to(staging_dir).as_posix().encode("utf-8")
+        contents = source.read_bytes()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(contents).to_bytes(8, "big"))
+        digest.update(contents)
+    return f"sha256-{digest.hexdigest()}"
+
+
+def directory_contents(root: Path) -> dict[str, bytes]:
+    return {
+        source.relative_to(root).as_posix(): source.read_bytes()
+        for source in sorted(source for source in root.rglob("*") if source.is_file())
+    }
+
+
+def publish_immutable_generation(staging_dir: Path, output_dir: Path, generation_id: str) -> Path:
+    generations_dir = output_dir / STATIC_GENERATIONS_DIR
+    generations_dir.mkdir(parents=True, exist_ok=True)
+    destination = generations_dir / generation_id
+    if destination.exists():
+        if not destination.is_dir() or directory_contents(destination) != directory_contents(staging_dir):
+            raise RuntimeError(f"static report generation collision: {generation_id}")
+        return destination
+    os.replace(staging_dir, destination)
+    return destination
+
+
 def export_management_report(output_dir: Path, stale_days: int = DEFAULT_STALE_DAYS) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    assets_dir = output_dir / "assets"
-    diagrams_dir = output_dir / "diagrams"
-    assets_dir.mkdir(parents=True, exist_ok=True)
-    ensure_diagrams(diagrams_dir)
-    payload = static_report_payload(stale_days)
-    shutil.copy2(STATIC_DIR / "app.css", assets_dir / "app.css")
-    shutil.copy2(STATIC_DIR / "app.js", assets_dir / "app.js")
-    (output_dir / "model.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    target = output_dir / "index.html"
-    target.write_text(static_index_html(payload), encoding="utf-8")
-    return target
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tool.management_write_lock():
+        loaded_model = tool.load_model()
+        payload = static_report_payload(stale_days, loaded_model)
+        with tempfile.TemporaryDirectory(prefix=".management-report-stage-", dir=output_dir.parent) as directory:
+            staging_dir = Path(directory) / "report"
+            generation_dir = staging_dir / "generation"
+            compatibility_dir = staging_dir / "compatibility"
+            assets_dir = generation_dir / "assets"
+            diagrams_dir = generation_dir / "diagrams"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            generate_diagrams(diagrams_dir, loaded_model)
+            shutil.copy2(STATIC_DIR / "app.css", assets_dir / "app.css")
+            shutil.copy2(STATIC_DIR / "app.js", assets_dir / "app.js")
+            (generation_dir / "model.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            # Hash the logical snapshot before deriving its self-referential generation URLs.
+            generation_id = snapshot_id_for(generation_dir)
+            generation_url = f"./{STATIC_GENERATIONS_DIR}/{generation_id}"
+            payload["diagrams"] = static_diagram_payload(f"{generation_url}/diagrams")
+            (generation_dir / "model.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            (staging_dir / "index.html").write_text(static_index_html(payload, generation_url), encoding="utf-8")
+
+            shutil.copytree(generation_dir, compatibility_dir)
+            publish_immutable_generation(generation_dir, output_dir, generation_id)
+            os.replace(staging_dir / "index.html", output_dir / "index.html")
+            publish_staged_files(compatibility_dir, output_dir)
+    return output_dir / "index.html"
 
 
 def required(payload: dict[str, object], name: str) -> str:
@@ -488,6 +693,12 @@ def build_management_command(action: str, payload: dict[str, object]) -> list[st
         add_option(args, "--to", optional(payload, "to"))
         add_option(args, "--date", optional(payload, "date"))
         add_option(args, "--engineer", optional(payload, "engineer"))
+        add_option(args, "--override-gate", optional(payload, "override_gate"))
+        if flag(payload, "dry_run"):
+            args.append("--dry-run")
+    elif action in {"block-work", "unblock-work"}:
+        args = [action, required(payload, "ref"), "--reason", required(payload, "reason")]
+        add_option(args, "--date", optional(payload, "date"))
         if flag(payload, "dry_run"):
             args.append("--dry-run")
     elif action == "start-work":
@@ -677,12 +888,33 @@ def run_management_command(args: list[str]) -> dict[str, object]:
     }
 
 
-def execute_action(request: dict[str, object]) -> dict[str, object]:
+def action_mutates_repository(action: str, payload: dict[str, object]) -> bool:
+    if action in ALWAYS_MUTATING_ACTIONS:
+        return True
+    if action == "draft-plan":
+        return flag(payload, "write")
+    if action in {"advance-state", "start-work", "block-work", "unblock-work"}:
+        return not flag(payload, "dry_run")
+    if action == "create-release-tag":
+        return flag(payload, "execute")
+    return False
+
+
+def execute_action(request: dict[str, object], mutation_lock=None) -> dict[str, object]:
+    global DIAGRAM_CACHE_READY
     action = str(request.get("action", "")).strip()
     payload = request.get("payload", {})
     if not isinstance(payload, dict):
         raise ClientError("payload must be an object")
     args = build_management_command(action, payload)
+    if action in DIAGRAM_ACTIONS:
+        with DIAGRAM_LOCK:
+            result = run_management_command(args)
+            DIAGRAM_CACHE_READY = False
+            return result
+    if action_mutates_repository(action, payload):
+        with mutation_lock or MUTATION_LOCK:
+            return run_management_command(args)
     return run_management_command(args)
 
 
@@ -690,8 +922,89 @@ def json_bytes(payload: object) -> bytes:
     return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
 
 
+def normalize_host_name(value: str) -> str:
+    normalized = value.strip().lower().rstrip(".")
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    try:
+        return ipaddress.ip_address(normalized).compressed
+    except ValueError:
+        return normalized
+
+
+def is_loopback_host(host: str) -> bool:
+    normalized = normalize_host_name(host)
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def parse_http_authority(value: str | None, default_port: int) -> tuple[str, int] | None:
+    if not value or any(character.isspace() or ord(character) < 32 for character in value):
+        return None
+    parsed = urlparse(f"//{value}")
+    if parsed.username is not None or parsed.password is not None or parsed.path or parsed.params or parsed.query or parsed.fragment:
+        return None
+    try:
+        port = parsed.port or default_port
+    except ValueError:
+        return None
+    if parsed.hostname is None:
+        return None
+    return normalize_host_name(parsed.hostname), port
+
+
+def request_host_is_valid(host_header: str | None, allowed_hosts: set[str] | frozenset[str], server_port: int) -> bool:
+    authority = parse_http_authority(host_header, 80)
+    return authority is not None and authority[0] in allowed_hosts and authority[1] == server_port
+
+
+def request_origin_is_valid(
+    origin_header: str | None,
+    host_header: str | None,
+    allowed_hosts: set[str] | frozenset[str],
+    server_port: int,
+) -> bool:
+    if not origin_header:
+        return False
+    parsed = urlparse(origin_header)
+    if (
+        parsed.scheme != "http"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    origin = parse_http_authority(parsed.netloc, 80)
+    request_host = parse_http_authority(host_header, 80)
+    return (
+        origin is not None
+        and request_host is not None
+        and origin == request_host
+        and origin[0] in allowed_hosts
+        and origin[1] == server_port
+    )
+
+
+def allowed_host_names(bind_host: str, additional_hosts: list[str] | None = None) -> set[str]:
+    hosts = {normalize_host_name(bind_host)}
+    hosts.update(normalize_host_name(host) for host in additional_hosts or [])
+    if is_loopback_host(bind_host):
+        hosts.update({"127.0.0.1", "::1", "localhost"})
+    return hosts
+
+
 class ManagementGuiHandler(BaseHTTPRequestHandler):
     server_version = "ManagementGui/1.0"
+
+    def version_string(self) -> str:
+        return self.server_version
 
     def log_message(self, format: str, *args) -> None:
         if not getattr(self.server, "quiet", False):
@@ -702,6 +1015,8 @@ class ManagementGuiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in SECURITY_HEADERS.items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -718,10 +1033,21 @@ class ManagementGuiHandler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         self.send_bytes(200, path.read_bytes(), content_type)
 
+    def valid_request_host(self) -> bool:
+        return request_host_is_valid(
+            self.headers.get("Host"),
+            getattr(self.server, "allowed_hosts", frozenset()),
+            self.server.server_port,
+        )
+
     def do_GET(self) -> None:
+        if not self.valid_request_host():
+            self.send_error_json(403, "invalid Host header")
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self.serve_static(STATIC_DIR / "index.html")
+            body = local_index_html(getattr(self.server, "capability_token", "")).encode("utf-8")
+            self.send_bytes(200, body, "text/html; charset=utf-8")
             return
         if parsed.path.startswith("/assets/"):
             requested = (STATIC_DIR / parsed.path.removeprefix("/assets/")).resolve()
@@ -731,21 +1057,34 @@ class ManagementGuiHandler(BaseHTTPRequestHandler):
             self.serve_static(requested)
             return
         if parsed.path == "/api/model":
-            query = parse_qs(parsed.query)
-            stale_days = int(query.get("stale_days", [str(DEFAULT_STALE_DAYS)])[0])
-            self.send_json(200, model_payload(stale_days))
+            try:
+                query = parse_qs(parsed.query)
+                stale_days = int(query.get("stale_days", [str(DEFAULT_STALE_DAYS)])[0])
+                with tool.management_write_lock():
+                    payload = model_payload(stale_days)
+            except ValueError:
+                self.send_error_json(400, "stale_days must be an integer")
+                return
+            except Exception as err:  # noqa: BLE001
+                self.log_error("model generation failed: %s", err)
+                self.send_error_json(500, "management model generation failed")
+                return
+            invalidate_diagram_cache()
+            self.send_json(200, payload)
             return
         if parsed.path.startswith("/diagrams/"):
-            try:
-                ensure_diagrams()
-            except Exception as err:  # noqa: BLE001
-                self.send_error_json(500, str(err))
-                return
             requested = (DIAGRAM_DIR / parsed.path.removeprefix("/diagrams/")).resolve()
             if DIAGRAM_DIR.resolve() not in requested.parents:
                 self.send_error_json(403, "forbidden")
                 return
-            self.serve_static(requested)
+            try:
+                with DIAGRAM_LOCK:
+                    ensure_diagrams()
+                    self.serve_static(requested)
+            except Exception as err:  # noqa: BLE001
+                self.log_error("diagram generation failed: %s", err)
+                self.send_error_json(500, "diagram generation failed")
+                return
             return
         self.send_error_json(404, "not found")
 
@@ -755,25 +1094,87 @@ class ManagementGuiHandler(BaseHTTPRequestHandler):
             self.send_error_json(404, "not found")
             return
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            request = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            host_header = self.headers.get("Host")
+            allowed_hosts = getattr(self.server, "allowed_hosts", frozenset())
+            if not request_host_is_valid(host_header, allowed_hosts, self.server.server_port):
+                self.send_error_json(403, "invalid Host header")
+                return
+            if not request_origin_is_valid(self.headers.get("Origin"), host_header, allowed_hosts, self.server.server_port):
+                self.send_error_json(403, "invalid Origin header")
+                return
+            if self.headers.get_content_type() != "application/json":
+                self.send_error_json(415, "Content-Type must be application/json")
+                return
+            expected_token = getattr(self.server, "capability_token", "")
+            provided_token = self.headers.get(CAPABILITY_HEADER, "")
+            if not expected_token or not secrets.compare_digest(provided_token, expected_token):
+                self.send_error_json(403, "invalid capability token")
+                return
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                self.send_error_json(411, "Content-Length is required")
+                return
+            try:
+                length = int(raw_length)
+            except ValueError:
+                self.send_error_json(400, "invalid Content-Length")
+                return
+            if length < 0:
+                self.send_error_json(400, "invalid Content-Length")
+                return
+            if length > MAX_ACTION_BODY_BYTES:
+                self.send_error_json(413, "request body is too large")
+                return
+            body = self.rfile.read(length)
+            if len(body) != length:
+                self.send_error_json(400, "incomplete request body")
+                return
+            try:
+                request = json.loads(body.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.send_error_json(400, "invalid JSON request")
+                return
             if not isinstance(request, dict):
                 raise ClientError("request must be an object")
-            self.send_json(200, execute_action(request))
+            mutation_lock = getattr(self.server, "mutation_lock", MUTATION_LOCK)
+            self.send_json(200, execute_action(request, mutation_lock))
         except ClientError as err:
             self.send_error_json(400, str(err))
         except subprocess.TimeoutExpired:
             self.send_error_json(504, "management command timed out")
         except Exception as err:  # noqa: BLE001
-            self.send_error_json(500, str(err))
+            self.log_error("action failed: %s", err)
+            self.send_error_json(500, "management action failed")
+
+    def do_OPTIONS(self) -> None:
+        self.send_error_json(405, "method not allowed")
 
 
-def bind_server(host: str, port: int, attempts: int, quiet: bool) -> ThreadingHTTPServer:
+def validate_bind_host(host: str, unsafe_allow_non_loopback: bool) -> None:
+    if not is_loopback_host(host) and not unsafe_allow_non_loopback:
+        raise ClientError("non-loopback --host requires --unsafe-allow-non-loopback")
+
+
+def bind_server(
+    host: str,
+    port: int,
+    attempts: int,
+    quiet: bool,
+    additional_hosts: list[str] | None = None,
+    capability_token: str | None = None,
+) -> ThreadingHTTPServer:
+    token = capability_token or secrets.token_urlsafe(32)
     for offset in range(max(attempts, 1)):
         candidate = port + offset if port else 0
         try:
             server = ThreadingHTTPServer((host, candidate), ManagementGuiHandler)
             server.quiet = quiet  # type: ignore[attr-defined]
+            server.daemon_threads = True
+            server.capability_token = token  # type: ignore[attr-defined]
+            server.mutation_lock = threading.Lock()  # type: ignore[attr-defined]
+            hosts = allowed_host_names(host, additional_hosts)
+            hosts.add(normalize_host_name(str(server.server_address[0])))
+            server.allowed_hosts = frozenset(hosts)  # type: ignore[attr-defined]
             return server
         except OSError:
             if port == 0 or offset + 1 >= attempts:
@@ -784,6 +1185,17 @@ def bind_server(host: str, port: int, attempts: int, quiet: bool) -> ThreadingHT
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the local management GUI or export the static Management Report.")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1.")
+    parser.add_argument(
+        "--unsafe-allow-non-loopback",
+        action="store_true",
+        help="Allow binding the action-capable GUI to a non-loopback host.",
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        help="Allow an additional HTTP Host name. Repeat for multiple names.",
+    )
     parser.add_argument("--port", type=int, default=8765, help="Bind port. Default: 8765.")
     parser.add_argument("--port-attempts", type=int, default=20, help="Try this many consecutive ports before failing.")
     parser.add_argument("--no-browser", action="store_true", help="Do not ask the OS to open a browser.")
@@ -795,7 +1207,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
     if args.check:
         payload = model_payload(args.stale_days)
         print(json.dumps({"requirements": payload["counts"]["requirements"], "work_items": payload["counts"]["work_items"]}, sort_keys=True))
@@ -805,7 +1218,11 @@ def main() -> int:
         print(f"Management Report: {target}")
         return 0
 
-    server = bind_server(args.host, args.port, args.port_attempts, args.quiet)
+    try:
+        validate_bind_host(args.host, args.unsafe_allow_non_loopback)
+    except ClientError as err:
+        parser.error(str(err))
+    server = bind_server(args.host, args.port, args.port_attempts, args.quiet, args.allowed_host)
     host, port = server.server_address
     url = f"http://{host}:{port}/"
     print(f"Management GUI: {url}", flush=True)

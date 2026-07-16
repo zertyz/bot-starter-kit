@@ -3,16 +3,24 @@
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
+import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
 SOURCE_TOOL = Path(__file__).resolve().parent / "management_tool"
 SUPPORTING_FILES = [
+    "MANAGEMENT.md",
+    "README.ai.md",
     "DECISIONS.md",
     "DEFINITION_OF_READY_DONE.md",
     "RELEASES.md",
@@ -150,6 +158,25 @@ class ManagementToolTest(unittest.TestCase):
     def tool_run(self, *args: str, expected: int = 0) -> subprocess.CompletedProcess[str]:
         return run(self.root, [str(self.tool), *args], expected=expected)
 
+    def load_tool_module(self):
+        loader = importlib.machinery.SourceFileLoader(f"isolated_management_tool_{id(self)}", str(self.tool))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[loader.name] = module
+        loader.exec_module(module)
+        return module
+
+    def write_traceability(self, *rows: str) -> None:
+        (self.management / "TRACEABILITY.md").write_text(
+            "# Traceability\n\n| Requirement | Work Item | State | Evidence |\n| --- | --- | --- | --- |\n"
+            + "\n".join(rows)
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def switch_branch(self, branch: str) -> None:
+        run(self.root, ["git", "switch", "-c", branch])
+
     def test_lint_and_show_work(self) -> None:
         lint = self.tool_run("lint")
         self.assertIn("Requirements: 5", lint.stdout)
@@ -204,6 +231,53 @@ class ManagementToolTest(unittest.TestCase):
     def test_draft_plan_rejects_invalid_sequence(self) -> None:
         draft = self.tool_run("draft-plan", "E.MCP.02.b", "--sequence", "1", expected=1)
         self.assertIn("invalid work sequence 1; expected three digits", draft.stderr)
+
+    def test_backlog_writers_reject_structural_injection_without_changes(self) -> None:
+        backlog = self.management / "ENGINEERING.backlog.md"
+        original = backlog.read_bytes()
+        title = self.tool_run(
+            "draft-plan",
+            "E.MCP.02.b",
+            "--title",
+            "Unsafe\n## EN.MCP.02.b-999 -- Injected",
+            "--write",
+            expected=1,
+        )
+        self.assertIn("--title must be a single line", title.stderr)
+        self.assertEqual(backlog.read_bytes(), original)
+        body_heading = self.tool_run(
+            "draft-plan",
+            "E.MCP.02.b",
+            "--body-line",
+            "## EN.MCP.02.b-999 -- Injected",
+            "--write",
+            expected=1,
+        )
+        self.assertIn("--body-line cannot contain backlog structural syntax", body_heading.stderr)
+        self.assertEqual(backlog.read_bytes(), original)
+        body_timeline = self.tool_run(
+            "draft-plan",
+            "E.MCP.02.b",
+            "--body-line",
+            "==> Merged: 2026-07-08;",
+            "--write",
+            expected=1,
+        )
+        self.assertIn("--body-line cannot contain backlog structural syntax", body_timeline.stderr)
+        self.assertEqual(backlog.read_bytes(), original)
+        engineer = self.tool_run(
+            "advance-state",
+            "ER.MCP.02.a-001",
+            "--to",
+            "Started",
+            "--date",
+            "2026-07-06",
+            "--engineer",
+            "Unsafe\n## EN.MCP.02.a-999 -- Injected",
+            expected=1,
+        )
+        self.assertIn("--engineer must be a single line", engineer.stderr)
+        self.assertEqual(backlog.read_bytes(), original)
 
     def test_audit_requirements_reports_findings(self) -> None:
         audit = self.tool_run("audit-requirements", "--document", "E", "--limit", "0")
@@ -382,6 +456,211 @@ class ManagementToolTest(unittest.TestCase):
         close_experiment = self.tool_run("close-experiment", "EXP-0001", "--status", "Rejected", "--result", "Complexity was not worth it.")
         self.assertIn("Closed experiment EXP-0001 as Rejected", close_experiment.stdout)
 
+    def test_ledger_writers_reject_structural_injection_without_changes(self) -> None:
+        decisions = self.management / "DECISIONS.md"
+        original = decisions.read_bytes()
+        common = [
+            "--context",
+            "Context.",
+            "--decision",
+            "Decision.",
+            "--consequence",
+            "Consequence.",
+        ]
+        title_injection = self.tool_run(
+            "record-decision",
+            "Unsafe\n## DEC-9999 -- Injected",
+            *common,
+            expected=1,
+        )
+        self.assertIn("title must be a single line", title_injection.stderr)
+        self.assertEqual(decisions.read_bytes(), original)
+
+        heading_injection = self.tool_run(
+            "record-decision",
+            "Unsafe context",
+            "--context",
+            "Context.\n## Closed Decisions",
+            "--decision",
+            "Decision.",
+            "--consequence",
+            "Consequence.",
+            expected=1,
+        )
+        self.assertIn("cannot contain a Markdown heading", heading_injection.stderr)
+        self.assertEqual(decisions.read_bytes(), original)
+
+        label_injection = self.tool_run(
+            "record-decision",
+            "Unsafe label",
+            "--context",
+            "Context.\nStatus: Superseded",
+            "--decision",
+            "Decision.",
+            "--consequence",
+            "Consequence.",
+            expected=1,
+        )
+        self.assertIn("reserved ledger label `Status:`", label_injection.stderr)
+        self.assertEqual(decisions.read_bytes(), original)
+
+        related_injection = self.tool_run(
+            "record-decision",
+            "Unsafe related",
+            *common,
+            "--related",
+            "E.MCP.01`\n## DEC-9999 -- Injected",
+            expected=1,
+        )
+        self.assertIn("--related must be a single line", related_injection.stderr)
+        self.assertEqual(decisions.read_bytes(), original)
+        related_backtick = self.tool_run(
+            "record-decision",
+            "Unsafe related delimiter",
+            *common,
+            "--related",
+            "E.MCP.01`injected",
+            expected=1,
+        )
+        self.assertIn("--related cannot contain a backtick", related_backtick.stderr)
+        self.assertEqual(decisions.read_bytes(), original)
+
+        safe = self.tool_run(
+            "record-decision",
+            "Safe multiline prose",
+            "--context",
+            "First paragraph.\nSecond paragraph.\n1. An ordinary list item.",
+            "--decision",
+            "Keep multiline prose.",
+            "--consequence",
+            "Lists remain readable.",
+        )
+        self.assertIn("Recorded decision", safe.stdout)
+
+    def test_close_writer_rejects_headings_and_labels_without_changes(self) -> None:
+        self.tool_run(
+            "record-risk",
+            "Risk to close",
+            "--owner",
+            "Manager",
+            "--risk",
+            "A risk exists.",
+            "--impact",
+            "It matters.",
+            "--mitigation",
+            "Mitigate it.",
+        )
+        risks = self.management / "RISKS.md"
+        original = risks.read_bytes()
+        heading = self.tool_run(
+            "close-risk",
+            "RISK-0001",
+            "--evidence",
+            "Evidence.\n## Closed Risks",
+            expected=1,
+        )
+        self.assertIn("cannot contain a Markdown heading", heading.stderr)
+        self.assertEqual(risks.read_bytes(), original)
+        label = self.tool_run(
+            "close-risk",
+            "RISK-0001",
+            "--evidence",
+            "Evidence.\nStatus: Closed",
+            expected=1,
+        )
+        self.assertIn("reserved ledger label `Status:`", label.stderr)
+        self.assertEqual(risks.read_bytes(), original)
+
+    def test_ledger_schema_is_enforced_before_writes(self) -> None:
+        decisions = self.management / "DECISIONS.md"
+        decision_bytes = decisions.read_bytes()
+        invalid_status = self.tool_run(
+            "record-decision",
+            "Invalid status",
+            "--context",
+            "Context.",
+            "--decision",
+            "Decision.",
+            "--consequence",
+            "Consequence.",
+            "--status",
+            "Pending",
+            expected=2,
+        )
+        self.assertIn("invalid choice", invalid_status.stderr)
+        self.assertEqual(decisions.read_bytes(), decision_bytes)
+
+        incidents = self.management / "INCIDENTS.md"
+        incident_bytes = incidents.read_bytes()
+        invalid_environment = self.tool_run(
+            "record-incident",
+            "Invalid environment",
+            "--environment",
+            "QA",
+            "--impact",
+            "Impact.",
+            "--timeline",
+            "Timeline.",
+            "--mitigation",
+            "Mitigation.",
+            expected=2,
+        )
+        self.assertIn("invalid choice", invalid_environment.stderr)
+        self.assertEqual(incidents.read_bytes(), incident_bytes)
+
+        risks = self.management / "RISKS.md"
+        risk_bytes = risks.read_bytes()
+        invalid_review_date = self.tool_run(
+            "record-risk",
+            "Invalid review date",
+            "--owner",
+            "Manager",
+            "--risk",
+            "Risk.",
+            "--impact",
+            "Impact.",
+            "--mitigation",
+            "Mitigation.",
+            "--review-date",
+            "next week",
+            expected=1,
+        )
+        self.assertIn("invalid date", invalid_review_date.stderr)
+        self.assertEqual(risks.read_bytes(), risk_bytes)
+
+        experiments = self.management / "EXPERIMENTS.md"
+        experiment_bytes = experiments.read_bytes()
+        experiment_args = [
+            "--hypothesis",
+            "Hypothesis.",
+            "--expires",
+            "2026-08-01",
+            "--success",
+            "Success.",
+            "--failure",
+            "Failure.",
+        ]
+        invalid_branch = self.tool_run(
+            "record-experiment",
+            "Invalid branch",
+            "--branch",
+            "not a branch",
+            *experiment_args,
+            expected=1,
+        )
+        self.assertIn("invalid branch or work item reference", invalid_branch.stderr)
+        self.assertEqual(experiments.read_bytes(), experiment_bytes)
+        wrong_motivation = self.tool_run(
+            "record-experiment",
+            "Wrong motivation",
+            "--branch",
+            "Luiz/EN.MCP.01-001",
+            *experiment_args,
+            expected=1,
+        )
+        self.assertIn("X-motivation", wrong_motivation.stderr)
+        self.assertEqual(experiments.read_bytes(), experiment_bytes)
+
     def test_stale_meeting_and_acceptance_packets(self) -> None:
         stale = self.tool_run("stale-work", "--days", "0")
         self.assertIn("Stale Work", stale.stdout)
@@ -408,6 +687,1021 @@ class ManagementToolTest(unittest.TestCase):
         self.assertIn("Review Packet", review.stdout)
         self.assertIn("Review checklist:", review.stdout)
         self.assertIn("AI review prompt:", review.stdout)
+
+    def test_transition_order_dates_and_optional_paths(self) -> None:
+        skipped = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Merged",
+            "--date",
+            "2026-07-06",
+            expected=1,
+        )
+        self.assertIn("invalid transition Started -> Merged", skipped.stderr)
+        backdated = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "In Code Review",
+            "--date",
+            "2026-07-04",
+            expected=1,
+        )
+        self.assertIn("predates existing history", backdated.stderr)
+
+        self.tool_run("advance-state", "EN.MCP.01-001", "--to", "In Code Review", "--date", "2026-07-06")
+        self.tool_run("advance-state", "EN.MCP.01-001", "--to", "Integrated", "--date", "2026-07-07")
+        merged = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Merged",
+            "--date",
+            "2026-07-08",
+            "--override-gate",
+            "Human accepted the integration evidence.",
+        )
+        self.assertIn("State:       Merged", merged.stdout)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertIn("Integrated: 2026-07-07; Merged: 2026-07-08", backlog)
+        self.assertIn(
+            "==> Gate override for Merged: 2026-07-08; Reason: Human accepted the integration evidence.",
+            backlog,
+        )
+
+    def test_optional_qa_path_is_allowed(self) -> None:
+        self.tool_run("advance-state", "EN.MCP.01-001", "--to", "In Code Review", "--date", "2026-07-06")
+        self.tool_run("advance-state", "EN.MCP.01-001", "--to", "QA", "--date", "2026-07-07")
+        result = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Merged",
+            "--date",
+            "2026-07-08",
+            "--override-gate",
+            "Manual evidence review completed.",
+        )
+        self.assertIn("State:       Merged", result.stdout)
+
+    def test_supersession_is_dynamic_and_terminal(self) -> None:
+        result = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Superseded by ER.MCP.02.a-001",
+            "--date",
+            "2026-07-06",
+        )
+        self.assertIn("State:       Superseded by ER.MCP.02.a-001", result.stdout)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertIn("# Superseded by ER.MCP.02.a-001", backlog)
+        self.assertIn("Superseded by ER.MCP.02.a-001: 2026-07-06", backlog)
+        terminal = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Cancelled",
+            "--date",
+            "2026-07-07",
+            expected=1,
+        )
+        self.assertIn("terminal state", terminal.stderr)
+
+    def test_supersession_requires_an_existing_different_work_item(self) -> None:
+        missing = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Superseded by EN.MCP.01-999",
+            "--date",
+            "2026-07-06",
+            expected=1,
+        )
+        self.assertIn("was not found in any backlog", missing.stderr)
+        itself = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Superseded by EN.MCP.01-001",
+            "--date",
+            "2026-07-06",
+            expected=1,
+        )
+        self.assertIn("cannot supersede itself", itself.stderr)
+
+    def test_proposed_supersession_rejects_a_cycle_through_an_existing_chain(self) -> None:
+        self.tool_run(
+            "advance-state",
+            "ER.MCP.02.a-001",
+            "--to",
+            "Superseded by EN.MCP.01-001",
+            "--date",
+            "2026-07-06",
+        )
+        backlog = self.management / "ENGINEERING.backlog.md"
+        before = backlog.read_bytes()
+        cycle = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Superseded by ER.MCP.02.a-001",
+            "--date",
+            "2026-07-07",
+            expected=1,
+        )
+        self.assertIn(
+            "supersession cycle detected: EN.MCP.01-001 -> ER.MCP.02.a-001 -> EN.MCP.01-001",
+            cycle.stderr,
+        )
+        self.assertEqual(backlog.read_bytes(), before)
+
+    def test_strict_lint_rejects_recorded_supersession_cycles(self) -> None:
+        (self.management / "ENGINEERING.backlog.md").write_text(
+            textwrap.dedent(
+                """\
+                # Superseded by ER.MCP.02.a-001
+
+                ## EN.MCP.01-001 -- First cycle member
+                Existing work.
+                ==> Luiz. Planned: 2026-07-05; Started: 2026-07-05; Superseded by ER.MCP.02.a-001: 2026-07-06;
+
+                # Superseded by EN.MCP.01-001
+
+                ## ER.MCP.02.a-001 -- Second cycle member
+                Existing work.
+                ==> Planned: 2026-07-05; Superseded by EN.MCP.01-001: 2026-07-06;
+                """
+            ),
+            encoding="utf-8",
+        )
+        result = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn(
+            "supersession cycle detected: EN.MCP.01-001 -> ER.MCP.02.a-001 -> EN.MCP.01-001",
+            result.stderr,
+        )
+
+    def test_block_history_is_append_only_and_blocks_advancement(self) -> None:
+        original_timeline = "==> Luiz. Planned: 2026-07-05; Started: 2026-07-05;"
+        self.tool_run("block-work", "EN.MCP.01-001", "--reason", "Waiting for an API decision.", "--date", "2026-07-06")
+        blocked_text = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertIn(original_timeline, blocked_text)
+        self.assertIn("==> Blocked: 2026-07-06; Reason: Waiting for an API decision.", blocked_text)
+        blocked_advance = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "In Code Review",
+            "--date",
+            "2026-07-07",
+            expected=1,
+        )
+        self.assertIn("is blocked", blocked_advance.stderr)
+        self.tool_run("unblock-work", "EN.MCP.01-001", "--reason", "The API decision was recorded.", "--date", "2026-07-07")
+        self.tool_run("advance-state", "EN.MCP.01-001", "--to", "In Code Review", "--date", "2026-07-08")
+        final_text = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertIn("==> Unblocked: 2026-07-07; Reason: The API decision was recorded.", final_text)
+        self.assertLess(final_text.index("==> Blocked:"), final_text.index("==> Unblocked:"))
+
+    def test_actual_mutations_require_main_but_dry_runs_do_not(self) -> None:
+        self.switch_branch("Luiz/audit")
+        dry_run = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "In Code Review",
+            "--date",
+            "2026-07-06",
+            "--dry-run",
+        )
+        self.assertIn("Dry run", dry_run.stdout)
+        actual = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "In Code Review",
+            "--date",
+            "2026-07-06",
+            expected=1,
+        )
+        self.assertIn("requires branch main", actual.stderr)
+        blocked = self.tool_run(
+            "block-work",
+            "EN.MCP.01-001",
+            "--reason",
+            "Waiting.",
+            "--date",
+            "2026-07-06",
+            expected=1,
+        )
+        self.assertIn("requires branch main", blocked.stderr)
+
+    def test_merge_and_rollout_gates_use_traceability_release_and_operations_evidence(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text("pub fn route() {}\n", encoding="utf-8")
+        self.write_traceability("| `E.MCP.01` | `EN.MCP.01-001` | Started | `src/lib.rs` |")
+        self.tool_run("advance-state", "EN.MCP.01-001", "--to", "In Code Review", "--date", "2026-07-06")
+        merged = self.tool_run("advance-state", "EN.MCP.01-001", "--to", "Merged", "--date", "2026-07-07")
+        self.assertIn("State:       Merged", merged.stdout)
+        traceability = (self.management / "TRACEABILITY.md").read_text(encoding="utf-8")
+        self.assertIn("| `E.MCP.01` | `EN.MCP.01-001` | Merged |", traceability)
+
+        blocked_rollout = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Rolled Out",
+            "--date",
+            "2026-07-08",
+            expected=1,
+        )
+        self.assertIn("is not included in a schema-valid Released entry in RELEASES.md", blocked_rollout.stderr)
+        release_entry = textwrap.dedent(
+            """\
+            # Releases
+
+            ### 1.2.3 -- 2026-07-08
+
+            Tag:
+            `1.2.3`
+
+            Included work:
+            1. `EN.MCP.01-001` -- Routing work
+
+            Requirements affected:
+            1. `E.MCP.01` -- Per-user routing
+
+            Verification:
+            1. `src/lib.rs`
+
+            Production decision:
+            Rejected
+
+            Rollback or mitigation:
+            Keep the previous release.
+
+            Notes:
+            Gate fixture.
+            """
+        )
+        (self.management / "RELEASES.md").write_text(release_entry, encoding="utf-8")
+        self.tool_run("link-evidence", "E.MCP.01", "EN.MCP.01-001", "management/RELEASES.md")
+        rejected_release = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Rolled Out",
+            "--date",
+            "2026-07-08",
+            expected=1,
+        )
+        self.assertIn("schema-valid Released entry", rejected_release.stderr)
+        (self.management / "RELEASES.md").write_text(
+            release_entry.replace("Production decision:\nRejected", "Production decision:\nReleased"),
+            encoding="utf-8",
+        )
+        rollout = self.tool_run("advance-state", "EN.MCP.01-001", "--to", "Rolled Out", "--date", "2026-07-08")
+        self.assertIn("State:       Rolled Out", rollout.stdout)
+
+    def test_gate_override_is_rejected_when_no_gate_failed(self) -> None:
+        result = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "In Code Review",
+            "--date",
+            "2026-07-06",
+            "--override-gate",
+            "Unnecessary override.",
+            expected=1,
+        )
+        self.assertIn("no deterministic readiness gate failed", result.stderr)
+
+    def test_strict_lint_rejects_malformed_requirement_and_traceability_drift(self) -> None:
+        (self.management / "BUSINESS.md").write_text(
+            '# Business "Biz"\n\n## 1) Missing zero padding\n\nBusiness behavior.\n',
+            encoding="utf-8",
+        )
+        malformed = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("malformed numbered requirement heading", malformed.stderr)
+
+        self.write_management_files()
+        self.write_traceability("| `E.MCP.01` | `EN.MCP.01-001` | Rolled Out | `management/TRACEABILITY.md` |")
+        drift = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("does not match EN.MCP.01-001 backlog state Started", drift.stderr)
+
+    def test_strict_lint_rejects_hidden_work_and_wrong_level_ledger_entries(self) -> None:
+        backlog = self.management / "ENGINEERING.backlog.md"
+        backlog.write_text(
+            backlog.read_text(encoding="utf-8")
+            + "\n### EN.MCP.01-002 -- Hidden work\n"
+            + "### EN.MCP.1-003 - Malformed hidden work\n",
+            encoding="utf-8",
+        )
+        hidden_work = self.tool_run("lint", "--strict", expected=1)
+        self.assertGreaterEqual(hidden_work.stderr.count("invalid work item heading"), 2)
+
+        self.write_management_files()
+        (self.management / "RISKS.md").write_text(
+            "# Risks\n\n#### RISK-0001 -- Hidden risk\n\n##### RISK-next -- Malformed hidden risk\n",
+            encoding="utf-8",
+        )
+        (self.management / "RELEASES.md").write_text(
+            "# Releases\n\n## 1.2.3 -- 2026-07-08\n\n#### 1.2 -- Malformed hidden release\n",
+            encoding="utf-8",
+        )
+        hidden_ledgers = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("ledger entry RISK-0001 uses Markdown heading level 4; expected level 3", hidden_ledgers.stderr)
+        self.assertIn("ledger entry RISK-next uses Markdown heading level 5; expected level 3", hidden_ledgers.stderr)
+        self.assertIn("ledger entry 1.2.3 uses Markdown heading level 2; expected level 3", hidden_ledgers.stderr)
+        self.assertIn("ledger entry 1.2 uses Markdown heading level 4; expected level 3", hidden_ledgers.stderr)
+
+    def test_real_ledger_title_containing_angle_brackets_is_not_a_template(self) -> None:
+        (self.management / "DECISIONS.md").write_text(
+            textwrap.dedent(
+                """\
+                # Decisions
+
+                ## DEC-0001 -- Validate <T>
+
+                Status: Invalid
+                Date: 2026-07-08
+
+                Context:
+                Generic types need validation.
+
+                Decision:
+                Validate them.
+
+                Consequences:
+                Invalid input is rejected.
+
+                Related:
+                None
+                """
+            ),
+            encoding="utf-8",
+        )
+        result = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("DEC-0001 has invalid or missing status", result.stderr)
+
+    def test_record_commands_reject_placeholder_only_titles_without_changes(self) -> None:
+        cases = [
+            (
+                "DECISIONS.md",
+                [
+                    "record-decision",
+                    "<T>",
+                    "--context",
+                    "Context.",
+                    "--decision",
+                    "Decision.",
+                    "--consequence",
+                    "Consequence.",
+                ],
+            ),
+            (
+                "RISKS.md",
+                [
+                    "record-risk",
+                    "<T>",
+                    "--owner",
+                    "Manager",
+                    "--risk",
+                    "Risk.",
+                    "--impact",
+                    "Impact.",
+                    "--mitigation",
+                    "Mitigation.",
+                ],
+            ),
+            (
+                "INCIDENTS.md",
+                [
+                    "record-incident",
+                    "<T>",
+                    "--environment",
+                    "Staging",
+                    "--impact",
+                    "Impact.",
+                    "--timeline",
+                    "Timeline.",
+                    "--mitigation",
+                    "Mitigation.",
+                ],
+            ),
+            (
+                "EXPERIMENTS.md",
+                [
+                    "record-experiment",
+                    "<T>",
+                    "--branch",
+                    "Luiz/EX.MCP.02.b-001",
+                    "--hypothesis",
+                    "Hypothesis.",
+                    "--expires",
+                    "2026-08-01",
+                    "--success",
+                    "Success.",
+                    "--failure",
+                    "Failure.",
+                ],
+            ),
+        ]
+        for filename, command in cases:
+            with self.subTest(filename=filename):
+                path = self.management / filename
+                original = path.read_bytes()
+                result = self.tool_run(*command, expected=1)
+                self.assertIn("title cannot be a placeholder-only token", result.stderr)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_placeholder_looking_concrete_entry_cannot_hide_duplicate_or_id_reuse(self) -> None:
+        incidents = self.management / "INCIDENTS.md"
+        concrete_entry = textwrap.dedent(
+            """\
+            # Incidents
+
+            ## Open Incidents
+
+            ### INCIDENT-0001 -- `<T>`
+
+            Status: Open
+
+            Detected:
+            2026-07-08 12:00 local
+
+            Affected environment:
+            Staging
+
+            Impact:
+            Impact.
+
+            Timeline:
+            1. Event.
+
+            Root cause:
+            Cause.
+
+            Mitigation:
+            Mitigation.
+
+            Follow-up work:
+            1. None.
+
+            Requirement or decision changes:
+            1. None.
+            """
+        )
+        incidents.write_text(concrete_entry, encoding="utf-8")
+        recorded = self.tool_run(
+            "record-incident",
+            "Second incident",
+            "--environment",
+            "Staging",
+            "--impact",
+            "Impact.",
+            "--timeline",
+            "Timeline.",
+            "--mitigation",
+            "Mitigation.",
+        )
+        self.assertIn("Recorded incident INCIDENT-0002", recorded.stdout)
+
+        incidents.write_text(
+            concrete_entry
+            + "\n### INCIDENT-0001 -- Duplicate concrete incident\n\nStatus: Open\n",
+            encoding="utf-8",
+        )
+        duplicate = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("duplicate ledger id INCIDENT-0001", duplicate.stderr)
+
+    def test_lint_requires_governance_files_and_valid_ledger_schema(self) -> None:
+        (self.management / "README.ai.md").unlink()
+        missing = self.tool_run("lint", expected=1)
+        self.assertIn("missing supporting management file", missing.stderr)
+        (self.management / "README.ai.md").write_text("# AI map\n", encoding="utf-8")
+        (self.management / "RISKS.md").write_text(
+            textwrap.dedent(
+                """\
+                # Risks
+
+                ## Open Risks
+
+                ### RISK-0001 -- Invalid status
+
+                Status: Maybe
+                Owner: Manager
+                Related: None
+
+                Risk:
+                Something may happen.
+
+                Impact:
+                It matters.
+
+                Mitigation:
+                Inspect it.
+                """
+            ),
+            encoding="utf-8",
+        )
+        invalid = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("invalid or missing status", invalid.stderr)
+
+    def test_format_template_placeholders_are_accepted(self) -> None:
+        (self.management / "INCIDENTS.md").write_text(
+            textwrap.dedent(
+                """\
+                # Incidents
+
+                ## Incident Entry Format
+
+                ### INCIDENT-0001 -- `<short title>`
+
+                Status:
+                `Open`, `Mitigated`, or `Closed`
+
+                Detected:
+                `YYYY-MM-DD HH:MM timezone`
+
+                Affected environment:
+                `Production`, `Staging`, `Development`, or `Local`
+
+                Impact:
+                `<user, data, security, availability, or delivery impact>`
+
+                Timeline:
+                1. `YYYY-MM-DD HH:MM` -- `<event>`
+
+                Root cause:
+                `<cause after investigation>`
+
+                Mitigation:
+                `<what stopped or reduced the impact>`
+
+                Follow-up work:
+                1. `<work item id>` -- `<summary>`
+
+                Requirement or decision changes:
+                1. `<requirement id or decision id>` -- `<change needed>`
+                """
+            ),
+            encoding="utf-8",
+        )
+        (self.management / "EXPERIMENTS.md").write_text(
+            textwrap.dedent(
+                """\
+                # Experiments
+
+                ## Experiment Entry Format
+
+                ### EXP-0001 -- `<short title>`
+
+                Status:
+                `Active`, `Adopted`, `Rejected`, or `Expired`
+
+                Branch:
+                `<developer>/EX.<section>.<requirement>.<subtopic>-<sequence>`
+
+                Hypothesis:
+                `<what we expect to learn or prove>`
+
+                Expires:
+                `YYYY-MM-DD`
+
+                Success criteria:
+                1. `<observable result>`
+
+                Failure criteria:
+                1. `<observable result>`
+
+                Result:
+                `<decision and evidence>`
+
+                Follow-up:
+                1. `<requirement id, work item id, or decision id>`
+                """
+            ),
+            encoding="utf-8",
+        )
+        (self.management / "RELEASES.md").write_text(
+            textwrap.dedent(
+                """\
+                # Releases
+
+                ## Release Entry Format
+
+                ### `<version>` -- `<release date>`
+
+                Tag:
+                `<semver tag>`
+
+                Included work:
+                1. `<work item id>` -- `<summary>`
+
+                Requirements affected:
+                1. `<requirement id>` -- `<summary>`
+
+                Verification:
+                1. Branch CI:
+                2. Main CI:
+                3. Post-merge QA:
+                4. Operational checks:
+
+                Production decision:
+                `Released`, `Rejected`, or `Rolled back`
+
+                Rollback or mitigation:
+                `<how to revert or reduce impact>`
+
+                Notes:
+                `<short release notes>`
+                """
+            ),
+            encoding="utf-8",
+        )
+        self.tool_run("lint", "--strict")
+
+    def test_link_evidence_rejects_escape_symlink_and_unsafe_table_fields(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text("pub fn route() {}\n", encoding="utf-8")
+        escaped = self.tool_run(
+            "link-evidence",
+            "E.MCP.01",
+            "EN.MCP.01-001",
+            "../outside.txt",
+            "--allow-missing",
+            expected=1,
+        )
+        self.assertIn("escapes the repository", escaped.stderr)
+        absolute = self.tool_run(
+            "link-evidence",
+            "E.MCP.01",
+            "EN.MCP.01-001",
+            "/tmp/outside.txt",
+            "--allow-missing",
+            expected=1,
+        )
+        self.assertIn("must be repository-relative", absolute.stderr)
+        with tempfile.TemporaryDirectory(dir="/tmp") as outside:
+            outside_file = Path(outside) / "evidence.txt"
+            outside_file.write_text("outside\n", encoding="utf-8")
+            (self.root / "escape-link").symlink_to(outside_file)
+            symlink = self.tool_run(
+                "link-evidence",
+                "E.MCP.01",
+                "EN.MCP.01-001",
+                "escape-link",
+                expected=1,
+            )
+            self.assertIn("escapes the repository", symlink.stderr)
+        unsafe = self.tool_run(
+            "link-evidence",
+            "E.MCP.01",
+            "EN.MCP.01-001",
+            "src/lib.rs",
+            "--note",
+            "bad|field",
+            expected=1,
+        )
+        self.assertIn("cannot contain a newline or `|`", unsafe.stderr)
+        traceability = self.management / "TRACEABILITY.md"
+        original_traceability = traceability.read_bytes()
+        backtick_note = self.tool_run(
+            "link-evidence",
+            "E.MCP.01",
+            "EN.MCP.01-001",
+            "src/lib.rs",
+            "--note",
+            "fake path `src/injected.rs`",
+            expected=1,
+        )
+        self.assertIn("--note cannot contain a backtick", backtick_note.stderr)
+        self.assertEqual(traceability.read_bytes(), original_traceability)
+
+    def test_atomic_write_preserves_original_on_failure_and_retains_mode(self) -> None:
+        module = self.load_tool_module()
+        target = self.management / "TOOLING.md"
+        target.write_text("original\n", encoding="utf-8")
+        target.chmod(0o640)
+        with mock.patch.object(module.os, "replace", side_effect=OSError("simulated replace failure")):
+            with self.assertRaises(OSError):
+                module.atomic_write_text(target, "replacement\n")
+        self.assertEqual(target.read_text(encoding="utf-8"), "original\n")
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o640)
+        self.assertEqual(list(target.parent.glob(f".{target.name}.*.tmp")), [])
+        module.atomic_write_text(target, "replacement\n")
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o640)
+
+    def test_advance_state_rolls_back_backlog_when_traceability_write_fails(self) -> None:
+        self.write_traceability(
+            "| `E.MCP.01` | `EN.MCP.01-001` | Started | `management/TRACEABILITY.md` |"
+        )
+        backlog = self.management / "ENGINEERING.backlog.md"
+        traceability = self.management / "TRACEABILITY.md"
+        original_backlog = backlog.read_bytes()
+        original_traceability = traceability.read_bytes()
+        module = self.load_tool_module()
+        args = module.build_parser().parse_args(
+            [
+                "advance-state",
+                "EN.MCP.01-001",
+                "--to",
+                "In Code Review",
+                "--date",
+                "2026-07-06",
+            ]
+        )
+        original_atomic_write = module.atomic_write_text
+        failed = False
+
+        def fail_traceability_once(path: Path, content: str) -> None:
+            nonlocal failed
+            if path.name == "TRACEABILITY.md" and not failed:
+                failed = True
+                raise OSError("simulated traceability failure")
+            original_atomic_write(path, content)
+
+        with mock.patch.object(module, "atomic_write_text", side_effect=fail_traceability_once):
+            with self.assertRaises(OSError):
+                args.func(args)
+        self.assertTrue(failed)
+        self.assertEqual(backlog.read_bytes(), original_backlog)
+        self.assertEqual(traceability.read_bytes(), original_traceability)
+
+    def test_process_lock_serializes_competing_ledger_writers(self) -> None:
+        processes = [
+            subprocess.Popen(
+                [
+                    str(self.tool),
+                    "record-decision",
+                    f"Decision {index}",
+                    "--context",
+                    "Context.",
+                    "--decision",
+                    "Decision.",
+                    "--consequence",
+                    "Consequence.",
+                    "--date",
+                    "2026-07-08",
+                ],
+                cwd=self.root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            for index in range(6)
+        ]
+        results = [process.communicate(timeout=10) + (process.returncode,) for process in processes]
+        self.assertTrue(all(returncode == 0 for _stdout, _stderr, returncode in results), results)
+        decisions = (self.management / "DECISIONS.md").read_text(encoding="utf-8")
+        for index in range(1, 7):
+            self.assertEqual(decisions.count(f"## DEC-{index:04d} --"), 1)
+
+    def test_process_lock_revalidates_competing_block_writers(self) -> None:
+        commands = [
+            [str(self.tool), "block-work", "EN.MCP.01-001", "--reason", reason, "--date", "2026-07-06"]
+            for reason in ["First concurrent blocker.", "Second concurrent blocker."]
+        ]
+        processes = [
+            subprocess.Popen(command, cwd=self.root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for command in commands
+        ]
+        results = [process.communicate(timeout=10) + (process.returncode,) for process in processes]
+        self.assertEqual(sorted(returncode for _stdout, _stderr, returncode in results), [0, 1], results)
+        backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
+        self.assertEqual(backlog.count("==> Blocked: 2026-07-06; Reason:"), 1)
+
+    def test_strict_lint_requires_exact_history_exceptions_for_skipped_states(self) -> None:
+        backlog = textwrap.dedent(
+            """\
+            # Merged
+
+            ## EN.MCP.01-001 -- Historical routing work
+            Existing historical work.
+            ==> Luiz. Planned: 2026-07-05; Started: 2026-07-05; Merged: 2026-07-06;
+            """
+        )
+        (self.management / "ENGINEERING.backlog.md").write_text(backlog, encoding="utf-8")
+        missing = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("skips In Code Review", missing.stderr)
+        marker = (
+            "==> History exception: 2026-07-15; Missing: In Code Review; "
+            "Reason: State trail predates deterministic transition enforcement; no date was recorded.\n"
+        )
+        (self.management / "ENGINEERING.backlog.md").write_text(backlog + marker, encoding="utf-8")
+        self.tool_run("lint", "--strict")
+        wrong_marker = marker.replace("Missing: In Code Review", "Missing: QA")
+        (self.management / "ENGINEERING.backlog.md").write_text(backlog + wrong_marker, encoding="utf-8")
+        wrong = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("does not match the skipped lifecycle states", wrong.stderr)
+
+    def test_strict_lint_rejects_backward_terminal_and_unneeded_history(self) -> None:
+        backward = textwrap.dedent(
+            """\
+            # Planned
+
+            ## EN.MCP.01-001 -- Backward history
+            Invalid history.
+            ==> Luiz. Started: 2026-07-05; Planned: 2026-07-06;
+            """
+        )
+        (self.management / "ENGINEERING.backlog.md").write_text(backward, encoding="utf-8")
+        result = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("backward or invalid", result.stderr)
+
+        terminal = backward.replace("# Planned", "# Cancelled").replace(
+            "Started: 2026-07-05; Planned: 2026-07-06;",
+            "Cancelled: 2026-07-05; Planned: 2026-07-06;",
+        )
+        (self.management / "ENGINEERING.backlog.md").write_text(terminal, encoding="utf-8")
+        result = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("terminal lifecycle state Cancelled is followed by Planned", result.stderr)
+
+        normal = textwrap.dedent(
+            """\
+            # Started
+
+            ## EN.MCP.01-001 -- Normal history
+            Valid history.
+            ==> Luiz. Planned: 2026-07-05; Started: 2026-07-06;
+            ==> History exception: 2026-07-15; Missing: In Code Review; Reason: Not actually missing.
+            """
+        )
+        (self.management / "ENGINEERING.backlog.md").write_text(normal, encoding="utf-8")
+        result = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("history exception is unneeded", result.stderr)
+
+    def test_strict_lint_validates_duplicate_traceability_and_structured_references(self) -> None:
+        row = "| `E.MCP.01` | `EN.MCP.01-001` | Started | `management/TRACEABILITY.md` |"
+        self.write_traceability(row, row)
+        duplicate = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("duplicate traceability pair", duplicate.stderr)
+
+        self.write_traceability()
+        (self.management / "DECISIONS.md").write_text(
+            textwrap.dedent(
+                """\
+                # Decisions
+
+                ## DEC-0001 -- Invalid relation
+
+                Status: Accepted
+                Date: 2026-07-08
+
+                Context:
+                Ordinary prose may mention E.MCP.99 without becoming a reference.
+
+                Decision:
+                Test references.
+
+                Consequences:
+                The linter checks structured fields.
+
+                Related:
+                `E.MCP.99`
+                """
+            ),
+            encoding="utf-8",
+        )
+        relation = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("Related references missing structured id E.MCP.99", relation.stderr)
+
+    def test_strict_lint_validates_release_work_and_requirement_references(self) -> None:
+        (self.management / "RELEASES.md").write_text(
+            textwrap.dedent(
+                """\
+                # Releases
+
+                ### 1.2.3 -- 2026-07-08
+
+                Tag:
+                `1.2.3`
+
+                Included work:
+                1. `EN.MCP.01-999` -- Missing work
+
+                Requirements affected:
+                1. `E.MCP.99` -- Missing requirement
+
+                Verification:
+                1. Branch CI: passed
+
+                Production decision:
+                Released
+
+                Rollback or mitigation:
+                Revert the tag.
+
+                Notes:
+                Test release.
+                """
+            ),
+            encoding="utf-8",
+        )
+        result = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("references missing work item EN.MCP.01-999", result.stderr)
+        self.assertIn("references missing requirement E.MCP.99", result.stderr)
+
+    def test_semantic_context_json_schema_and_workflows(self) -> None:
+        (self.management / "BUSINESS.md").write_text(
+            textwrap.dedent(
+                """\
+                # Business "Biz"
+
+                ## 01) Per User Routing
+
+                One stream per user.
+
+                ### 01.a) Child routing obligation
+
+                Child behavior.
+                """
+            ),
+            encoding="utf-8",
+        )
+        workflows = {
+            "audit": ["B.Biz.01"],
+            "tech-debt": [],
+            "estimate": ["B.Biz.01"],
+            "sync": ["B.Biz.01"],
+            "plan": ["EN.MCP.01-001"],
+            "review": ["Luiz/EN.MCP.01-001"],
+            "verification": ["Luiz/EN.MCP.01-001"],
+        }
+        for workflow, reference in workflows.items():
+            with self.subTest(workflow=workflow):
+                result = self.tool_run("semantic-context", workflow, *reference, "--limit", "5")
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["schema_version"], "1.0")
+                self.assertEqual(payload["workflow"], workflow)
+                self.assertIn("signal_policy", payload)
+                self.assertIn("observations", payload)
+                self.assertNotIn("verdict", payload)
+                if workflow == "audit":
+                    self.assertEqual(
+                        [item["id"] for item in payload["observations"]["requirements"]],
+                        ["B.Biz.01", "B.Biz.01.a"],
+                    )
+                    self.assertTrue(
+                        any("title matches another requirement: E.MCP.01" in signal for signal in payload["candidate_signals"])
+                    )
+                if workflow in {"estimate", "sync"}:
+                    self.assertEqual(payload["focus"]["requirement"]["id"], "B.Biz.01")
+                    self.assertEqual(
+                        [item["id"] for item in payload["focus"]["descendant_requirements"]],
+                        ["B.Biz.01.a"],
+                    )
+
+        leaf_audit = json.loads(self.tool_run("semantic-context", "audit", "B.Biz.01.a").stdout)
+        self.assertEqual(
+            [item["id"] for item in leaf_audit["observations"]["requirements"]],
+            ["B.Biz.01.a"],
+        )
+        leaf_estimate = json.loads(self.tool_run("semantic-context", "estimate", "B.Biz.01.a").stdout)
+        self.assertEqual(leaf_estimate["focus"]["requirement"]["id"], "B.Biz.01.a")
+        self.assertEqual(leaf_estimate["focus"]["descendant_requirements"], [])
+
+        tech_debt = json.loads(self.tool_run("semantic-context", "tech-debt", "management", "--limit", "5").stdout)
+        self.assertEqual(tech_debt["observations"]["path_prefix"], "management")
+        ignored = self.tool_run("semantic-context", "tech-debt", "missing-prefix", expected=1)
+        self.assertIn("does not exist", json.loads(ignored.stdout)["error"])
+
+    def test_semantic_context_limit_zero_lists_all_untracked_skill_files(self) -> None:
+        skill = self.root / ".agents" / "skills" / "new-skill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+        (skill / "reference.md").write_text("# Reference\n", encoding="utf-8")
+        payload = json.loads(
+            self.tool_run(
+                "semantic-context",
+                "verification",
+                "Luiz/EN.MCP.01-001",
+                "--limit",
+                "0",
+            ).stdout
+        )
+        self.assertIn(".agents/skills/new-skill/SKILL.md", payload["observations"]["changed_files"])
+        self.assertIn(".agents/skills/new-skill/reference.md", payload["observations"]["changed_files"])
+        self.assertFalse(any(path.startswith("... ") for path in payload["observations"]["changed_files"]))
+
+    def test_requirement_semantic_context_workflows_allow_detached_head(self) -> None:
+        run(self.root, ["git", "switch", "--detach", "HEAD"])
+        workflows = {
+            "audit": ["E.MCP.01"],
+            "estimate": ["E.MCP.01"],
+            "sync": ["E.MCP.01"],
+            "tech-debt": [],
+        }
+        for workflow, reference in workflows.items():
+            with self.subTest(workflow=workflow):
+                payload = json.loads(self.tool_run("semantic-context", workflow, *reference, "--limit", "0").stdout)
+                self.assertIsNone(payload["snapshot"]["branch"])
+                self.assertNotIn("error", payload)
 
 
 if __name__ == "__main__":

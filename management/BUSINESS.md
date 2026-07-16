@@ -16,10 +16,10 @@ The BOT is able to communicate – to receive MOs and send MTs – with:
 
 ## 02) Supported Features
 
-The BOT must support all the features each Messaging Platform provides apart from the obvious "text exchanging".
+The BOT must support *all* the features each Messaging Platform provides apart from the obvious "text exchanging".
 For instance, Whatsapp allows sending and receiving "GPS Locations"; Telegram allows "Inline Menus".
 
-It is pointless to enumerate all features for all platforms in this document, as this is an ever-growing list and makes no sense to duplicate information here.
+It is pointless to enumerate *all* features for all platforms in this document, as this is an ever-growing list and makes no sense to duplicate information here.
 
 
 ### 02.a) Feature Followup

@@ -20,3 +20,4 @@
 17. Inside `management`, file `TRACEABILITY.md` records requirement-to-evidence links.
 18. Inside `management`, file `TOOLING.md` explains the repo-local management helper commands.
 19. Inside `management`, file `README.ai.md` is the fast-path operating map for AI agents revisiting the management governance system.
+20. Directory `.agents/skills/analyze-management` contains the repo-local semantic management-analysis workflow; deterministic context comes from `scripts/management/semantic_context`.

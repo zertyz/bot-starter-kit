@@ -2,9 +2,11 @@ const state = {
   model: null,
   selected: null,
   staticMode: Boolean(window.MANAGEMENT_STATIC_MODE),
+  actionInFlight: false,
 };
 
 const localOnlyTooltip = "Only available in the local online mode.";
+const capabilityToken = document.querySelector('meta[name="management-capability-token"]')?.content ?? "";
 
 const stateOrder = [
   "Under Planning",
@@ -47,7 +49,7 @@ function pill(text, kind = "", title = "") {
 
 function stateKind(value) {
   if (["Merged", "Rolled Out"].includes(value)) return "green";
-  if (["Rejected", "Cancelled"].includes(value)) return "red";
+  if (["Rejected", "Cancelled"].includes(value) || value.startsWith("Superseded by ")) return "red";
   if (["Started", "In Code Review", "Integrated", "QA"].includes(value)) return "blue";
   return "orange";
 }
@@ -163,11 +165,20 @@ function applyRuntimeMode() {
     ...$all("[data-form-action]"),
     ...$all('form[data-form] button[type="submit"]'),
   ].filter(Boolean);
+  const explanation = $("#local-only-explanation");
+  explanation.hidden = !state.staticMode;
+  $("#command-output").setAttribute("aria-busy", state.actionInFlight ? "true" : "false");
   for (const control of localOnlyControls) {
-    if (!state.staticMode) continue;
-    control.disabled = true;
-    control.classList.add("local-only");
-    control.title = localOnlyTooltip;
+    if (state.staticMode) {
+      control.disabled = true;
+      control.classList.add("local-only");
+      control.title = localOnlyTooltip;
+      control.setAttribute("aria-describedby", "local-only-explanation");
+      continue;
+    }
+    control.disabled = state.actionInFlight;
+    control.classList.remove("local-only");
+    control.removeAttribute("aria-describedby");
   }
 }
 
@@ -194,7 +205,10 @@ function renderMetrics() {
 }
 
 function renderStateCounts() {
-  const rows = stateOrder
+  const additionalStates = Object.keys(state.model.state_counts)
+    .filter((name) => !stateOrder.includes(name))
+    .sort();
+  const rows = [...stateOrder, ...additionalStates]
     .filter((name) => state.model.state_counts[name])
     .map((name) => `<div class="list-item"><strong>${escapeHtml(name)}</strong><span>${state.model.state_counts[name]} item(s)</span></div>`)
     .join("");
@@ -229,6 +243,24 @@ function workById(id) {
   return state.model.work_items.find((item) => item.id === id);
 }
 
+function blockHistoryText(item) {
+  return item.block_history
+    .map((event) => `${event.action}: ${event.entered_at} -- ${event.reason}`)
+    .join("\n") || "None";
+}
+
+function gateOverrideText(item) {
+  return item.gate_overrides
+    .map((event) => `${event.target_state}: ${event.entered_at} -- ${event.reason}`)
+    .join("\n") || "None";
+}
+
+function historyExceptionText(item) {
+  return item.history_exceptions
+    .map((event) => `${event.entered_at}: skipped ${event.missing_states.join(", ")} -- ${event.reason}`)
+    .join("\n") || "None";
+}
+
 function renderRequirements() {
   const filter = $("#requirement-filter").value.toLowerCase();
   const rows = state.model.requirements
@@ -254,12 +286,12 @@ function renderRequirements() {
 function renderWorkItems() {
   const filter = $("#work-filter").value.toLowerCase();
   const rows = state.model.work_items
-    .filter((item) => `${item.id} ${item.requirement_id} ${item.title} ${item.state} ${item.owner ?? ""}`.toLowerCase().includes(filter))
+    .filter((item) => `${item.id} ${item.requirement_id} ${item.title} ${item.state} ${item.owner ?? ""} ${item.blocked} ${blockHistoryText(item)} ${gateOverrideText(item)} ${historyExceptionText(item)}`.toLowerCase().includes(filter))
     .map((item) => `
       <tr class="${rowClassForIssues(item.attention)}" title="${attr(issueTitle(item.attention))}">
         <td><button type="button" data-select-work="${escapeHtml(item.id)}">${escapeHtml(item.id)}</button></td>
         <td>${escapeHtml(item.requirement_id)}</td>
-        <td>${pill(item.state, stateKind(item.state))}</td>
+        <td>${pill(item.state, stateKind(item.state))} ${item.blocked ? pill("Blocked", "red", blockHistoryText(item)) : ""}</td>
         <td>${escapeHtml(item.owner ?? "")}</td>
         <td>${escapeHtml(item.title)}</td>
         <td>${auditPill(item.attention)}</td>
@@ -280,7 +312,19 @@ function renderSelects() {
   const workOptions = state.model.work_items.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.id)} -- ${escapeHtml(item.state)}</option>`).join("");
   for (const select of $all('[data-select="requirements"]')) select.innerHTML = reqOptions;
   for (const select of $all('[data-select="work-items"]')) select.innerHTML = workOptions;
-  $("#advance-state-target").innerHTML = `<option value="">Next state</option>${stateOrder.map((item) => `<option>${escapeHtml(item)}</option>`).join("")}`;
+  renderAdvanceStateTargets();
+}
+
+function renderAdvanceStateTargets() {
+  const currentWorkId = $("#advance-state-work").value;
+  const lifecycleOptions = stateOrder.map((item) => `<option>${escapeHtml(item)}</option>`).join("");
+  const supersessionOptions = state.model.work_items
+    .filter((item) => item.id !== currentWorkId)
+    .map((item) => {
+      const targetState = `Superseded by ${item.id}`;
+      return `<option value="${attr(targetState)}">${escapeHtml(targetState)}</option>`;
+    }).join("");
+  $("#advance-state-target").innerHTML = `<option value="">Next state</option>${lifecycleOptions}${supersessionOptions}`;
 }
 
 function renderLedgers() {
@@ -395,6 +439,7 @@ function renderSelection() {
     <div class="kv"><span>Requirement</span><span>${escapeHtml(item.requirement_id)}</span></div>
     <div class="kv"><span>State</span><span>${pill(item.state, stateKind(item.state))}</span></div>
     <div class="kv"><span>Owner</span><span>${escapeHtml(item.owner ?? "")}</span></div>
+    <div class="kv"><span>Blocked</span><span>${item.blocked ? pill("yes", "red") : pill("no", "green")}</span></div>
     <div class="kv"><span>Source</span><span>${escapeHtml(item.path)}:${item.line}</span></div>
     <div class="kv"><span>Attention</span><span>${auditPill(item.attention)}</span></div>
     <div class="list">${item.attention.map((signal) => `
@@ -403,6 +448,9 @@ function renderSelection() {
         <span>${escapeHtml(signal.message)}${signal.edit_hint ? ` · ${escapeHtml(signal.edit_hint)}` : ""}</span>
       </div>
     `).join("") || '<p class="empty">No proactive signal</p>'}</div>
+    <div class="list-item"><strong>Block History</strong><span class="history-text">${escapeHtml(blockHistoryText(item))}</span></div>
+    <div class="list-item"><strong>Gate Overrides</strong><span class="history-text">${escapeHtml(gateOverrideText(item))}</span></div>
+    <div class="list-item"><strong>History Exceptions</strong><span class="history-text">${escapeHtml(historyExceptionText(item))}</span></div>
     <div class="list-item"><strong>Body</strong><span>${escapeHtml(item.body || "No body")}</span></div>
   `;
 }
@@ -450,26 +498,62 @@ async function runAction(action, payload = {}) {
     output.textContent = localOnlyMessage(action);
     return;
   }
-  output.textContent = `Running ${action}...`;
-  const response = await fetch("/api/action", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, payload: normalizePayload(action, payload) }),
-  });
-  const result = await response.json();
-  if (!response.ok) {
-    output.textContent = result.error || JSON.stringify(result, null, 2);
+  if (state.actionInFlight) {
+    output.textContent = "An action is already running.";
     return;
   }
-  output.textContent = [
-    `$ ${result.command}`,
-    `exit ${result.returncode}`,
-    "",
-    result.stdout || "",
-    result.stderr ? `stderr:\n${result.stderr}` : "",
-  ].filter(Boolean).join("\n");
-  if (result.returncode === 0) {
+  state.actionInFlight = true;
+  applyRuntimeMode();
+  output.textContent = `Running ${action}...`;
+  try {
+    const response = await fetch("/api/action", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Management-Capability": capabilityToken,
+      },
+      body: JSON.stringify({ action, payload: normalizePayload(action, payload) }),
+    });
+    const responseText = await response.text();
+    let result;
+    try {
+      result = JSON.parse(responseText);
+    } catch (_err) {
+      result = { error: responseText };
+    }
+    if (!response.ok) {
+      output.textContent = result.error || JSON.stringify(result, null, 2);
+      return;
+    }
+    output.textContent = [
+      `$ ${result.command}`,
+      `exit ${result.returncode}`,
+      "",
+      result.stdout || "",
+      result.stderr ? `stderr:\n${result.stderr}` : "",
+    ].filter(Boolean).join("\n");
+    if (result.returncode === 0) {
+      await loadModel();
+    }
+  } catch (err) {
+    output.textContent = err.stack || String(err);
+  } finally {
+    state.actionInFlight = false;
+    applyRuntimeMode();
+  }
+}
+
+async function refreshModel() {
+  if (state.actionInFlight) return;
+  state.actionInFlight = true;
+  applyRuntimeMode();
+  try {
     await loadModel();
+  } catch (err) {
+    $("#command-output").textContent = err.stack || String(err);
+  } finally {
+    state.actionInFlight = false;
+    applyRuntimeMode();
   }
 }
 
@@ -481,17 +565,22 @@ function buttonPayload(button) {
 }
 
 function wireEvents() {
-  $("#refresh").addEventListener("click", loadModel);
+  $("#refresh").addEventListener("click", refreshModel);
   $("#clear-output").addEventListener("click", () => { $("#command-output").textContent = ""; });
   $("#requirement-filter").addEventListener("input", renderRequirements);
   $("#work-filter").addEventListener("input", renderWorkItems);
   $("#tech-debt-filter").addEventListener("input", renderTechDebt);
+  $("#advance-state-work").addEventListener("change", renderAdvanceStateTargets);
 
   for (const item of $all(".nav-item")) {
     item.addEventListener("click", () => {
-      for (const other of $all(".nav-item")) other.classList.remove("active");
+      for (const other of $all(".nav-item")) {
+        other.classList.remove("active");
+        other.removeAttribute("aria-current");
+      }
       for (const view of $all(".view")) view.classList.remove("active");
       item.classList.add("active");
+      item.setAttribute("aria-current", "page");
       $(`#view-${item.dataset.view}`).classList.add("active");
     });
   }
@@ -528,7 +617,7 @@ function wireEvents() {
       }
       const payload = formPayload(form);
       const action = formAction(form, payload);
-      if (["release", "branch-tools", "quick-tools"].includes(action)) return;
+      if (["release", "branch-tools", "quick-tools", "block-tools"].includes(action)) return;
       runAction(action, payload);
     });
   }

@@ -145,3 +145,21 @@ Feature branches may contain behavior under development. `main` should not rely 
 
 Related:
 `MANAGEMENT.md`, `.github/workflows/main.yaml`, `.github/workflows/branch.yaml`
+
+
+## DEC-0009 -- Retain Direct Production Deployment During Early Development
+
+Status: Accepted
+Date: 2026-07-15
+
+Context:
+`MANAGEMENT.md` describes the intended staging and tag-driven production policy, while the current early-phase workflow deploys each `main` push directly to the production environment. The project owner has chosen to defer enforcement of the intended deployment policy while the software remains at this stage.
+
+Decision:
+The management-governance hardening work will not modify the current deployment triggers or production target.
+
+Consequences:
+The deployment workflow remains a known, explicitly accepted divergence from the desired CI/CD policy. It must be reviewed before the project begins enforcing that policy or is treated as production-ready.
+
+Related:
+`MANAGEMENT.md`, `.github/workflows/main.yaml`, `E.Gov.01`, `EN.Gov.01-001`

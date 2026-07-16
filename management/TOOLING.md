@@ -9,7 +9,7 @@ The management helpers live in `scripts/management/`. They enforce structure and
 scripts/ci/enforce_management_rules
 ```
 
-This runs the management linter and the management-tool test suite.
+This runs the strict management linter, core and GUI test suites, and a static-report export check.
 
 
 ## Management Status
@@ -38,9 +38,12 @@ The command exports an offline static version of the management GUI: `index.html
 scripts/management/gui
 scripts/management/gui --no-browser
 scripts/management/gui --port 8780
+scripts/management/gui --host 0.0.0.0 --unsafe-allow-non-loopback --allowed-host management.example.test
 ```
 
-The GUI runs a localhost-only browser console over the same management files and helper commands. It shows requirements, backlog work, ledgers, diagrams, status metrics, audit signals, tech-debt leads, and workflow forms for planning, state changes, evidence links, releases, branch checks, and ledger entries. Browser actions are allowlisted by the Python server; they do not execute arbitrary shell commands.
+The GUI binds to loopback by default and serves a browser console over the same management files and helper commands. It shows requirements, backlog work, ledgers, diagrams, status metrics, audit signals, tech-debt leads, and workflow forms for planning, state changes, evidence links, releases, branch checks, and ledger entries. Browser actions are allowlisted by the Python server; they do not execute arbitrary shell commands. The local session uses a per-process token and rejects invalid hosts, cross-origin actions, unexpected content types, and request bodies larger than 64 KiB.
+
+Binding to a non-loopback address requires the explicit `--unsafe-allow-non-loopback` acknowledgement. Add each expected HTTP host name with the repeatable `--allowed-host` option; this does not add TLS or make the authoring console suitable for public exposure.
 
 The local GUI and static Management Report share the same model builder and frontend assets. Add new management views to both surfaces by extending `scripts/management/gui_server` and `scripts/management/gui_static/` together, then verify with `scripts/management/test_gui_server`.
 
@@ -61,10 +64,25 @@ The diagram commands render static SVG files under `public/management/diagrams` 
 
 ```bash
 scripts/management/advance_state ER.MCP.02.a-001 --engineer Luiz
-scripts/management/advance_state ER.MCP.02.a-001 --to "In Code Review" --date 2026-07-08
+scripts/management/advance_state EN.Demo.02-001 --to "In Code Review" --date 2026-07-08
+scripts/management/advance_state WORK_ITEM_ID --to "Superseded by EXISTING_WORK_ITEM_ID" --dry-run
+scripts/management/advance_state WORK_ITEM_ID --to Merged --override-gate "Manual acceptance evidence is recorded in review 42"
 ```
 
-The command moves a work item to the next state by default, appends the dated state trail, and prints before/after context. Moving `Planned` to `Started` requires an engineer when the backlog item has no owner.
+The command moves a work item to the next state by default, appends the dated state trail, and prints before/after context. Moving `Planned` to `Started` requires an engineer when the backlog item has no owner. Blocked work cannot advance. `Merged` requires traceability and concrete evidence; `Rolled Out` also requires a release record and operational or release evidence. It rejects backward, skipped, backdated, and post-terminal transitions. Supersession must name an existing work item and is terminal.
+
+Actual state changes are allowed only on `main`, as required by `MANAGEMENT.md`; `--dry-run` remains available on work branches. `--override-gate` records a reason and can bypass only missing evidence gates, never ownership, blocker, ordering, terminal-state, or date rules.
+
+
+## Block and Unblock Work
+
+```bash
+scripts/management/block_work ER.MCP.02.a-001 --reason "Waiting for contract decision" --dry-run
+scripts/management/block_work ER.MCP.02.a-001 --reason "Waiting for contract decision"
+scripts/management/unblock_work ER.MCP.02.a-001 --reason "The contract decision is recorded"
+```
+
+Blocking is append-only history independent of lifecycle state. Repeated block or unblock operations that do not change the current blocked condition are rejected. Actual writes require `main`; `--dry-run` can be used elsewhere.
 
 
 ## Start Engineering Work
@@ -84,6 +102,25 @@ scripts/management/chat_about Luiz/ER.MCP.02.a-001
 ```
 
 The command prints the work item, the governing requirement, and a short prompt for discussing implementation with an AI assistant.
+
+
+## Build Semantic Analysis Context
+
+```bash
+scripts/management/semantic_context audit E.Gov.01
+scripts/management/semantic_context plan EN.Gov.01-001
+scripts/management/semantic_context estimate E.Gov.01
+scripts/management/semantic_context sync E.Gov.01
+scripts/management/semantic_context review Codex/EN.Gov.01-001 --base origin/main
+scripts/management/semantic_context verification EN.Gov.01-001
+scripts/management/semantic_context tech-debt --limit 20
+```
+
+The command emits versioned JSON containing deterministic management facts and review signals. It never presents lexical or path-based signals as a semantic verdict. Pass that context to the repo-local `$analyze-management` skill when the task requires judgment about requirements, plans, implementation quality, verification, drift, or technical debt.
+
+An optional requirement on `audit` includes that parent requirement and its descendants. `estimate` and `sync` expose descendants alongside their exact focus. An optional repository path on `tech-debt` narrows candidates to that path prefix.
+
+The skill lives in `.agents/skills/analyze-management/`. It reads the governing records, consumes the evidence packet, then inspects the actual implementation, tests, and relevant git history. Its report separates observed evidence, engineering inference, and unknowns; the human owner still controls requirement changes and final acceptance.
 
 
 ## Evaluate a Plan

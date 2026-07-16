@@ -4,11 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
+import fcntl
+import hashlib
 import html
+import json
+import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
+import threading
 from datetime import date, datetime
 from pathlib import Path
 
@@ -39,6 +47,11 @@ SUPPORTING_FILES = [
     "TOOLING.md",
 ]
 
+GOVERNANCE_FILES = [
+    "MANAGEMENT.md",
+    "README.ai.md",
+]
+
 VALID_STATES = [
     "Under Planning",
     "Planned",
@@ -54,12 +67,27 @@ VALID_STATES = [
 
 VALID_STATE_SET = set(VALID_STATES)
 
+TERMINAL_STATES = {"Rolled Out", "Rejected", "Cancelled"}
+
+ALLOWED_STATE_TRANSITIONS = {
+    "Under Planning": {"Planned"},
+    "Planned": {"Started"},
+    "Started": {"In Code Review"},
+    # QA is optional. Integrated is the optional path for work merged into a
+    # parent feature branch, while Merged is the direct path when QA is not
+    # applicable.
+    "In Code Review": {"QA", "Integrated", "Merged"},
+    "Integrated": {"Merged"},
+    "QA": {"Merged"},
+    "Merged": {"Rolled Out"},
+}
+
 STATE_FLOW = {
     "Under Planning": "Planned",
     "Planned": "Started",
     "Started": "In Code Review",
     "In Code Review": "QA",
-    "Integrated": "QA",
+    "Integrated": "Merged",
     "QA": "Merged",
     "Merged": "Rolled Out",
 }
@@ -197,6 +225,8 @@ WORK_ITEM_RE = re.compile(
     r"(?P<sequence>\d{3}))"
     r"\s+--\s+(?P<title>.+?)\s*$"
 )
+WORK_ITEM_ID_RE = re.compile(r"^[BEO][NRFX]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*-\d{3}$")
+WORK_ITEM_HEADING_LIKE_RE = re.compile(r"^#+\s+[BEO][NRFX]\.[^\s]+(?:\s|$)")
 BRANCH_RE = re.compile(
     r"^(?:feature/|(?P<owner>[A-Za-z0-9_.-]+)/)?"
     r"(?P<work_id>[BEO][NRFX]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*-\d{3})$"
@@ -207,7 +237,168 @@ TIMELINE_STATE_RE = re.compile(
     r"(?P<state>Under Planning|Planned|Started|In Code Review|Integrated|QA|Merged|Rolled Out|Rejected|Cancelled|Superseded by [^:;]+)"
     r"\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})"
 )
+BLOCK_EVENT_RE = re.compile(
+    r"==>\s*(?P<action>Blocked|Unblocked):\s*(?P<date>\d{4}-\d{2}-\d{2});\s*Reason:\s*(?P<reason>.+?)\s*$"
+)
+BLOCK_EVENT_PREFIX_RE = re.compile(r"==>\s*(?:Blocked|Unblocked)\b")
+GATE_OVERRIDE_RE = re.compile(
+    r"==>\s*Gate override for (?P<state>[^:;]+):\s*(?P<date>\d{4}-\d{2}-\d{2});\s*Reason:\s*(?P<reason>.+?)\s*$"
+)
+GATE_OVERRIDE_PREFIX_RE = re.compile(r"==>\s*Gate override\b")
+HISTORY_EXCEPTION_RE = re.compile(
+    r"==>\s*History exception:\s*(?P<date>\d{4}-\d{2}-\d{2});\s*Missing:\s*(?P<missing>[^;]+);\s*Reason:\s*(?P<reason>.+?)\s*$"
+)
+HISTORY_EXCEPTION_PREFIX_RE = re.compile(r"==>\s*History exception\b")
 LEDGER_HEADING_RE = re.compile(r"^#{2,3}\s+(?P<id>[A-Z]+-\d{4}|`?[^`\s]+`?)\s+--\s+(?P<title>.+?)\s*$")
+MARKDOWN_HEADING_RE = re.compile(r"^(?P<hashes>#+)\s+(?P<body>.+?)\s*$")
+MARKDOWN_HEADING_LINE_RE = re.compile(r"^\s{0,3}#+(?:\s|$)")
+LEVEL_TWO_HEADING_RE = re.compile(r"^##(?!#)\s+(?P<title>.+?)\s*$")
+PLACEHOLDER_TOKEN_RE = re.compile(r"^(?:`<[^<>\r\n]+>`|<[^<>\r\n]+>)$")
+
+SAFE_LEDGER_STATUSES = {
+    "DECISIONS.md": {"Accepted", "Superseded"},
+    "RISKS.md": {"Open", "Closed"},
+    "INCIDENTS.md": {"Open", "Mitigated", "Closed"},
+    "EXPERIMENTS.md": {"Active", "Adopted", "Rejected", "Expired"},
+}
+
+LEDGER_ENTRY_LEVELS = {
+    "DECISIONS.md": 2,
+    "RISKS.md": 3,
+    "INCIDENTS.md": 3,
+    "EXPERIMENTS.md": 3,
+    "RELEASES.md": 3,
+}
+
+LEDGER_DOCUMENTATION_TEMPLATES = {
+    "INCIDENTS.md": {
+        "section": "Incident Entry Format",
+        "id": "INCIDENT-0001",
+        "title": "<short title>",
+        "body_lines": (
+            "Status:",
+            "`Open`, `Mitigated`, or `Closed`",
+            "Detected:",
+            "`YYYY-MM-DD HH:MM timezone`",
+            "Affected environment:",
+            "`Production`, `Staging`, `Development`, or `Local`",
+            "Impact:",
+            "`<user, data, security, availability, or delivery impact>`",
+            "Timeline:",
+            "1. `YYYY-MM-DD HH:MM` -- `<event>`",
+            "Root cause:",
+            "`<cause after investigation>`",
+            "Mitigation:",
+            "`<what stopped or reduced the impact>`",
+            "Follow-up work:",
+            "1. `<work item id>` -- `<summary>`",
+            "Requirement or decision changes:",
+            "1. `<requirement id or decision id>` -- `<change needed>`",
+        ),
+    },
+    "EXPERIMENTS.md": {
+        "section": "Experiment Entry Format",
+        "id": "EXP-0001",
+        "title": "<short title>",
+        "body_lines": (
+            "Status:",
+            "`Active`, `Adopted`, `Rejected`, or `Expired`",
+            "Branch:",
+            "`<developer>/EX.<section>.<requirement>.<subtopic>-<sequence>`",
+            "Hypothesis:",
+            "`<what we expect to learn or prove>`",
+            "Expires:",
+            "`YYYY-MM-DD`",
+            "Success criteria:",
+            "1. `<observable result>`",
+            "Failure criteria:",
+            "1. `<observable result>`",
+            "Result:",
+            "`<decision and evidence>`",
+            "Follow-up:",
+            "1. `<requirement id, work item id, or decision id>`",
+        ),
+    },
+    "RELEASES.md": {
+        "section": "Release Entry Format",
+        "id": "<version>",
+        "title": "<release date>",
+        "body_lines": (
+            "Tag:",
+            "`<semver tag>`",
+            "Included work:",
+            "1. `<work item id>` -- `<summary>`",
+            "Requirements affected:",
+            "1. `<requirement id>` -- `<summary>`",
+            "Verification:",
+            "1. Branch CI:",
+            "2. Main CI:",
+            "3. Post-merge QA:",
+            "4. Operational checks:",
+            "Production decision:",
+            "`Released`, `Rejected`, or `Rolled back`",
+            "Rollback or mitigation:",
+            "`<how to revert or reduce impact>`",
+            "Notes:",
+            "`<short release notes>`",
+        ),
+    },
+}
+
+INCIDENT_ENVIRONMENTS = ["Production", "Staging", "Development", "Local"]
+RELEASE_REQUIRED_LABELS = [
+    "Tag",
+    "Included work",
+    "Requirements affected",
+    "Verification",
+    "Production decision",
+    "Rollback or mitigation",
+    "Notes",
+]
+
+LEDGER_RESERVED_LABELS = {
+    "Status",
+    "Date",
+    "Context",
+    "Decision",
+    "Consequences",
+    "Related",
+    "Owner",
+    "Risk",
+    "Impact",
+    "Mitigation",
+    "Review date",
+    "Detected",
+    "Affected environment",
+    "Timeline",
+    "Root cause",
+    "Follow-up work",
+    "Requirement or decision changes",
+    "Branch",
+    "Hypothesis",
+    "Expires",
+    "Success criteria",
+    "Failure criteria",
+    "Result",
+    "Follow-up",
+    "Closed",
+    "Closure evidence",
+    "Tag",
+    "Included work",
+    "Requirements affected",
+    "Verification",
+    "Production decision",
+    "Rollback or mitigation",
+    "Notes",
+}
+
+MANAGEMENT_LOCK_PATH = Path(tempfile.gettempdir()) / (
+    "bot-starter-kit-management-"
+    + hashlib.sha256(str(REPO_ROOT.resolve()).encode("utf-8")).hexdigest()[:16]
+    + ".lock"
+)
+_MANAGEMENT_THREAD_LOCK = threading.RLock()
+_MANAGEMENT_LOCK_STATE = threading.local()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -256,10 +447,41 @@ class WorkItem:
     body_lines: list[str] = dataclasses.field(default_factory=list)
     owner: str | None = None
     timeline: dict[str, str] = dataclasses.field(default_factory=dict)
+    block_events: list[BlockEvent] = dataclasses.field(default_factory=list)
+    gate_overrides: list[GateOverride] = dataclasses.field(default_factory=list)
+    history_exceptions: list[HistoryException] = dataclasses.field(default_factory=list)
 
     @property
     def body(self) -> str:
         return trim_blank_lines(self.body_lines)
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self.block_events and self.block_events[-1].action == "Blocked")
+
+
+@dataclasses.dataclass(frozen=True)
+class BlockEvent:
+    action: str
+    entered_at: str
+    reason: str
+    line: int
+
+
+@dataclasses.dataclass(frozen=True)
+class GateOverride:
+    target_state: str
+    entered_at: str
+    reason: str
+    line: int
+
+
+@dataclasses.dataclass(frozen=True)
+class HistoryException:
+    entered_at: str
+    missing_states: tuple[str, ...]
+    reason: str
+    line: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -359,6 +581,255 @@ def relative(path: Path) -> str:
         return str(path)
 
 
+def superseded_work_id(state: str) -> str | None:
+    prefix = "Superseded by "
+    return state[len(prefix) :] if state.startswith(prefix) else None
+
+
+def supersession_cycle_from(
+    model: ManagementModel,
+    start_id: str,
+    proposed_edge: tuple[str, str] | None = None,
+) -> list[str] | None:
+    positions: dict[str, int] = {}
+    chain: list[str] = []
+    current_id = start_id
+    while current_id in model.work_items:
+        if current_id in positions:
+            return [*chain[positions[current_id] :], current_id]
+        positions[current_id] = len(chain)
+        chain.append(current_id)
+        if proposed_edge and current_id == proposed_edge[0]:
+            current_id = proposed_edge[1]
+        else:
+            next_id = superseded_work_id(model.work_items[current_id].state)
+            if next_id is None:
+                return None
+            current_id = next_id
+    return None
+
+
+def normalized_supersession_cycle(cycle: list[str]) -> list[str]:
+    nodes = cycle[:-1]
+    start = min(range(len(nodes)), key=lambda index: nodes[index])
+    ordered = [*nodes[start:], *nodes[:start]]
+    return [*ordered, ordered[0]]
+
+
+def validate_supersession_cycles(model: ManagementModel) -> None:
+    reported: set[tuple[str, ...]] = set()
+    for work_item_id in sorted(model.work_items):
+        cycle = supersession_cycle_from(model, work_item_id)
+        if cycle is None:
+            continue
+        normalized = normalized_supersession_cycle(cycle)
+        key = tuple(normalized[:-1])
+        if key in reported:
+            continue
+        reported.add(key)
+        item = model.work_items[normalized[0]]
+        model.error(item.path, item.line, f"supersession cycle detected: {' -> '.join(normalized)}")
+
+
+def valid_state(state: str) -> bool:
+    work_id = superseded_work_id(state)
+    return state in VALID_STATE_SET or bool(work_id and WORK_ITEM_ID_RE.fullmatch(work_id))
+
+
+def terminal_state(state: str) -> bool:
+    return state in TERMINAL_STATES or superseded_work_id(state) is not None
+
+
+def state_order(state: str) -> int:
+    if superseded_work_id(state) is not None:
+        return len(VALID_STATES)
+    try:
+        return VALID_STATES.index(state)
+    except ValueError:
+        return len(VALID_STATES) + 1
+
+
+@contextlib.contextmanager
+def management_write_lock():
+    """Serialize management writers across threads and processes."""
+    with _MANAGEMENT_THREAD_LOCK:
+        depth = getattr(_MANAGEMENT_LOCK_STATE, "depth", 0)
+        if depth:
+            _MANAGEMENT_LOCK_STATE.depth = depth + 1
+            try:
+                yield
+            finally:
+                _MANAGEMENT_LOCK_STATE.depth -= 1
+            return
+
+        MANAGEMENT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with MANAGEMENT_LOCK_PATH.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _MANAGEMENT_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _MANAGEMENT_LOCK_STATE.depth = 0
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Replace a text file atomically while retaining its existing mode."""
+    with management_write_lock():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as temporary_file:
+                temporary_file.write(content)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            os.chmod(temporary_path, existing_mode)
+            os.replace(temporary_path, path)
+            directory_descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+
+def atomic_write_many(updates: dict[Path, str]) -> None:
+    """Commit related text replacements together, restoring every attempted path on failure."""
+    with management_write_lock():
+        originals = {
+            path: (path.exists(), path.read_bytes().decode("utf-8") if path.exists() else "")
+            for path in updates
+        }
+        pending = {
+            path: content
+            for path, content in updates.items()
+            if not originals[path][0] or content != originals[path][1]
+        }
+        attempted: list[Path] = []
+        try:
+            for path, content in pending.items():
+                attempted.append(path)
+                atomic_write_text(path, content)
+        except OSError as write_error:
+            rollback_errors: list[str] = []
+            for path in reversed(attempted):
+                existed, original = originals[path]
+                try:
+                    if existed:
+                        atomic_write_text(path, original)
+                    elif path.exists():
+                        path.unlink()
+                except OSError as rollback_error:
+                    rollback_errors.append(f"{relative(path)}: {rollback_error}")
+            if rollback_errors:
+                raise OSError(
+                    f"management transaction failed ({write_error}); rollback also failed for {'; '.join(rollback_errors)}"
+                ) from write_error
+            raise
+
+
+def canonical_repo_path(raw_path: str, allow_missing: bool = True) -> str:
+    if not raw_path or any(character in raw_path for character in "\r\n|`"):
+        raise ValueError(f"unsafe evidence path: {raw_path!r}")
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        raise ValueError(f"evidence path must be repository-relative: {raw_path}")
+    normalized = Path(os.path.normpath(raw_path))
+    if normalized == Path(".") or any(part == ".." for part in normalized.parts):
+        raise ValueError(f"evidence path escapes the repository: {raw_path}")
+    resolved_root = REPO_ROOT.resolve()
+    resolved = (REPO_ROOT / normalized).resolve(strict=False)
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as err:
+        raise ValueError(f"evidence path escapes the repository: {raw_path}") from err
+    if not allow_missing and not resolved.exists():
+        raise ValueError(f"evidence path does not exist: {normalized.as_posix()}")
+    return normalized.as_posix()
+
+
+def validate_markdown_table_field(value: str, field_name: str, *, forbid_backticks: bool = False) -> str:
+    if any(character in value for character in "\r\n|"):
+        raise ValueError(f"{field_name} cannot contain a newline or `|`")
+    if forbid_backticks and "`" in value:
+        raise ValueError(f"{field_name} cannot contain a backtick")
+    return value
+
+
+def is_placeholder_token(value: str) -> bool:
+    return PLACEHOLDER_TOKEN_RE.fullmatch(value.strip()) is not None
+
+
+def structured_ledger_heading_id(line: str) -> tuple[int, str] | None:
+    heading_match = MARKDOWN_HEADING_RE.match(line)
+    if heading_match is None:
+        return None
+    first_token = heading_match.group("body").split(maxsplit=1)[0]
+    raw_id = first_token.strip("`")
+    if (
+        raw_id.startswith(("DEC-", "RISK-", "INCIDENT-", "EXP-"))
+        or re.fullmatch(r"\d+(?:\.\d+)+(?:-[^\s]+)?", raw_id)
+        or raw_id == "<version>"
+    ):
+        return len(heading_match.group("hashes")), raw_id
+    return None
+
+
+def validate_single_line_markdown_field(
+    value: str,
+    field_name: str,
+    *,
+    forbid_backticks: bool = False,
+    forbidden_characters: str = "",
+) -> str:
+    if "\0" in value:
+        raise ValueError(f"{field_name} cannot contain NUL")
+    if any(character in value for character in "\r\n"):
+        raise ValueError(f"{field_name} must be a single line")
+    if forbid_backticks and "`" in value:
+        raise ValueError(f"{field_name} cannot contain a backtick because it is stored inside backticks")
+    present_delimiters = [character for character in forbidden_characters if character in value]
+    if present_delimiters:
+        rendered = ", ".join(f"`{character}`" for character in present_delimiters)
+        raise ValueError(f"{field_name} cannot contain structural delimiter(s): {rendered}")
+    return value
+
+
+def validate_ledger_record_title(value: str) -> str:
+    validate_single_line_markdown_field(value, "title")
+    if is_placeholder_token(value):
+        raise ValueError("title cannot be a placeholder-only token")
+    return value
+
+
+def validate_multiline_markdown_prose(value: str, field_name: str) -> str:
+    if "\0" in value:
+        raise ValueError(f"{field_name} cannot contain NUL")
+    for line in value.splitlines():
+        if MARKDOWN_HEADING_LINE_RE.match(line):
+            raise ValueError(f"{field_name} cannot contain a Markdown heading")
+        label, separator, _remainder = line.partition(":")
+        if separator and label in LEDGER_RESERVED_LABELS:
+            raise ValueError(f"{field_name} cannot contain reserved ledger label `{label}:`")
+        if TIMELINE_MARKER_RE.match(line):
+            raise ValueError(f"{field_name} cannot contain reserved timeline syntax")
+    return value
+
+
+def validate_backlog_body_line(value: str, field_name: str) -> str:
+    validate_single_line_markdown_field(value, field_name)
+    if (
+        MARKDOWN_HEADING_LINE_RE.match(value)
+        or TIMELINE_MARKER_RE.search(value)
+    ):
+        raise ValueError(f"{field_name} cannot contain backlog structural syntax")
+    return value
+
+
 def trim_blank_lines(lines: list[str]) -> str:
     start = 0
     end = len(lines)
@@ -429,6 +900,11 @@ def parse_requirement_file(model: ManagementModel, document: str, path: Path) ->
             active = requirement
             continue
 
+        if re.match(r"^#{2,6}\s+\d", line):
+            model.error(path, line_number, "malformed numbered requirement heading; expected `## 01) Title` or `### 01.a) Title`")
+            active = None
+            continue
+
         if active is not None:
             active.body_lines.append(line)
 
@@ -442,14 +918,6 @@ def parse_backlog_file(model: ManagementModel, document: str, path: Path) -> Non
     active: WorkItem | None = None
 
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        state_match = STATE_HEADING_RE.match(line)
-        if state_match and not line.startswith("##"):
-            current_state = strip_state(state_match.group("state"))
-            active = None
-            if current_state not in VALID_STATE_SET:
-                model.warning(path, line_number, f'unknown backlog state "{current_state}"')
-            continue
-
         work_match = WORK_ITEM_RE.match(line)
         if work_match:
             active = None
@@ -483,9 +951,17 @@ def parse_backlog_file(model: ManagementModel, document: str, path: Path) -> Non
             active = item
             continue
 
-        if line.startswith("## "):
+        if WORK_ITEM_HEADING_LIKE_RE.match(line) or line.startswith("## "):
             model.error(path, line_number, "invalid work item heading; expected `## <ID> -- <title>`")
             active = None
+            continue
+
+        state_match = STATE_HEADING_RE.match(line)
+        if state_match and not line.startswith("##"):
+            current_state = strip_state(state_match.group("state"))
+            active = None
+            if not valid_state(current_state):
+                model.warning(path, line_number, f'unknown backlog state "{current_state}"')
             continue
 
         if active is not None:
@@ -496,7 +972,70 @@ def parse_backlog_file(model: ManagementModel, document: str, path: Path) -> Non
 
 
 def parse_work_timeline(model: ManagementModel, item: WorkItem) -> None:
-    for body_line in item.body_lines:
+    blocked = False
+    previous_block_date: str | None = None
+    previous_timeline_date: str | None = None
+    for offset, body_line in enumerate(item.body_lines, start=1):
+        history_exception_match = HISTORY_EXCEPTION_RE.search(body_line)
+        if history_exception_match:
+            entered_at = history_exception_match.group("date")
+            reason = history_exception_match.group("reason").strip()
+            missing_states = tuple(state.strip() for state in history_exception_match.group("missing").split(",") if state.strip())
+            try:
+                validate_iso_date(entered_at)
+            except ValueError as err:
+                model.error(item.path, item.line + offset, str(err))
+            if not missing_states or any(state not in VALID_STATE_SET or terminal_state(state) for state in missing_states):
+                model.error(item.path, item.line + offset, "history exception names an invalid missing lifecycle state")
+            if not reason:
+                model.error(item.path, item.line + offset, "history exception requires a reason")
+            item.history_exceptions.append(HistoryException(entered_at, missing_states, reason, item.line + offset))
+            continue
+        if HISTORY_EXCEPTION_PREFIX_RE.search(body_line):
+            model.error(item.path, item.line + offset, "malformed history exception")
+            continue
+        override_match = GATE_OVERRIDE_RE.search(body_line)
+        if override_match:
+            entered_at = override_match.group("date")
+            reason = override_match.group("reason").strip()
+            try:
+                validate_iso_date(entered_at)
+            except ValueError as err:
+                model.error(item.path, item.line + offset, str(err))
+            if not reason:
+                model.error(item.path, item.line + offset, "gate override requires a reason")
+            item.gate_overrides.append(
+                GateOverride(override_match.group("state"), entered_at, reason, item.line + offset)
+            )
+            continue
+        if GATE_OVERRIDE_PREFIX_RE.search(body_line):
+            model.error(item.path, item.line + offset, "malformed gate override history")
+            continue
+        block_match = BLOCK_EVENT_RE.search(body_line)
+        if block_match:
+            action = block_match.group("action")
+            entered_at = block_match.group("date")
+            reason = block_match.group("reason").strip()
+            line = item.line + offset
+            try:
+                validate_iso_date(entered_at)
+            except ValueError as err:
+                model.error(item.path, line, str(err))
+            if previous_block_date and entered_at < previous_block_date:
+                model.error(item.path, line, "block history dates must be append-only and nondecreasing")
+            if action == "Blocked" and blocked:
+                model.error(item.path, line, "work item is already blocked; append Unblocked before another Blocked event")
+            if action == "Unblocked" and not blocked:
+                model.error(item.path, line, "work item is not blocked; Unblocked has no preceding Blocked event")
+            blocked = action == "Blocked"
+            previous_block_date = entered_at
+            if not reason:
+                model.error(item.path, line, "block history event requires a reason")
+            item.block_events.append(BlockEvent(action, entered_at, reason, line))
+            continue
+        if BLOCK_EVENT_PREFIX_RE.search(body_line):
+            model.error(item.path, item.line + offset, "malformed block history; expected `==> Blocked|Unblocked: YYYY-MM-DD; Reason: ...`")
+            continue
         marker_match = TIMELINE_MARKER_RE.search(body_line)
         if not marker_match:
             continue
@@ -505,10 +1044,86 @@ def parse_work_timeline(model: ManagementModel, item: WorkItem) -> None:
         if owner_match and TIMELINE_STATE_RE.search(trail[owner_match.end() :]):
             item.owner = owner_match.group("owner").strip()
         for state_match in TIMELINE_STATE_RE.finditer(trail):
-            item.timeline[state_match.group("state")] = state_match.group("date")
+            state = state_match.group("state")
+            entered_at = state_match.group("date")
+            if state in item.timeline:
+                model.error(item.path, item.line + offset, f"duplicate timeline state {state}")
+            try:
+                validate_iso_date(entered_at)
+            except ValueError as err:
+                model.error(item.path, item.line + offset, str(err))
+            if previous_timeline_date and entered_at < previous_timeline_date:
+                model.error(item.path, item.line + offset, "lifecycle state dates must be nondecreasing")
+            previous_timeline_date = entered_at
+            item.timeline[state] = entered_at
 
-    if item.state in VALID_STATE_SET and item.state not in item.timeline:
+    if valid_state(item.state) and item.state not in item.timeline:
         model.warning(item.path, item.line, f"{item.id} is in state {item.state}, but has no dated `{item.state}: YYYY-MM-DD` status trail")
+    validate_recorded_work_history(model, item)
+
+
+def lifecycle_path(start: str, target: str) -> list[str] | None:
+    if start == target:
+        return [start]
+    queue: list[list[str]] = [[start]]
+    seen = {start}
+    while queue:
+        path = queue.pop(0)
+        for next_state in sorted(ALLOWED_STATE_TRANSITIONS.get(path[-1], set()), key=state_order):
+            if next_state in seen:
+                continue
+            candidate = [*path, next_state]
+            if next_state == target:
+                return candidate
+            seen.add(next_state)
+            queue.append(candidate)
+    return None
+
+
+def validate_recorded_work_history(model: ManagementModel, item: WorkItem) -> None:
+    states = list(item.timeline)
+    required_missing_states: list[str] = []
+    for previous, current in zip(states, states[1:]):
+        if terminal_state(previous):
+            model.error(item.path, item.line, f"terminal lifecycle state {previous} is followed by {current}")
+            continue
+        if current in {"Rejected", "Cancelled"} or superseded_work_id(current):
+            continue
+        if current in ALLOWED_STATE_TRANSITIONS.get(previous, set()):
+            continue
+        path = lifecycle_path(previous, current)
+        if path is None:
+            model.error(item.path, item.line, f"recorded lifecycle transition {previous} -> {current} is backward or invalid")
+            continue
+        required_missing_states.extend(path[1:-1])
+
+    if states and item.state in item.timeline and states[-1] != item.state:
+        model.error(item.path, item.line, f"current backlog state {item.state} is not the final recorded lifecycle state {states[-1]}")
+
+    exception_states = [state for exception in item.history_exceptions for state in exception.missing_states]
+    if sorted(exception_states) != sorted(required_missing_states):
+        if required_missing_states:
+            missing = ", ".join(required_missing_states)
+            model.error(item.path, item.line, f"recorded lifecycle history skips {missing}; add an exact History exception marker")
+        if exception_states:
+            extra = ", ".join(exception_states)
+            model.error(item.path, item.line, f"history exception is unneeded or does not match the skipped lifecycle states: {extra}")
+
+    latest_timeline_date = max(item.timeline.values(), default=None)
+    for exception in item.history_exceptions:
+        if latest_timeline_date and exception.entered_at < latest_timeline_date:
+            model.error(item.path, exception.line, f"history exception date {exception.entered_at} predates lifecycle history through {latest_timeline_date}")
+
+    seen_overrides: set[str] = set()
+    for override in item.gate_overrides:
+        if override.target_state in seen_overrides:
+            model.error(item.path, override.line, f"duplicate gate override for {override.target_state}")
+        seen_overrides.add(override.target_state)
+        target_date = item.timeline.get(override.target_state)
+        if target_date is None:
+            model.error(item.path, override.line, f"gate override targets unrecorded lifecycle state {override.target_state}")
+        elif target_date != override.entered_at:
+            model.error(item.path, override.line, f"gate override date {override.entered_at} does not match {override.target_state}: {target_date}")
 
 
 def load_model() -> ManagementModel:
@@ -520,7 +1135,7 @@ def load_model() -> ManagementModel:
     for document, name in BACKLOG_FILES.items():
         parse_backlog_file(model, document, MANAGEMENT_DIR / name)
 
-    for name in SUPPORTING_FILES:
+    for name in [*SUPPORTING_FILES, *GOVERNANCE_FILES]:
         path = MANAGEMENT_DIR / name
         if not path.exists():
             model.error(path, 1, "missing supporting management file")
@@ -528,6 +1143,18 @@ def load_model() -> ManagementModel:
     for item in model.work_items.values():
         if item.requirement_id not in model.requirements:
             model.error(item.path, item.line, f"{item.id} references missing requirement {item.requirement_id}")
+        for state in {item.state, *item.timeline.keys()}:
+            superseding_id = superseded_work_id(state)
+            if not superseding_id:
+                continue
+            if superseding_id == item.id:
+                model.error(item.path, item.line, f"{item.id} cannot supersede itself")
+            elif superseding_id not in model.work_items:
+                model.error(item.path, item.line, f"superseding work item {superseding_id} was not found in any backlog")
+
+    validate_supersession_cycles(model)
+    validate_traceability(model)
+    validate_supporting_ledgers(model)
 
     return model
 
@@ -537,6 +1164,11 @@ def current_branch() -> str:
     if not branch:
         raise RuntimeError("git is in detached HEAD; pass a branch or work item explicitly")
     return branch
+
+
+def current_branch_or_none() -> str | None:
+    branch = git_output(["branch", "--show-current"])
+    return branch or None
 
 
 def git_result(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -588,7 +1220,7 @@ def changed_files(base_ref: str | None) -> tuple[list[str], list[str]]:
     files.update(git_name_list(["diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD"]))
     files.update(git_name_list(["diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB"]))
 
-    status = git_output(["status", "--porcelain"])
+    status = git_output(["status", "--porcelain", "-uall"])
     for line in status.splitlines():
         if len(line) < 4:
             continue
@@ -711,6 +1343,8 @@ def print_evidence_line(title: str, evidence: list[str], status_if_missing: str,
 
 
 def limited(paths: list[str], limit: int = 8) -> list[str]:
+    if limit <= 0:
+        return paths
     if len(paths) <= limit:
         return paths
     remaining = len(paths) - limit
@@ -743,18 +1377,22 @@ def resolve_work_item(model: ManagementModel, raw_ref: str | None) -> tuple[str,
 
 
 def validate_iso_date(raw_date: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date):
+        raise ValueError(f"invalid date {raw_date}; expected YYYY-MM-DD")
     try:
-        datetime.strptime(raw_date, "%Y-%m-%d")
+        parsed = datetime.strptime(raw_date, "%Y-%m-%d")
     except ValueError as err:
         raise ValueError(f"invalid date {raw_date}; expected YYYY-MM-DD") from err
+    if parsed.strftime("%Y-%m-%d") != raw_date:
+        raise ValueError(f"invalid date {raw_date}; expected YYYY-MM-DD")
     return raw_date
 
 
 def target_state_for(item: WorkItem, raw_state: str | None) -> str:
     if raw_state:
         state = strip_state(raw_state)
-        if state not in VALID_STATE_SET:
-            valid = ", ".join(VALID_STATES)
+        if not valid_state(state):
+            valid = ", ".join([*VALID_STATES, "Superseded by <existing work item id>"])
             raise ValueError(f"invalid target state {raw_state}; expected one of: {valid}")
         return state
 
@@ -762,6 +1400,82 @@ def target_state_for(item: WorkItem, raw_state: str | None) -> str:
     if state is None:
         raise ValueError(f"{item.id} is in state {item.state}; no default next state is defined")
     return state
+
+
+def validate_state_transition(model: ManagementModel, item: WorkItem, target_state: str, state_date: str) -> None:
+    if target_state == item.state:
+        return
+    if item.blocked:
+        raise ValueError(f"{item.id} is blocked; append an Unblocked event before advancing its lifecycle state")
+    if terminal_state(item.state):
+        raise ValueError(f"{item.id} is in terminal state {item.state}; it cannot transition to {target_state}")
+    superseding_id = superseded_work_id(target_state)
+    if superseding_id:
+        if superseding_id == item.id:
+            raise ValueError(f"{item.id} cannot supersede itself")
+        if superseding_id not in model.work_items:
+            raise ValueError(f"superseding work item {superseding_id} was not found in any backlog")
+        cycle = supersession_cycle_from(model, item.id, (item.id, superseding_id))
+        if cycle:
+            raise ValueError(f"supersession cycle detected: {' -> '.join(cycle)}")
+    elif target_state not in {"Rejected", "Cancelled"} and target_state not in ALLOWED_STATE_TRANSITIONS.get(item.state, set()):
+        allowed = sorted(ALLOWED_STATE_TRANSITIONS.get(item.state, set()))
+        allowed.extend(["Rejected", "Cancelled", "Superseded by <existing work item id>"])
+        raise ValueError(f"invalid transition {item.state} -> {target_state}; allowed targets: {', '.join(allowed)}")
+
+    historical_dates = [
+        *item.timeline.values(),
+        *(event.entered_at for event in item.block_events),
+        *(event.entered_at for event in item.gate_overrides),
+    ]
+    if historical_dates and state_date < max(historical_dates):
+        raise ValueError(f"state date {state_date} predates existing history through {max(historical_dates)}")
+
+
+def deterministic_gate_failures(item: WorkItem, target_state: str) -> list[str]:
+    if target_state not in {"Merged", "Rolled Out"}:
+        return []
+    links = [link for link in traceability_links() if link.work_item_id == item.id]
+    failures: list[str] = []
+    paths = sorted({path for link in links for path in evidence_paths(link)})
+    existing_paths: list[str] = []
+    for path in paths:
+        try:
+            canonical = canonical_repo_path(path)
+        except ValueError:
+            continue
+        if (REPO_ROOT / canonical).exists():
+            existing_paths.append(canonical)
+    if not links:
+        failures.append(f"{item.id} has no TRACEABILITY.md row")
+    if not existing_paths:
+        failures.append(f"{item.id} has no existing concrete evidence path")
+    if target_state == "Rolled Out":
+        releases_path = MANAGEMENT_DIR / "RELEASES.md"
+        released_entries = []
+        if releases_path.exists():
+            for entry in ledger_entries(releases_path):
+                production_decision = _ledger_section(entry, "Production decision").splitlines()[0].strip("` ") if _ledger_section(entry, "Production decision") else ""
+                if (
+                    not release_entry_schema_errors(entry)
+                    and production_decision == "Released"
+                    and item.id in release_entry_work_ids(entry)
+                ):
+                    released_entries.append(entry)
+        if not released_entries:
+            failures.append(f"{item.id} is not included in a schema-valid Released entry in RELEASES.md")
+        operational_paths = [path for path in existing_paths if operations_evidence_file(path)]
+        if not operational_paths:
+            failures.append(f"{item.id} has no linked operational or release evidence path")
+    return failures
+
+
+def require_main_for_mutation(dry_run: bool) -> None:
+    if dry_run:
+        return
+    branch = current_branch()
+    if branch != "main":
+        raise RuntimeError(f"management mutation requires branch main; current branch is {branch}. Use --dry-run to inspect it here.")
 
 
 def state_heading(state: str) -> str:
@@ -824,7 +1538,7 @@ def update_work_block_timeline(block: list[str], item: WorkItem, target_state: s
 
     for index, line in enumerate(updated):
         marker_match = TIMELINE_MARKER_RE.search(line)
-        if marker_match:
+        if marker_match and TIMELINE_STATE_RE.search(marker_match.group("trail")):
             timeline_index = index
             indent = line[: marker_match.start()]
 
@@ -844,12 +1558,11 @@ def ensure_state_section(lines: list[str], state: str) -> list[str]:
         return lines
 
     heading = f"{state_heading(state)}\n"
-    state_order = {value: index for index, value in enumerate(VALID_STATES)}
-    target_order = state_order[state]
+    target_order = state_order(state)
 
     insert_index = len(lines)
     for section_state, start, _end in backlog_sections(lines):
-        if state_order.get(section_state, 999) > target_order:
+        if state_order(section_state) > target_order:
             insert_index = start
             break
 
@@ -893,15 +1606,25 @@ def normalize_moved_block(block: list[str]) -> list[str]:
     return normalized
 
 
-def replace_or_move_work_item(item: WorkItem, target_state: str, state_date: str, engineer: str | None) -> None:
+def render_work_item_transition(
+    item: WorkItem,
+    target_state: str,
+    state_date: str,
+    engineer: str | None,
+    override_reason: str | None,
+) -> str:
     lines = item.path.read_text(encoding="utf-8").splitlines(keepends=True)
     start, end = find_work_block(lines, item.id)
     block = update_work_block_timeline(lines[start:end], item, target_state, state_date, engineer)
+    if override_reason:
+        insert_index = len(block)
+        while insert_index > 1 and not block[insert_index - 1].strip():
+            insert_index -= 1
+        block.insert(insert_index, f"==> Gate override for {target_state}: {state_date}; Reason: {override_reason}\n")
 
     if target_state == item.state:
         lines[start:end] = block
-        item.path.write_text("".join(lines), encoding="utf-8")
-        return
+        return "".join(lines)
 
     del lines[start:end]
     lines = ensure_state_section(lines, target_state)
@@ -909,7 +1632,36 @@ def replace_or_move_work_item(item: WorkItem, target_state: str, state_date: str
     normalized_block = normalize_moved_block(block)
     insertion = ["\n", *normalized_block, "\n"]
     lines[insert_index:insert_index] = insertion
-    item.path.write_text("".join(lines), encoding="utf-8")
+    return "".join(lines)
+
+
+def render_traceability_work_state(work_item_id: str, target_state: str) -> str | None:
+    path = MANAGEMENT_DIR / "TRACEABILITY.md"
+    if not path.exists():
+        return None
+    lines = path.read_text(encoding="utf-8").splitlines()
+    changed = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("| `"):
+            continue
+        columns = [column.strip() for column in stripped.strip("|").split("|")]
+        if len(columns) != 4 or columns[1].strip("`") != work_item_id:
+            continue
+        lines[index] = f"| {columns[0]} | {columns[1]} | {target_state} | {columns[3]} |"
+        changed = True
+    return "\n".join(lines).rstrip() + "\n" if changed else None
+
+
+def append_block_event(item: WorkItem, action: str, event_date: str, reason: str) -> None:
+    with management_write_lock():
+        lines = item.path.read_text(encoding="utf-8").splitlines(keepends=True)
+        start, end = find_work_block(lines, item.id)
+        insert_index = end
+        while insert_index > start + 1 and not lines[insert_index - 1].strip():
+            insert_index -= 1
+        lines.insert(insert_index, f"==> {action}: {event_date}; Reason: {reason}\n")
+        atomic_write_text(item.path, "".join(lines))
 
 
 def print_requirement(requirement: Requirement) -> None:
@@ -931,6 +1683,15 @@ def print_work_item(model: ManagementModel, item: WorkItem) -> None:
     if item.timeline:
         timeline = "; ".join(f"{state}: {date}" for state, date in item.timeline.items())
         print(f"Timeline:    {timeline}")
+    if item.block_events:
+        print(f"Blocked:     {'yes' if item.blocked else 'no'}")
+        block_history = "; ".join(f"{event.action}: {event.entered_at} ({event.reason})" for event in item.block_events)
+        print(f"Block trail: {block_history}")
+    if item.gate_overrides:
+        override_history = "; ".join(
+            f"{event.target_state}: {event.entered_at} ({event.reason})" for event in item.gate_overrides
+        )
+        print(f"Overrides:   {override_history}")
     if item.body:
         print()
         print(item.body)
@@ -980,7 +1741,7 @@ def completed_work_items(items: list[WorkItem]) -> list[WorkItem]:
 
 
 def open_work_items(items: list[WorkItem]) -> list[WorkItem]:
-    return [item for item in items if item.state not in {"Merged", "Rolled Out", "Rejected", "Cancelled"}]
+    return [item for item in items if item.state != "Merged" and not terminal_state(item.state)]
 
 
 def words_in(text: str) -> list[str]:
@@ -1009,6 +1770,15 @@ def requirement_work_items(model: ManagementModel, requirement: Requirement) -> 
 
 def requirement_matches_id(requirement: Requirement, candidate_id: str) -> bool:
     return candidate_id == requirement.id or (not requirement.subtopics and candidate_id.startswith(f"{requirement.id}."))
+
+
+def descendant_requirements(model: ManagementModel, requirement: Requirement) -> list[Requirement]:
+    if requirement.subtopics:
+        return []
+    return sorted(
+        [candidate for candidate in model.requirements.values() if candidate.id.startswith(f"{requirement.id}.")],
+        key=lambda candidate: candidate.id,
+    )
 
 
 def traceability_status(requirement: Requirement, traceability: str) -> str:
@@ -1209,7 +1979,7 @@ def source_files_mentioning(terms: list[str], limit: int, implementation_only: b
         content = read_repo_file(path).lower()
         if content and any(term in content for term in lowered_terms):
             mentions.append(path)
-        if len(mentions) >= limit:
+        if limit > 0 and len(mentions) >= limit:
             break
     return mentions
 
@@ -1354,6 +2124,50 @@ def chase_tech_debts(limit: int, long_file_lines: int) -> list[TechDebtFinding]:
     return findings if limit <= 0 else findings[:limit]
 
 
+def validate_ledger_entry_headings(model: ManagementModel, path: Path) -> None:
+    expected_level = LEDGER_ENTRY_LEVELS[path.name]
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        candidate = structured_ledger_heading_id(line)
+        if candidate is None:
+            continue
+        level, entry_id = candidate
+        if level != expected_level:
+            model.error(
+                path,
+                line_number,
+                f"ledger entry {entry_id} uses Markdown heading level {level}; expected level {expected_level}",
+            )
+        elif LEDGER_HEADING_RE.fullmatch(line) is None:
+            model.error(path, line_number, f"malformed ledger entry heading for {entry_id}; expected `<ID> -- <title>`")
+
+
+def is_documentation_template_entry(
+    path: Path,
+    lines: list[str],
+    start: int,
+    match: re.Match[str],
+    body: str,
+) -> bool:
+    template = LEDGER_DOCUMENTATION_TEMPLATES.get(path.name)
+    if template is None:
+        return False
+    enclosing_section = None
+    for line in reversed(lines[:start]):
+        section_match = LEVEL_TWO_HEADING_RE.match(line)
+        if section_match:
+            enclosing_section = section_match.group("title")
+            break
+    raw_id = match.group("id").strip("`")
+    title = match.group("title").strip().strip("`")
+    body_lines = tuple(line for line in body.splitlines() if line)
+    return (
+        enclosing_section == template["section"]
+        and raw_id == template["id"]
+        and title == template["title"]
+        and body_lines == template["body_lines"]
+    )
+
+
 def ledger_entries(path: Path) -> list[LedgerEntry]:
     if not path.exists():
         return []
@@ -1366,11 +2180,11 @@ def ledger_entries(path: Path) -> list[LedgerEntry]:
 
     entries: list[LedgerEntry] = []
     for position, (start, match) in enumerate(starts):
-        if "<" in match.group("title"):
-            continue
         end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
         body_lines = lines[start + 1 : end]
         body = "\n".join(body_lines).strip()
+        if is_documentation_template_entry(path, lines, start, match, body):
+            continue
         status_match = re.search(r"^Status:\s*(?P<status>.+?)\s*$", body, flags=re.MULTILINE)
         raw_id = match.group("id").strip("`")
         entries.append(
@@ -1386,6 +2200,195 @@ def ledger_entries(path: Path) -> list[LedgerEntry]:
     return entries
 
 
+def validate_traceability(model: ManagementModel) -> None:
+    path = MANAGEMENT_DIR / "TRACEABILITY.md"
+    if not path.exists():
+        return
+    seen_pairs: dict[tuple[str, str], int] = {}
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped.startswith("|") or stripped.startswith("| ---") or stripped.startswith("| Requirement"):
+            continue
+        if "<" in stripped and ">" in stripped:
+            continue
+        columns = [column.strip() for column in stripped.strip("|").split("|")]
+        if len(columns) != 4:
+            model.error(path, line_number, "traceability row must contain exactly four Markdown-table fields")
+            continue
+        requirement_column, work_column, state, evidence = columns
+        requirement_match = re.fullmatch(r"`([^`]+)`", requirement_column)
+        work_match = re.fullmatch(r"`([^`]+)`", work_column)
+        if not requirement_match or not work_match:
+            model.error(path, line_number, "traceability requirement and work item ids must each use one backtick-delimited value")
+            continue
+        requirement_id_value = requirement_match.group(1)
+        work_item_id = work_match.group(1)
+        pair = (requirement_id_value, work_item_id)
+        if pair in seen_pairs:
+            model.error(path, line_number, f"duplicate traceability pair {requirement_id_value} -> {work_item_id}; first used at line {seen_pairs[pair]}")
+        else:
+            seen_pairs[pair] = line_number
+        requirement = model.requirements.get(requirement_id_value)
+        work_item = model.work_items.get(work_item_id)
+        if requirement is None:
+            model.error(path, line_number, f"traceability references missing requirement {requirement_id_value}")
+        if work_item is None:
+            model.error(path, line_number, f"traceability references missing work item {work_item_id}")
+        if requirement and work_item and not requirement_matches_id(requirement, work_item.requirement_id):
+            model.error(path, line_number, f"{work_item_id} maps to {work_item.requirement_id}, not {requirement_id_value}")
+        if work_item and state != work_item.state:
+            model.error(path, line_number, f"traceability state {state} does not match {work_item_id} backlog state {work_item.state}")
+        for evidence_path in re.findall(r"`([^`]+)`", evidence):
+            if "/" not in evidence_path and "." not in Path(evidence_path).name:
+                continue
+            try:
+                canonical = canonical_repo_path(evidence_path)
+            except ValueError as err:
+                model.error(path, line_number, str(err))
+                continue
+            if canonical != evidence_path:
+                model.error(path, line_number, f"evidence path is not canonical: {evidence_path}; use {canonical}")
+            elif not (REPO_ROOT / canonical).exists():
+                model.warning(path, line_number, f"traceability evidence path does not exist: {canonical}")
+
+
+def _ledger_has_label(entry: LedgerEntry, label: str) -> bool:
+    return re.search(rf"^{re.escape(label)}:\s*(?:.*|\n.+)$", entry.body, flags=re.MULTILINE) is not None
+
+
+def _ledger_field(entry: LedgerEntry, label: str) -> str | None:
+    match = re.search(rf"^{re.escape(label)}:\s*(?P<value>.*?)\s*$", entry.body, flags=re.MULTILINE)
+    return match.group("value").strip("` ") if match else None
+
+
+def _ledger_section(entry: LedgerEntry, label: str) -> str:
+    match = re.search(
+        rf"^{re.escape(label)}:\s*(?P<value>.*(?:\n(?![A-Z][A-Za-z ]+:).*)*)",
+        entry.body,
+        flags=re.MULTILINE,
+    )
+    return match.group("value").strip() if match else ""
+
+
+def _structured_references(text: str) -> set[str]:
+    candidates = set(re.findall(r"`([^`]+)`", text))
+    return {
+        candidate
+        for candidate in candidates
+        if re.fullmatch(r"(?:[BEO]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*|[BEO][NRFX]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*-\d{3}|(?:DEC|RISK|INCIDENT|EXP)-\d{4})", candidate)
+    }
+
+
+def release_entry_schema_errors(entry: LedgerEntry) -> list[str]:
+    errors: list[str] = []
+    try:
+        validate_release_version(entry.id)
+        validate_iso_date(entry.title.strip("`"))
+    except ValueError as err:
+        errors.append(str(err))
+    for label in RELEASE_REQUIRED_LABELS:
+        if not _ledger_has_label(entry, label):
+            errors.append(f"release {entry.id} is missing `{label}:`")
+    production_decision = _ledger_section(entry, "Production decision").splitlines()[0].strip("` ") if _ledger_section(entry, "Production decision") else ""
+    if production_decision not in {"Released", "Rejected", "Rolled back"}:
+        errors.append(f"release {entry.id} has invalid production decision {production_decision!r}")
+    return errors
+
+
+def release_entry_work_ids(entry: LedgerEntry) -> set[str]:
+    return set(
+        re.findall(
+            r"\b[BEO][NRFX]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*-\d{3}\b",
+            _ledger_section(entry, "Included work"),
+        )
+    )
+
+
+def validate_supporting_ledgers(model: ManagementModel) -> None:
+    required_labels = {
+        "DECISIONS.md": ["Context", "Decision", "Consequences", "Related"],
+        "RISKS.md": ["Owner", "Related", "Risk", "Impact", "Mitigation"],
+        "INCIDENTS.md": ["Detected", "Affected environment", "Impact", "Timeline", "Root cause", "Mitigation", "Follow-up work", "Requirement or decision changes"],
+        "EXPERIMENTS.md": ["Branch", "Hypothesis", "Expires", "Success criteria", "Failure criteria", "Result", "Follow-up"],
+    }
+    prefixes = {
+        "DECISIONS.md": "DEC-",
+        "RISKS.md": "RISK-",
+        "INCIDENTS.md": "INCIDENT-",
+        "EXPERIMENTS.md": "EXP-",
+    }
+    for filename in LEDGER_ENTRY_LEVELS:
+        path = MANAGEMENT_DIR / filename
+        if path.exists():
+            validate_ledger_entry_headings(model, path)
+    entries_by_file = {
+        filename: ledger_entries(MANAGEMENT_DIR / filename)
+        for filename in SAFE_LEDGER_STATUSES
+        if (MANAGEMENT_DIR / filename).exists()
+    }
+    known_ledger_ids = {entry.id for entries in entries_by_file.values() for entry in entries}
+    for filename, statuses in SAFE_LEDGER_STATUSES.items():
+        path = MANAGEMENT_DIR / filename
+        if not path.exists():
+            continue
+        seen_ids: set[str] = set()
+        for entry in entries_by_file[filename]:
+            if entry.id in seen_ids:
+                model.error(path, entry.line, f"duplicate ledger id {entry.id}")
+            seen_ids.add(entry.id)
+            if re.fullmatch(rf"{re.escape(prefixes[filename])}\d{{4}}", entry.id) is None:
+                model.error(path, entry.line, f"unexpected {filename} entry id {entry.id}")
+            if entry.status not in statuses:
+                model.error(path, entry.line, f"{entry.id} has invalid or missing status {entry.status!r}; expected one of: {', '.join(sorted(statuses))}")
+            for label in required_labels[filename]:
+                if not _ledger_has_label(entry, label):
+                    model.error(path, entry.line, f"{entry.id} is missing `{label}:`")
+            if filename == "DECISIONS.md":
+                raw_date = _ledger_field(entry, "Date")
+                if raw_date is None:
+                    model.error(path, entry.line, f"{entry.id} is missing `Date:`")
+                else:
+                    try:
+                        validate_iso_date(raw_date)
+                    except ValueError as err:
+                        model.error(path, entry.line, str(err))
+            if filename == "EXPERIMENTS.md":
+                expires = _ledger_field(entry, "Expires")
+                if expires:
+                    try:
+                        validate_iso_date(expires)
+                    except ValueError as err:
+                        model.error(path, entry.line, str(err))
+            reference_labels = ["Related", "Follow-up", "Follow-up work", "Requirement or decision changes"]
+            for label in reference_labels:
+                for reference in _structured_references(_ledger_section(entry, label)):
+                    if reference.startswith(("DEC-", "RISK-", "INCIDENT-", "EXP-")):
+                        exists = reference in known_ledger_ids
+                    elif WORK_ITEM_ID_RE.fullmatch(reference):
+                        exists = reference in model.work_items
+                    else:
+                        exists = reference in model.requirements
+                    if not exists:
+                        model.error(path, entry.line, f"{entry.id} {label} references missing structured id {reference}")
+
+    releases_path = MANAGEMENT_DIR / "RELEASES.md"
+    if releases_path.exists():
+        seen_versions: set[str] = set()
+        for entry in ledger_entries(releases_path):
+            if entry.id in seen_versions:
+                model.error(releases_path, entry.line, f"duplicate release version {entry.id}")
+            seen_versions.add(entry.id)
+            for error in release_entry_schema_errors(entry):
+                model.error(releases_path, entry.line, error)
+            included_work = release_entry_work_ids(entry)
+            for work_item_id in included_work:
+                if work_item_id not in model.work_items:
+                    model.error(releases_path, entry.line, f"release {entry.id} references missing work item {work_item_id}")
+            for requirement_id_value in requirement_references(_ledger_section(entry, "Requirements affected")):
+                if requirement_id_value not in model.requirements:
+                    model.error(releases_path, entry.line, f"release {entry.id} references missing requirement {requirement_id_value}")
+
+
 def next_ledger_id(entries: list[LedgerEntry], prefix: str) -> str:
     highest = 0
     for entry in entries:
@@ -1396,42 +2399,45 @@ def next_ledger_id(entries: list[LedgerEntry], prefix: str) -> str:
 
 
 def append_markdown_entry(path: Path, entry: str) -> None:
-    content = path.read_text(encoding="utf-8") if path.exists() else ""
-    separator = "\n\n" if content.rstrip() else ""
-    path.write_text(f"{content.rstrip()}{separator}{entry.rstrip()}\n", encoding="utf-8")
+    with management_write_lock():
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        separator = "\n\n" if content.rstrip() else ""
+        atomic_write_text(path, f"{content.rstrip()}{separator}{entry.rstrip()}\n")
 
 
 def insert_markdown_entry_before(path: Path, marker: str, entry: str) -> None:
-    content = path.read_text(encoding="utf-8") if path.exists() else ""
-    marker_index = content.find(marker)
-    if marker_index < 0:
-        append_markdown_entry(path, entry)
-        return
-    before = content[:marker_index].rstrip()
-    after = content[marker_index:].lstrip("\n")
-    path.write_text(f"{before}\n\n{entry.rstrip()}\n\n{after}", encoding="utf-8")
+    with management_write_lock():
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        marker_index = content.find(marker)
+        if marker_index < 0:
+            append_markdown_entry(path, entry)
+            return
+        before = content[:marker_index].rstrip()
+        after = content[marker_index:].lstrip("\n")
+        atomic_write_text(path, f"{before}\n\n{entry.rstrip()}\n\n{after}")
 
 
 def replace_ledger_entry(path: Path, entry_id: str, replacement_body: str) -> bool:
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    start: int | None = None
-    for index, line in enumerate(lines):
-        match = LEDGER_HEADING_RE.match(line.rstrip("\n"))
-        if match and match.group("id").strip("`") == entry_id:
-            start = index
-            break
-    if start is None:
-        return False
+    with management_write_lock():
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        start: int | None = None
+        for index, line in enumerate(lines):
+            match = LEDGER_HEADING_RE.match(line.rstrip("\n"))
+            if match and match.group("id").strip("`") == entry_id:
+                start = index
+                break
+        if start is None:
+            return False
 
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        if LEDGER_HEADING_RE.match(lines[index].rstrip("\n")):
-            end = index
-            break
-    replacement_lines = [line if line.endswith("\n") else f"{line}\n" for line in replacement_body.rstrip().splitlines()]
-    lines[start:end] = [*replacement_lines, "\n"]
-    path.write_text("".join(lines), encoding="utf-8")
-    return True
+        end = len(lines)
+        for index in range(start + 1, len(lines)):
+            if LEDGER_HEADING_RE.match(lines[index].rstrip("\n")):
+                end = index
+                break
+        replacement_lines = [line if line.endswith("\n") else f"{line}\n" for line in replacement_body.rstrip().splitlines()]
+        lines[start:end] = [*replacement_lines, "\n"]
+        atomic_write_text(path, "".join(lines))
+        return True
 
 
 def update_ledger_status(entry: LedgerEntry, status: str, closure_lines: list[str]) -> None:
@@ -1621,7 +2627,7 @@ def render_management_dashboard(output_dir: Path, model: ManagementModel, stale_
 <section><h2>Tech Debt Leads</h2>{html_table(["Category", "Path", "Line", "Message"], debt_rows)}</section>
 """
     target = output_dir / "index.html"
-    target.write_text(html_page("Management Dashboard", body), encoding="utf-8")
+    atomic_write_text(target, html_page("Management Dashboard", body))
     return target
 
 
@@ -1862,10 +2868,8 @@ def planned_architecture_graph(model: ManagementModel) -> tuple[list[GraphNode],
     nodes_by_id = {node.id: node for node in real_nodes}
     edges = list(real_edges)
     edge_keys = {(edge.source, edge.target, edge.label) for edge in edges}
-    final_states = {"Merged", "Rolled Out", "Rejected", "Cancelled"}
-
     for item in sorted(model.work_items.values(), key=lambda candidate: candidate.id):
-        if item.state in final_states:
+        if item.state == "Merged" or terminal_state(item.state):
             continue
         requirement = model.requirements.get(item.requirement_id)
         area = requirement_architecture_area(requirement, item.section)
@@ -2035,7 +3039,7 @@ def render_svg_graph(title: str, nodes: list[GraphNode], edges: list[GraphEdge],
   {"".join(legend_svg)}
 </svg>
 """
-    output_path.write_text(svg, encoding="utf-8")
+    atomic_write_text(output_path, svg)
     return output_path
 
 
@@ -2050,7 +3054,7 @@ def render_diagram_index(output_dir: Path) -> Path:
         f'<li><a href="./{html.escape(path)}">{html.escape(label)}</a></li>' for path, label in links
     ) + "</ul>"
     target = output_dir / "index.html"
-    target.write_text(html_page("Management Diagrams", body), encoding="utf-8")
+    atomic_write_text(target, html_page("Management Diagrams", body))
     return target
 
 
@@ -2069,44 +3073,46 @@ def traceability_evidence_text(paths: list[str], note: str | None) -> str:
 
 def append_or_update_traceability(requirement_id_value: str, work_item: WorkItem, paths: list[str], note: str | None, state: str | None) -> str:
     path = MANAGEMENT_DIR / "TRACEABILITY.md"
-    lines = path.read_text(encoding="utf-8").splitlines()
-    new_evidence = traceability_evidence_text(paths, note)
-    row_state = state or work_item.state
+    with management_write_lock():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        new_evidence = traceability_evidence_text(paths, note)
+        row_state = state or work_item.state
 
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped.startswith("| `"):
-            continue
-        columns = [column.strip() for column in stripped.strip("|").split("|")]
-        if len(columns) < 4:
-            continue
-        if columns[0].strip("`") == requirement_id_value and columns[1].strip("`") == work_item.id:
-            existing_evidence = columns[3]
-            evidence = existing_evidence
-            if new_evidence and new_evidence not in existing_evidence:
-                evidence = f"{existing_evidence}; {new_evidence}" if existing_evidence else new_evidence
-            lines[index] = f"| `{requirement_id_value}` | `{work_item.id}` | {row_state} | {evidence} |"
-            path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-            return "updated"
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith("| `"):
+                continue
+            columns = [column.strip() for column in stripped.strip("|").split("|")]
+            if len(columns) < 4:
+                continue
+            if columns[0].strip("`") == requirement_id_value and columns[1].strip("`") == work_item.id:
+                existing_evidence = columns[3]
+                evidence = existing_evidence
+                if new_evidence and new_evidence not in existing_evidence:
+                    evidence = f"{existing_evidence}; {new_evidence}" if existing_evidence else new_evidence
+                lines[index] = f"| `{requirement_id_value}` | `{work_item.id}` | {row_state} | {evidence} |"
+                atomic_write_text(path, "\n".join(lines).rstrip() + "\n")
+                return "updated"
 
-    insert_index = len(lines)
-    for index, line in enumerate(lines):
-        if line.startswith("## Unmapped Requirement Areas"):
-            insert_index = index
-            break
-    while insert_index > 0 and not lines[insert_index - 1].strip():
-        insert_index -= 1
-    row = f"| `{requirement_id_value}` | `{work_item.id}` | {row_state} | {new_evidence} |"
-    lines[insert_index:insert_index] = [row, ""]
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    return "appended"
+        insert_index = len(lines)
+        for index, line in enumerate(lines):
+            if line.startswith("## Unmapped Requirement Areas"):
+                insert_index = index
+                break
+        while insert_index > 0 and not lines[insert_index - 1].strip():
+            insert_index -= 1
+        row = f"| `{requirement_id_value}` | `{work_item.id}` | {row_state} | {new_evidence} |"
+        lines[insert_index:insert_index] = [row, ""]
+        atomic_write_text(path, "\n".join(lines).rstrip() + "\n")
+        return "appended"
 
 
-def validate_evidence_paths(paths: list[str], allow_missing: bool) -> list[str]:
-    missing = [path for path in paths if not (REPO_ROOT / path).exists()]
+def validate_evidence_paths(paths: list[str], allow_missing: bool) -> tuple[list[str], list[str]]:
+    canonical_paths = [canonical_repo_path(path) for path in paths]
+    missing = [path for path in canonical_paths if not (REPO_ROOT / path).exists()]
     if missing and not allow_missing:
         raise ValueError(f"evidence paths do not exist: {', '.join(missing)}")
-    return missing
+    return canonical_paths, missing
 
 
 def issue_line(severity: str, message: str) -> str:
@@ -2332,12 +3338,12 @@ def cmd_evaluate_plan(args: argparse.Namespace) -> int:
 
     if item.state in {"Under Planning", "Planned"}:
         findings.append(issue_line("OK", f"{item.state} is a normal planning state"))
-    elif item.state in {"Rejected", "Cancelled"}:
+    elif terminal_state(item.state):
         findings.append(issue_line("BLOCKER", f"{item.id} is {item.state}"))
     else:
         findings.append(issue_line("REVIEW", f"{item.id} is already {item.state}; confirm this is still a plan evaluation"))
 
-    if item.state in VALID_STATE_SET and item.state not in item.timeline:
+    if valid_state(item.state) and item.state not in item.timeline:
         findings.append(issue_line("REVIEW", f"{item.id} has no dated state trail for {item.state}"))
 
     if not item.body:
@@ -2435,12 +3441,13 @@ def draft_work_entry(requirement: Requirement, work_item_id: str, title: str, st
 
 
 def append_under_planning_entry(path: Path, entry: list[str]) -> None:
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    lines = ensure_state_section(lines, "Under Planning")
-    insert_index = insertion_index_for_state(lines, "Under Planning")
-    entry_lines = [f"{line}\n" for line in entry]
-    lines[insert_index:insert_index] = ["\n", *entry_lines, "\n"]
-    path.write_text("".join(lines), encoding="utf-8")
+    with management_write_lock():
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        lines = ensure_state_section(lines, "Under Planning")
+        insert_index = insertion_index_for_state(lines, "Under Planning")
+        entry_lines = [f"{line}\n" for line in entry]
+        lines[insert_index:insert_index] = ["\n", *entry_lines, "\n"]
+        atomic_write_text(path, "".join(lines))
 
 
 def cmd_draft_plan(args: argparse.Namespace) -> int:
@@ -2485,6 +3492,13 @@ def cmd_draft_plan(args: argparse.Namespace) -> int:
         return 1
 
     title = args.title or default_work_title(requirement, motivation)
+    try:
+        validate_single_line_markdown_field(title, "--title")
+        for body_line in args.body_line:
+            validate_backlog_body_line(body_line, "--body-line")
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
     entry = draft_work_entry(requirement, work_item_id, title, state_date, args.body_line)
 
     print("Draft Plan")
@@ -2810,7 +3824,7 @@ def cmd_diagram_architecture_planned(args: argparse.Namespace) -> int:
         GraphNode("legend:unplanned", "Unplanned requirement", "", "#fff7ed", "#ea580c"),
     ]
     target = write_diagram(Path(args.html), "architecture-planned.svg", "Architecture Plan Overlay", nodes, edges, legend)
-    open_count = len([item for item in model.work_items.values() if item.state not in {"Merged", "Rolled Out", "Rejected", "Cancelled"}])
+    open_count = len(open_work_items(list(model.work_items.values())))
     unplanned_count = len(unmapped_requirements(model))
 
     print("Planned Architecture Diagram")
@@ -2928,19 +3942,24 @@ def cmd_link_evidence(args: argparse.Namespace) -> int:
         print(f"error: {work_item.id} maps to {work_item.requirement_id}, not {requirement.id}", file=sys.stderr)
         return 1
     try:
-        missing = validate_evidence_paths(args.path, args.allow_missing)
+        canonical_paths, missing = validate_evidence_paths(args.path, args.allow_missing)
+        note = validate_markdown_table_field(args.note, "--note", forbid_backticks=True) if args.note else None
+        if args.state:
+            state = validate_markdown_table_field(args.state, "--state")
+            if state != work_item.state:
+                raise ValueError(f"traceability state {state} does not match backlog state {work_item.state}")
     except ValueError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
 
-    action = append_or_update_traceability(requirement.id, work_item, args.path, args.note, args.state)
+    action = append_or_update_traceability(requirement.id, work_item, canonical_paths, note, args.state)
     print("Evidence Link")
     print("=============")
     print(f"Requirement: {requirement.id}")
     print(f"Work item:   {work_item.id}")
     print(f"Action:      {action}")
     print("Evidence:")
-    for path in args.path:
+    for path in canonical_paths:
         print(f"  - {path}")
     if missing:
         print("Missing paths allowed:")
@@ -3066,6 +4085,13 @@ def cmd_create_release_tag(args: argparse.Namespace) -> int:
 
 
 def cmd_record_decision(args: argparse.Namespace) -> int:
+    validate_ledger_record_title(args.title)
+    validate_single_line_markdown_field(args.status, "--status")
+    validate_multiline_markdown_prose(args.context, "--context")
+    validate_multiline_markdown_prose(args.decision, "--decision")
+    validate_multiline_markdown_prose(args.consequence, "--consequence")
+    for item in args.related:
+        validate_single_line_markdown_field(item, "--related", forbid_backticks=True)
     path = MANAGEMENT_DIR / "DECISIONS.md"
     decision_id = next_ledger_id(ledger_entries(path), "DEC")
     decision_date = validate_iso_date(args.date or date.today().isoformat())
@@ -3093,6 +4119,14 @@ Related:
 
 
 def cmd_record_risk(args: argparse.Namespace) -> int:
+    validate_ledger_record_title(args.title)
+    validate_single_line_markdown_field(args.owner, "--owner")
+    validate_multiline_markdown_prose(args.risk, "--risk")
+    validate_multiline_markdown_prose(args.impact, "--impact")
+    validate_multiline_markdown_prose(args.mitigation, "--mitigation")
+    for item in args.related:
+        validate_single_line_markdown_field(item, "--related", forbid_backticks=True)
+    review_date = validate_iso_date(args.review_date) if args.review_date else "Not set"
     path = MANAGEMENT_DIR / "RISKS.md"
     risk_id = next_ledger_id(ledger_entries(path), "RISK")
     related = ", ".join(f"`{item}`" for item in args.related) if args.related else "None"
@@ -3112,7 +4146,7 @@ Mitigation:
 {args.mitigation}
 
 Review date:
-{args.review_date or "Not set"}
+{review_date}
 """
     insert_markdown_entry_before(path, "\n## Closed Risks", entry)
     print(f"Recorded risk {risk_id} in {relative(path)}")
@@ -3122,6 +4156,7 @@ Review date:
 def cmd_close_risk(args: argparse.Namespace) -> int:
     path = MANAGEMENT_DIR / "RISKS.md"
     try:
+        validate_multiline_markdown_prose(args.evidence, "--evidence")
         entry = ledger_entry_by_id(path, args.risk_id)
         closed_date = validate_iso_date(args.date or date.today().isoformat())
         update_ledger_status(entry, "Closed", ["Closed:", closed_date, "", "Closure evidence:", args.evidence])
@@ -3133,9 +4168,15 @@ def cmd_close_risk(args: argparse.Namespace) -> int:
 
 
 def cmd_record_incident(args: argparse.Namespace) -> int:
+    validate_ledger_record_title(args.title)
+    validate_single_line_markdown_field(args.environment, "--environment")
+    validate_multiline_markdown_prose(args.impact, "--impact")
+    validate_multiline_markdown_prose(args.timeline, "--timeline")
+    validate_multiline_markdown_prose(args.mitigation, "--mitigation")
+    detected = args.detected or f"{datetime.now().strftime('%Y-%m-%d %H:%M')} local"
+    validate_single_line_markdown_field(detected, "--detected")
     path = MANAGEMENT_DIR / "INCIDENTS.md"
     incident_id = next_ledger_id(ledger_entries(path), "INCIDENT")
-    detected = args.detected or f"{datetime.now().strftime('%Y-%m-%d %H:%M')} local"
     entry = f"""### {incident_id} -- {args.title}
 
 Status: Open
@@ -3172,8 +4213,11 @@ Requirement or decision changes:
 def cmd_close_incident(args: argparse.Namespace) -> int:
     path = MANAGEMENT_DIR / "INCIDENTS.md"
     try:
+        validate_multiline_markdown_prose(args.evidence, "--evidence")
+        closed = args.closed or f"{datetime.now().strftime('%Y-%m-%d %H:%M')} local"
+        validate_single_line_markdown_field(closed, "--closed")
         entry = ledger_entry_by_id(path, args.incident_id)
-        update_ledger_status(entry, "Closed", ["Closed:", args.closed or f"{datetime.now().strftime('%Y-%m-%d %H:%M')} local", "", "Closure evidence:", args.evidence])
+        update_ledger_status(entry, "Closed", ["Closed:", closed, "", "Closure evidence:", args.evidence])
     except ValueError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
@@ -3182,6 +4226,16 @@ def cmd_close_incident(args: argparse.Namespace) -> int:
 
 
 def cmd_record_experiment(args: argparse.Namespace) -> int:
+    validate_ledger_record_title(args.title)
+    validate_single_line_markdown_field(args.branch, "--branch", forbid_backticks=True)
+    branch_ref = parse_branch_ref(args.branch)
+    if not re.match(r"^[BEO]X\.", branch_ref.work_id):
+        raise ValueError("--branch must reference an X-motivation work item")
+    validate_multiline_markdown_prose(args.hypothesis, "--hypothesis")
+    validate_multiline_markdown_prose(args.success, "--success")
+    validate_multiline_markdown_prose(args.failure, "--failure")
+    for item in args.follow_up:
+        validate_single_line_markdown_field(item, "--follow-up", forbid_backticks=True)
     path = MANAGEMENT_DIR / "EXPERIMENTS.md"
     experiment_id = next_ledger_id(ledger_entries(path), "EXP")
     expires = validate_iso_date(args.expires)
@@ -3219,6 +4273,7 @@ Follow-up:
 def cmd_close_experiment(args: argparse.Namespace) -> int:
     path = MANAGEMENT_DIR / "EXPERIMENTS.md"
     try:
+        validate_multiline_markdown_prose(args.result, "--result")
         entry = ledger_entry_by_id(path, args.experiment_id)
         update_ledger_status(entry, args.status, ["Closed:", validate_iso_date(args.date or date.today().isoformat()), "", "Result:", args.result])
     except ValueError as err:
@@ -3551,6 +4606,298 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_block_work(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+    try:
+        raw_ref, item = resolve_work_item(model, args.ref)
+        event_date = validate_iso_date(args.date or date.today().isoformat())
+        reason = args.reason.strip()
+        if not reason or any(character in reason for character in "\r\n"):
+            raise ValueError("--reason must be one non-empty line")
+        action = "Blocked" if args.block_action == "block" else "Unblocked"
+        if action == "Blocked" and item.blocked:
+            raise ValueError(f"{item.id} is already blocked")
+        if action == "Unblocked" and not item.blocked:
+            raise ValueError(f"{item.id} is not blocked")
+        historical_dates = [*item.timeline.values(), *(event.entered_at for event in item.block_events)]
+        if historical_dates and event_date < max(historical_dates):
+            raise ValueError(f"block event date {event_date} predates existing history through {max(historical_dates)}")
+        require_main_for_mutation(args.dry_run)
+    except (KeyError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    print(f"{action} Work")
+    print("============" if action == "Blocked" else "==============")
+    if raw_ref != item.id:
+        print(f"Reference:   {raw_ref}")
+    print_work_item(model, item)
+    print()
+    if args.dry_run:
+        print(f"Dry run: would append {action}: {event_date}; Reason: {reason}")
+        return 0
+
+    append_block_event(item, action, event_date, reason)
+    updated_item = load_model().work_items[item.id]
+    print(f"Appended {action}: {event_date}; Reason: {reason}")
+    print(f"Blocked now: {'yes' if updated_item.blocked else 'no'}")
+    return 0
+
+
+def requirement_json(requirement: Requirement) -> dict[str, object]:
+    return {
+        "id": requirement.id,
+        "title": requirement.title,
+        "section": requirement.section,
+        "section_title": requirement.section_title,
+        "body": requirement.body,
+        "source": {"path": relative(requirement.path), "line": requirement.line},
+    }
+
+
+def work_item_json(item: WorkItem) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "requirement_id": item.requirement_id,
+        "title": item.title,
+        "description": item.body,
+        "motivation": item.motivation,
+        "state": item.state,
+        "owner": item.owner,
+        "timeline": item.timeline,
+        "blocked": item.blocked,
+        "block_history": [dataclasses.asdict(event) for event in item.block_events],
+        "gate_overrides": [dataclasses.asdict(event) for event in item.gate_overrides],
+        "history_exceptions": [dataclasses.asdict(event) for event in item.history_exceptions],
+        "source": {"path": relative(item.path), "line": item.line},
+    }
+
+
+def traceability_json(link: TraceabilityLink) -> dict[str, object]:
+    return {
+        "requirement_id": link.requirement_id,
+        "work_item_id": link.work_item_id,
+        "state": link.state,
+        "evidence": link.evidence,
+        "line": link.line,
+    }
+
+
+def issue_json(issue: Issue) -> dict[str, object]:
+    return {
+        "severity": issue.severity,
+        "path": relative(issue.path),
+        "line": issue.line,
+        "message": issue.message,
+    }
+
+
+def verification_candidate_map(files: list[str], limit: int) -> dict[str, list[str]]:
+    return {
+        "functional": limited([path for path in files if test_evidence_file(path)], limit),
+        "performance": limited([path for path in files if benchmark_evidence_file(path)], limit),
+        "security": limited([path for path in files if security_evidence_file(path)], limit),
+        "operations": limited([path for path in files if operations_evidence_file(path)], limit),
+        "recovery": limited([path for path in files if recovery_evidence_file(path)], limit),
+        "product": limited([path for path in files if product_evidence_file(path)], limit),
+    }
+
+
+def semantic_context_payload(args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    if args.limit < 0:
+        raise ValueError("--limit must be zero or greater")
+    if args.long_file_lines < 0:
+        raise ValueError("--long-file-lines must be zero or greater")
+    model = load_model()
+    workflow = args.workflow
+    payload: dict[str, object] = {
+        "schema_version": "1.0",
+        "workflow": workflow,
+        "signal_policy": {
+            "observations_are_deterministic": True,
+            "candidate_signals_are_not_semantic_conclusions": True,
+            "human_authority": "Requirements changes and final acceptance remain with the human owner.",
+        },
+        "snapshot": {
+            "branch": current_branch_or_none(),
+            "head": git_output(["rev-parse", "HEAD"]),
+            "base_ref": args.base or "origin/main",
+        },
+        "validation": {
+            "errors": [issue_json(issue) for issue in model.errors],
+            "warnings": [issue_json(issue) for issue in model.warnings],
+        },
+    }
+    if model.errors:
+        payload["error"] = "management model validation failed"
+        return payload, 1
+
+    all_links = traceability_links()
+    limit = args.limit
+    reference = args.reference
+    if workflow in {"plan", "review", "verification"}:
+        if not reference:
+            payload["error"] = f"{workflow} requires a work item or branch reference"
+            return payload, 1
+        try:
+            raw_ref, item = resolve_work_item(model, reference)
+            branch_ref = parse_branch_ref(raw_ref)
+        except (KeyError, RuntimeError, ValueError) as err:
+            payload["error"] = str(err)
+            return payload, 1
+        requirement = model.requirements[item.requirement_id]
+        payload["focus"] = {
+            "reference": raw_ref,
+            "work_item": work_item_json(item),
+            "requirement": requirement_json(requirement),
+            "traceability": [traceability_json(link) for link in traceability_links_for(requirement, all_links)],
+        }
+        if workflow == "plan":
+            owner_findings = [] if branch_reference_is_plain_work_item(branch_ref) else branch_owner_errors(item, branch_ref)
+            payload["observations"] = {
+                "branch_syntax_valid": True,
+                "owner_findings": owner_findings,
+                "sibling_work": [work_item_json(sibling) for sibling in same_requirement_items(model, item)],
+                "description_present": bool(item.body),
+                "current_state": item.state,
+                "blocked": item.blocked,
+            }
+            payload["candidate_signals"] = [
+                "Confirm motivation against completed sibling work.",
+                "Confirm scope, dependencies, acceptance evidence, and product or technical value semantically.",
+            ]
+        else:
+            base_ref = args.base or "origin/main"
+            files, file_notes = changed_files(base_ref)
+            payload["observations"] = {
+                "current_branch": current_branch(),
+                "requested_reference": raw_ref,
+                "reference_is_plain_work_item": branch_reference_is_plain_work_item(branch_ref),
+                "reference_matches_current_branch": None if branch_reference_is_plain_work_item(branch_ref) else raw_ref == current_branch(),
+                "changed_files": limited(files, limit),
+                "change_detection_notes": file_notes,
+                "evidence_candidates": verification_candidate_map(files, limit),
+            }
+            if workflow == "review":
+                stat_sections, stat_notes = diff_stat(base_ref)
+                payload["observations"]["diff_stats"] = stat_sections
+                payload["observations"]["change_detection_notes"] = [*file_notes, *stat_notes]
+                payload["candidate_signals"] = REVIEW_CHECKLIST
+            else:
+                payload["candidate_signals"] = [
+                    "Candidate evidence paths are classified by filename and local content only; establish semantic coverage before acceptance.",
+                    *REVIEW_CHECKLIST[:3],
+                ]
+        return payload, 0
+
+    if workflow in {"estimate", "sync"}:
+        if not reference:
+            payload["error"] = f"{workflow} requires a requirement id"
+            return payload, 1
+        requirement = model.requirements.get(reference)
+        if requirement is None:
+            payload["error"] = f"unknown requirement: {reference}"
+            return payload, 1
+        work_items = requirement_work_items(model, requirement)
+        links = traceability_links_for(requirement, all_links)
+        payload["focus"] = {
+            "requirement": requirement_json(requirement),
+            "descendant_requirements": [requirement_json(child) for child in descendant_requirements(model, requirement)],
+            "work_items": [work_item_json(item) for item in work_items],
+            "traceability": [traceability_json(link) for link in links],
+        }
+        if workflow == "estimate":
+            all_requirements = sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+            findings = audit_requirement(
+                model,
+                requirement,
+                (MANAGEMENT_DIR / "TRACEABILITY.md").read_text(encoding="utf-8"),
+                duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.title))),
+                duplicate_requirement_groups(all_requirements, lambda candidate: " ".join(words_in(candidate.body))),
+            )
+            score = requirement_complexity_score(requirement, work_items, findings)
+            payload["observations"] = {
+                "explicit_requirement_references": requirement_references(requirement_text(requirement)),
+                "local_complexity_score": score,
+                "heuristic_effort_band": estimate_effort_band(score),
+                "local_quality_signals": [finding.format() for finding in findings],
+            }
+            payload["candidate_signals"] = ["The effort band is a lexical planning aid; inspect implementation scope, dependencies, risks, and market context before estimating semantically."]
+        else:
+            paths = sorted({path for link in links for path in evidence_paths(link)})
+            payload["observations"] = {
+                "evidence_path_status": [{"path": path, "status": status} for path, status in evidence_path_statuses(paths)],
+                "exact_requirement_id_mentions": source_files_mentioning([requirement.id], limit, implementation_only=True),
+                "requirement_term_mentions": source_files_mentioning(requirement_source_terms(requirement), limit, implementation_only=True),
+            }
+            payload["candidate_signals"] = ["Compare the requirement semantically with implementation, tests, evidence, and relevant git history; lexical mentions do not prove conformance."]
+        return payload, 0
+
+    if workflow == "audit":
+        all_requirements = sorted(model.requirements.values(), key=lambda candidate: candidate.id)
+        requirements = all_requirements
+        if reference:
+            requirement = model.requirements.get(reference)
+            if requirement is None:
+                payload["error"] = f"unknown requirement: {reference}"
+                return payload, 1
+            requirements = [requirement, *descendant_requirements(model, requirement)]
+        traceability_text = (MANAGEMENT_DIR / "TRACEABILITY.md").read_text(encoding="utf-8")
+        duplicate_titles = duplicate_requirement_groups(all_requirements, lambda requirement: " ".join(words_in(requirement.title)))
+        duplicate_bodies = duplicate_requirement_groups(all_requirements, lambda requirement: " ".join(words_in(requirement.body)))
+        payload["observations"] = {
+            "requirements": [requirement_json(requirement) for requirement in requirements],
+            "work_items": [
+                work_item_json(item)
+                for item in sorted(model.work_items.values(), key=lambda item: item.id)
+                if any(requirement_matches_id(requirement, item.requirement_id) for requirement in requirements)
+            ],
+            "traceability": [
+                traceability_json(link)
+                for link in all_links
+                if any(requirement_matches_id(requirement, link.requirement_id) for requirement in requirements)
+            ],
+        }
+        candidate_signals = [
+            finding.format()
+            for requirement in requirements
+            for finding in audit_requirement(model, requirement, traceability_text, duplicate_titles, duplicate_bodies)
+        ]
+        payload["candidate_signals"] = candidate_signals if limit <= 0 else candidate_signals[:limit]
+        return payload, 0
+
+    findings = chase_tech_debts(0, args.long_file_lines)
+    path_prefix = None
+    if reference:
+        try:
+            path_prefix = canonical_repo_path(reference, allow_missing=False)
+        except ValueError as err:
+            payload["error"] = str(err)
+            return payload, 1
+        findings = [finding for finding in findings if finding.path == path_prefix or finding.path.startswith(f"{path_prefix.rstrip('/')}/")]
+    payload["observations"] = {
+        "tracked_text_files_scanned": len(tracked_text_files()),
+        "path_prefix": path_prefix,
+        "candidates": [dataclasses.asdict(finding) for finding in (findings if limit <= 0 else findings[:limit])],
+    }
+    payload["candidate_signals"] = ["Each candidate requires semantic inspection before it is accepted as technical debt."]
+    return payload, 0
+
+
+def cmd_semantic_context(args: argparse.Namespace) -> int:
+    try:
+        payload, exit_code = semantic_context_payload(args)
+    except (OSError, RuntimeError, ValueError) as err:
+        payload = {"schema_version": "1.0", "workflow": args.workflow, "error": str(err)}
+        exit_code = 1
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return exit_code
+
+
 def cmd_advance_state(args: argparse.Namespace) -> int:
     model = load_model()
     if model.errors:
@@ -3562,13 +4909,34 @@ def cmd_advance_state(args: argparse.Namespace) -> int:
         raw_ref, item = resolve_work_item(model, args.ref)
         target_state = target_state_for(item, args.to)
         state_date = validate_iso_date(args.date or date.today().isoformat())
+        validate_state_transition(model, item, target_state, state_date)
     except (KeyError, RuntimeError, ValueError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
 
     engineer = args.engineer
+    if engineer:
+        try:
+            validate_single_line_markdown_field(engineer, "--engineer", forbidden_characters=".:;")
+        except ValueError as err:
+            print(f"error: {err}", file=sys.stderr)
+            return 1
     if item.state == "Planned" and target_state == "Started" and not (engineer or item.owner):
         print("error: --engineer is required when moving Planned to Started", file=sys.stderr)
+        return 1
+
+    override_reason = args.override_gate.strip() if args.override_gate else None
+    if override_reason and any(character in override_reason for character in "\r\n"):
+        print("error: --override-gate must be one non-empty line", file=sys.stderr)
+        return 1
+    gate_failures = deterministic_gate_failures(item, target_state)
+    if gate_failures and not override_reason:
+        for failure in gate_failures:
+            print(f"error: readiness gate failed: {failure}", file=sys.stderr)
+        print("error: satisfy the deterministic gates or pass --override-gate with an auditable reason", file=sys.stderr)
+        return 1
+    if override_reason and not gate_failures:
+        print("error: --override-gate was supplied, but no deterministic readiness gate failed", file=sys.stderr)
         return 1
 
     print("Before:")
@@ -3581,13 +4949,26 @@ def cmd_advance_state(args: argparse.Namespace) -> int:
         print(f"No change: {item.id} already has {target_state}: {item.timeline[target_state]}")
         return 0
 
+    try:
+        require_main_for_mutation(args.dry_run)
+    except RuntimeError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
     if args.dry_run:
         print()
         print(f"Dry run: would move {item.id} from {item.state} to {target_state} using date {state_date}.")
         return 0
 
     try:
-        replace_or_move_work_item(item, target_state, state_date, engineer)
+        with management_write_lock():
+            updates = {
+                item.path: render_work_item_transition(item, target_state, state_date, engineer, override_reason),
+            }
+            traceability_content = render_traceability_work_state(item.id, target_state)
+            if traceability_content is not None:
+                updates[MANAGEMENT_DIR / "TRACEABILITY.md"] = traceability_content
+            atomic_write_many(updates)
     except ValueError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
@@ -3638,6 +5019,7 @@ def build_parser() -> argparse.ArgumentParser:
     advance_state.add_argument("--to", help="Target state. Defaults to the next happy-path state.")
     advance_state.add_argument("--date", help="State-entry date in YYYY-MM-DD. Defaults to today.")
     advance_state.add_argument("--engineer", help="Responsible engineer, required for Planned to Started when the item has no owner.")
+    advance_state.add_argument("--override-gate", help="One-line auditable reason for overriding failed deterministic evidence gates. Transition order and dates cannot be overridden.")
     advance_state.add_argument("--dry-run", action="store_true", help="Print the intended transition without editing the backlog.")
     advance_state.set_defaults(func=cmd_advance_state)
 
@@ -3787,13 +5169,28 @@ def build_parser() -> argparse.ArgumentParser:
     chase_techdebts.add_argument("--strict", action="store_true", help="Exit non-zero when any findings exist.")
     chase_techdebts.set_defaults(func=cmd_chase_techdebts)
 
+    semantic_context = subparsers.add_parser(
+        "semantic-context",
+        aliases=["semantic_context"],
+        help="Emit machine-readable deterministic evidence for semantic AI workflows.",
+    )
+    semantic_context.add_argument(
+        "workflow",
+        choices=["audit", "estimate", "plan", "review", "sync", "tech-debt", "verification"],
+    )
+    semantic_context.add_argument("reference", nargs="?", help="Requirement id for audit/estimate/sync, work item/branch for plan/review/verification, or repo path prefix for tech-debt.")
+    semantic_context.add_argument("--base", help="Base git ref for review and verification evidence. Default: origin/main.")
+    semantic_context.add_argument("--limit", type=int, default=80, help="Maximum candidate rows. Use 0 for all findings.")
+    semantic_context.add_argument("--long-file-lines", type=int, default=500, help="Line threshold used by the tech-debt candidate scan.")
+    semantic_context.set_defaults(func=cmd_semantic_context)
+
     record_decision = subparsers.add_parser("record-decision", aliases=["record_decision"], help="Append a structured decision entry.")
     record_decision.add_argument("title")
     record_decision.add_argument("--context", required=True)
     record_decision.add_argument("--decision", required=True)
     record_decision.add_argument("--consequence", required=True)
     record_decision.add_argument("--related", action="append", default=[])
-    record_decision.add_argument("--status", default="Accepted")
+    record_decision.add_argument("--status", choices=sorted(SAFE_LEDGER_STATUSES["DECISIONS.md"]), default="Accepted")
     record_decision.add_argument("--date")
     record_decision.set_defaults(func=cmd_record_decision)
 
@@ -3815,7 +5212,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     record_incident = subparsers.add_parser("record-incident", aliases=["record_incident"], help="Append an open incident entry.")
     record_incident.add_argument("title")
-    record_incident.add_argument("--environment", required=True)
+    record_incident.add_argument("--environment", choices=INCIDENT_ENVIRONMENTS, required=True)
     record_incident.add_argument("--impact", required=True)
     record_incident.add_argument("--timeline", required=True)
     record_incident.add_argument("--mitigation", required=True)
@@ -3874,13 +5271,32 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--limit", type=int, default=8, help="Maximum changed paths to print. Default: 8.")
     review.set_defaults(func=cmd_review)
 
+    block_work = subparsers.add_parser("block-work", aliases=["block_work"], help="Append a dated blocked event without changing lifecycle state.")
+    block_work.add_argument("ref", help="Work item id or branch name.")
+    block_work.add_argument("--reason", required=True, help="One-line reason for blocking the work item.")
+    block_work.add_argument("--date", help="Block date in YYYY-MM-DD. Defaults to today.")
+    block_work.add_argument("--dry-run", action="store_true", help="Print the event without editing the backlog.")
+    block_work.set_defaults(func=cmd_block_work, block_action="block")
+
+    unblock_work = subparsers.add_parser("unblock-work", aliases=["unblock_work"], help="Append a dated unblocked event without changing lifecycle state.")
+    unblock_work.add_argument("ref", help="Work item id or branch name.")
+    unblock_work.add_argument("--reason", required=True, help="One-line reason for unblocking the work item.")
+    unblock_work.add_argument("--date", help="Unblock date in YYYY-MM-DD. Defaults to today.")
+    unblock_work.add_argument("--dry-run", action="store_true", help="Print the event without editing the backlog.")
+    unblock_work.set_defaults(func=cmd_block_work, block_action="unblock")
+
     return parser
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    return args.func(args)
+    try:
+        with management_write_lock():
+            return args.func(args)
+    except (OSError, RuntimeError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

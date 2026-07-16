@@ -189,3 +189,17 @@ We must publish the current docs in a site, so it can be readily consulted.
 ## 02) Documentation of Private / Internal items
 
 Since our goal is to ease the local team, it is of utter importance documenting private items as well as unit and integration tests.
+
+
+
+# Repository Governance Automation "Gov"
+
+## 01) Management Governance System
+
+The repo-local management system must preserve human authority over requirements while making the documented process safe, repeatable, and auditable. The management command line, local authoring console, static report, and AI workflow must share one coherent interpretation of requirements, work items, evidence, and supporting ledgers.
+
+It has three coordinated obligations:
+
+1. Deterministic integrity: the system must validate the complete management graph, including requirement/work-item grammar, state history, blockers, supersession, traceability, and supporting-ledger structure. Management-record mutations must preserve unrelated text, including history; reject repository-escaping record paths or evidence paths; serialize competing writers; replace files atomically. Invalid input or a failed multi-record update must leave the repository in its prior coherent state. State changes must follow the documented transition rules, retain every dated state already reached, and distinguish lifecycle state from the independently recorded blocked condition.
+2. Shared authoring surfaces: the local GUI and static Management Report must continue to use a shared model/frontend. Static mode must expose the full workflow surface without enabling local actions. Local authoring must bind to loopback by default; non-loopback binding requires an explicit unsafe acknowledgement plus a host allowlist. Actions must have cross-origin protection, mutation serialization, and in-page repeat-submission protection. Reports plus diagrams must be coherent snapshots, use checkout-specific temporary storage, and avoid partial or stale publication.
+3. Semantic management analysis: deterministic commands must provide explicit evidence in machine-readable signals without presenting lexical heuristics as semantic conclusions. A repo-local AI skill must use those signals together with the governing requirements, backlog, traceability, source code, tests, and relevant git history to perform qualitative plan, verification, review, technical-debt, and requirement-drift analysis. Semantic reports must distinguish observed evidence, inference, and unknowns. The human owner controls requirement changes and final acceptance.

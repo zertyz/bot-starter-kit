@@ -50,6 +50,14 @@ button:hover {
   background: var(--surface-soft);
 }
 
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid #93c5fd;
+  outline-offset: 2px;
+}
+
 button:disabled,
 button.local-only {
   border-color: var(--line);
@@ -135,6 +143,15 @@ p {
   font-size: 12px;
 }
 
+.mode-note {
+  margin: 14px 14px 0;
+  border: 1px solid #fdba74;
+  border-radius: 6px;
+  background: var(--orange-soft);
+  padding: 9px 12px;
+  color: var(--text);
+}
+
 .shell {
   display: grid;
   grid-template-columns: 176px minmax(0, 1fr) 300px;
@@ -156,7 +173,8 @@ p {
   text-align: left;
 }
 
-.nav-item.active {
+.nav-item.active,
+.nav-item[aria-current="page"] {
   border-color: #1d4ed8;
   background: var(--blue-soft);
 }
@@ -358,6 +376,11 @@ button.local-only {
 .list-item span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.list-item span.history-text {
+  display: block;
+  white-space: pre-wrap;
 }
 
 form.panel {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analyze Management"
+  short_description: "Semantic governance analysis from repo evidence"
+  default_prompt: "Use $analyze-management to audit the current requirement, work item, and implementation for drift."

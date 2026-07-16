@@ -2,6 +2,10 @@
 
 These rules define what must be true before a work item changes state. They complement `MANAGEMENT.md`; they do not replace the requirement and backlog files.
 
+`advance_state` enforces the mechanically verifiable subset of these rules. Ordering, dates, ownership, terminal states, and active blockers are hard invariants. A human may override a missing-evidence gate only by recording a reason with `--override-gate`; that history does not replace semantic review or acceptance.
+
+Legacy state trails must not be repaired with invented dates. A dated `History exception` may name an intermediate state whose date was never recorded and explain why; strict lint accepts only necessary, well-formed exceptions and preserves the original trail.
+
 
 ## Ready for Planning
 

@@ -3,25 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Management Console</title>
-  <link rel="stylesheet" href="/assets/app.css">
+  <meta name="management-capability-token" content="{{MANAGEMENT_CAPABILITY_TOKEN}}">
+  <title>{{MANAGEMENT_TITLE}}</title>
+  <link rel="stylesheet" href="{{MANAGEMENT_STYLESHEET_URL}}">
 </head>
 <body>
   <header class="topbar">
     <div>
-      <h1 id="app-title">Management Console</h1>
+      <h1 id="app-title">{{MANAGEMENT_TITLE}}</h1>
       <p id="repo-root"></p>
     </div>
     <div class="top-actions">
-      <span id="mode-label"></span>
+      <span id="mode-label" class="mode-label"></span>
       <span id="generated-at"></span>
       <button id="refresh" type="button">Refresh</button>
     </div>
   </header>
 
+  <p id="local-only-explanation" class="mode-note" role="note" hidden>Only available in the local online mode.</p>
+
   <div class="shell">
     <nav class="nav" aria-label="Management views">
-      <button class="nav-item active" data-view="overview" type="button">Overview</button>
+      <button class="nav-item active" data-view="overview" type="button" aria-current="page">Overview</button>
       <button class="nav-item" data-view="requirements" type="button">Requirements</button>
       <button class="nav-item" data-view="work" type="button">Work</button>
       <button class="nav-item" data-view="workflows" type="button">Workflows</button>
@@ -53,7 +56,7 @@
 
       <section class="view" id="view-requirements">
         <div class="toolbar">
-          <input id="requirement-filter" type="search" placeholder="Filter requirements">
+          <input id="requirement-filter" type="search" placeholder="Filter requirements" aria-label="Filter requirements">
           <button type="button" data-action="audit-requirements">Audit</button>
         </div>
         <div class="table-wrap">
@@ -75,7 +78,7 @@
 
       <section class="view" id="view-work">
         <div class="toolbar">
-          <input id="work-filter" type="search" placeholder="Filter work items">
+          <input id="work-filter" type="search" placeholder="Filter work items" aria-label="Filter work items">
           <button type="button" data-action="stale-work">Stale Work</button>
         </div>
         <div class="table-wrap">
@@ -111,12 +114,25 @@
 
           <form class="panel" data-form="advance-state">
             <h2>Advance State</h2>
-            <label>Work Item <select name="ref" data-select="work-items"></select></label>
+            <label>Work Item <select name="ref" id="advance-state-work" data-select="work-items"></select></label>
             <label>Target <select name="to" id="advance-state-target"></select></label>
             <label>Engineer <input name="engineer"></label>
             <label>Date <input name="date" placeholder="YYYY-MM-DD"></label>
+            <label>Gate Override <input name="override_gate"></label>
             <label class="check"><input name="dry_run" type="checkbox" checked> Dry run</label>
             <button type="submit">Advance</button>
+          </form>
+
+          <form class="panel" data-form="block-tools">
+            <h2>Blocked Work</h2>
+            <label>Work Item <select name="ref" data-select="work-items"></select></label>
+            <label>Reason <input name="reason"></label>
+            <label>Date <input name="date" placeholder="YYYY-MM-DD"></label>
+            <label class="check"><input name="dry_run" type="checkbox" checked> Dry run</label>
+            <div class="button-row">
+              <button type="button" data-form-action="block-work">Block</button>
+              <button type="button" data-form-action="unblock-work">Unblock</button>
+            </div>
           </form>
 
           <form class="panel" data-form="link-evidence">
@@ -169,6 +185,12 @@
           <form class="panel" data-form="record-decision">
             <h2>Record Decision</h2>
             <label>Title <input name="title"></label>
+            <label>Status
+              <select name="status">
+                <option value="Accepted" selected>Accepted</option>
+                <option value="Superseded">Superseded</option>
+              </select>
+            </label>
             <label>Context <textarea name="context" rows="3"></textarea></label>
             <label>Decision <textarea name="decision" rows="3"></textarea></label>
             <label>Consequence <textarea name="consequence" rows="3"></textarea></label>
@@ -190,7 +212,14 @@
           <form class="panel" data-form="record-incident">
             <h2>Record Incident</h2>
             <label>Title <input name="title"></label>
-            <label>Environment <input name="environment"></label>
+            <label>Environment
+              <select name="environment">
+                <option value="Production">Production</option>
+                <option value="Staging">Staging</option>
+                <option value="Development">Development</option>
+                <option value="Local">Local</option>
+              </select>
+            </label>
             <label>Impact <textarea name="impact" rows="3"></textarea></label>
             <label>Timeline <textarea name="timeline" rows="3"></textarea></label>
             <label>Mitigation <textarea name="mitigation" rows="3"></textarea></label>
@@ -226,7 +255,7 @@
 
       <section class="view" id="view-tech-debt">
         <div class="toolbar">
-          <input id="tech-debt-filter" type="search" placeholder="Filter tech debt">
+          <input id="tech-debt-filter" type="search" placeholder="Filter tech debt" aria-label="Filter tech debt">
           <button type="button" data-action="chase-techdebts">Refresh Leads</button>
         </div>
         <div class="ledger-grid" id="tech-debt-grid"></div>
@@ -257,9 +286,10 @@
       <h2>Command Output</h2>
       <button id="clear-output" type="button">Clear</button>
     </div>
-    <pre id="command-output"></pre>
+    <pre id="command-output" role="status" aria-live="polite" aria-busy="false"></pre>
   </section>
 
-  <script src="/assets/app.js"></script>
+  <!-- MANAGEMENT_BOOTSTRAP -->
+  <script src="{{MANAGEMENT_SCRIPT_URL}}"></script>
 </body>
 </html>
