@@ -6,7 +6,7 @@ use crate::messaging::gateways::telegram_gateway::{TelegramBoxSendFuture, Telegr
 use crate::messaging::user_router::UserMoProcessor;
 use crate::models::config::BotConfig;
 use crate::plot;
-use crate::resources::{FRAMES, RESULT};
+use crate::resources::{DEMO_AUDIO, DEMO_STICKER, DEMO_VIDEO, DEMO_VOICE, FRAMES, RESULT};
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
@@ -38,6 +38,8 @@ enum Cmd {
     Run,
     /// Demonstrate replacing an image in place
     Render,
+    /// Send embedded audio, voice, video, video-note, and sticker samples
+    AdditionalMedia,
     /// Perform the SQLite benchmark
     SqliteBenchmark,
     /// Perform the ReDB benchmark
@@ -49,6 +51,20 @@ enum Cmd {
 }
 
 struct ProcessUserMo;
+
+/// Texts to be used both in the InlineKeyboardMarkup Menu (MT leg) and the parsing (MO leg)
+mod callbacks {
+    pub(super) const RUN: &str = "mm:run";
+    pub(super) const RENDER: &str = "mm:render";
+    pub(super) const ADDITIONAL_MEDIA: &str = "mm:additionalmedia";
+    pub(super) const CHAT_ID: &str = "mm:chatid";
+    pub(super) const FOLLOW_ASSET: &str = "mm:followasset";
+    pub(super) const SQLITE_BENCHMARK: &str = "mm:sqlitebenchmark";
+    pub(super) const REDB_BENCHMARK: &str = "mm:redbbenchmark";
+    pub(super) const HEED_BENCHMARK: &str = "mm:heedbenchmark";
+    pub(super) const SETTINGS: &str = "mm:settings";
+    pub(super) const CLOSE: &str = "mm:close";
+}
 
 impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUserMo {
     async fn process<MoStream: Stream<Item = Mo<User, TelegramMo>> + Send>(&self, bot: Bot, user_mo_stream: MoStream) -> impl Stream<Item = TelegramBoxSendFuture> + Send {
@@ -82,6 +98,7 @@ impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUs
                                     .parse_mode(ParseMode::Html)),
                                 Cmd::Run => mts(run_long_job(bot.clone(), chat_id)),
                                 Cmd::Render => mts(render_swap(bot.clone(), chat_id)),
+                                Cmd::AdditionalMedia => mts(additional_media(bot.clone(), chat_id)),
                                 Cmd::Graphical | Cmd::Menu => mt(bot
                                     .send_message(chat_id, "Choose:")
                                     .reply_markup(main_menu())),
@@ -124,19 +141,20 @@ impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUs
                     let bot = bot.clone();
                     mts(async move {
                         match callback_data.as_str() {
-                            "mm:run" => run_long_job(bot.clone(), chat_id).await?,
-                            "mm:render" => render_swap(bot.clone(), chat_id).await?,
-                            "mm:chatid" => bot
+                            callbacks::RUN => run_long_job(bot.clone(), chat_id).await?,
+                            callbacks::RENDER => render_swap(bot.clone(), chat_id).await?,
+                            callbacks::ADDITIONAL_MEDIA => additional_media(bot.clone(), chat_id).await?,
+                            callbacks::CHAT_ID => bot
                                 .send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id))
                                 .parse_mode(ParseMode::Html)
                                 .await
                                 .map(|_| ())
                                 .map_err(|err| anyhow!("`chat_id` failed: {err}"))?,
-                            "mm:followasset" => follow_asset(bot.clone(), chat_id).await?,
-                            "mm:sqlitebenchmark" => sqlite_benchmark(bot.clone(), chat_id).await?,
-                            "mm:redbbenchmark" => redb_benchmark(bot.clone(), chat_id).await?,
-                            "mm:heedbenchmark" => heed_benchmark(bot.clone(), chat_id).await?,
-                            "mm:close" => bot
+                            callbacks::FOLLOW_ASSET => follow_asset(bot.clone(), chat_id).await?,
+                            callbacks::SQLITE_BENCHMARK => sqlite_benchmark(bot.clone(), chat_id).await?,
+                            callbacks::REDB_BENCHMARK => redb_benchmark(bot.clone(), chat_id).await?,
+                            callbacks::HEED_BENCHMARK => heed_benchmark(bot.clone(), chat_id).await?,
+                            callbacks::CLOSE => bot
                                 .edit_message_reply_markup(chat_id, msg_id)
                                 .await
                                 .map(|_| ())?, // remove the "main menu" buttons
@@ -164,11 +182,17 @@ pub async fn run(config: BotConfig) -> Result<()> {
 
 fn main_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![InlineKeyboardButton::callback("🧪 Progress demo", "mm:run"), InlineKeyboardButton::callback("🖼️ Swap media demo", "mm:render")],
-        vec![InlineKeyboardButton::callback("💩 Show Your Chat ID", "mm:chatid"), InlineKeyboardButton::callback("📈 Live Trade Simulation", "mm:followasset")],
-        vec![InlineKeyboardButton::callback("🪶 SQLite Benchmarks", "mm:sqlitebenchmark"), InlineKeyboardButton::callback("🦀 ReDB Benchmarks", "mm:redbbenchmark")],
-        vec![InlineKeyboardButton::callback("🧠 Heed Benchmarks", "mm:heedbenchmark")],
-        vec![InlineKeyboardButton::callback("⚙️ Settings", "mm:settings"), InlineKeyboardButton::callback("❌ Close", "mm:close")],
+        vec![InlineKeyboardButton::callback("💩 Show Your Chat ID", callbacks::CHAT_ID), InlineKeyboardButton::callback("📈 Live Trade Simulation", callbacks::FOLLOW_ASSET)],
+        vec![
+            InlineKeyboardButton::callback("🎞️ Additional Media", callbacks::ADDITIONAL_MEDIA),
+            InlineKeyboardButton::callback("🧠 Heed Benchmarks", callbacks::HEED_BENCHMARK),
+        ],
+        vec![InlineKeyboardButton::callback("🧪 Progress demo", callbacks::RUN), InlineKeyboardButton::callback("🖼️ Swap media demo", callbacks::RENDER)],
+        vec![
+            InlineKeyboardButton::callback("🪶 SQLite Benchmarks", callbacks::SQLITE_BENCHMARK),
+            InlineKeyboardButton::callback("🦀 ReDB Benchmarks", callbacks::REDB_BENCHMARK),
+        ],
+        vec![InlineKeyboardButton::callback("⚙️ Settings", callbacks::SETTINGS), InlineKeyboardButton::callback("❌ Close", callbacks::CLOSE)],
     ])
 }
 
@@ -212,6 +236,29 @@ async fn render_swap(bot: Bot, chat_id: ChatId) -> Result<()> {
         .await
         .map(|_| ())
         .map_err(|err| anyhow!("`render_swap` failed: {err}"))
+}
+
+async fn additional_media(bot: Bot, chat_id: ChatId) -> Result<()> {
+    bot.send_audio(chat_id, InputFile::memory(DEMO_AUDIO.bytes).file_name(DEMO_AUDIO.file_name))
+        .title("OgreRobot Demo Chime")
+        .performer("OgreRobot")
+        .caption("Embedded MP3 audio")
+        .await?;
+    bot.send_voice(chat_id, InputFile::memory(DEMO_VOICE.bytes).file_name(DEMO_VOICE.file_name))
+        .caption("Embedded OGG/Opus voice message")
+        .await?;
+    bot.send_video(chat_id, InputFile::memory(DEMO_VIDEO.bytes).file_name(DEMO_VIDEO.file_name))
+        .caption("Embedded H.264 MP4 video")
+        .supports_streaming(true)
+        .await?;
+    bot.send_video_note(chat_id, InputFile::memory(DEMO_VIDEO.bytes).file_name("demo_video_note.mp4"))
+        .duration(3)
+        .length(320)
+        .await?;
+    bot.send_sticker(chat_id, InputFile::memory(DEMO_STICKER.bytes).file_name(DEMO_STICKER.file_name))
+        .await
+        .map(|_| ())
+        .map_err(|err| anyhow!("`additional_media` failed: {err}"))
 }
 
 async fn sqlite_benchmark(bot: Bot, chat_id: ChatId) -> Result<()> {
@@ -272,4 +319,27 @@ async fn follow_asset(bot: Bot, chat_id: ChatId) -> Result<()> {
     plot::demo::demo(&bot, chat_id)
         .await
         .map_err(|err| anyhow!("`follow-asset` demo failed: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use teloxide::types::InlineKeyboardButtonKind;
+
+    #[test]
+    fn additional_media_has_text_and_menu_commands() {
+        assert!(matches!(Cmd::parse("/additionalmedia", "telegram_demoscene"), Ok(Cmd::AdditionalMedia)));
+
+        let has_menu_button = main_menu()
+            .inline_keyboard
+            .into_iter()
+            .flatten()
+            .any(|button| {
+                button
+                    .text
+                    .contains("Additional Media")
+                    && matches!(button.kind, InlineKeyboardButtonKind::CallbackData(data) if data == callbacks::ADDITIONAL_MEDIA)
+            });
+        assert!(has_menu_button);
+    }
 }

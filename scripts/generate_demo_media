@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    echo "Usage: scripts/generate_demo_media [--force]"
+}
+
+force=false
+case "${1:-}" in
+    "") ;;
+    --force) force=true ;;
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
+
+for command in gst-discoverer-1.0 gst-launch-1.0 magick sox; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        echo "error: required command not found: $command" >&2
+        exit 1
+    fi
+done
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+resource_dir="$repo_root/resources"
+audio="$resource_dir/demo_audio.mp3"
+voice="$resource_dir/demo_voice.ogg"
+video="$resource_dir/demo_video.mp4"
+sticker="$resource_dir/demo_sticker.webp"
+outputs=("$audio" "$voice" "$video" "$sticker")
+
+if [[ "$force" != true ]]; then
+    for output in "${outputs[@]}"; do
+        if [[ -e "$output" ]]; then
+            echo "error: refusing to overwrite $output; use --force" >&2
+            exit 1
+        fi
+    done
+fi
+
+audio_tmp="$resource_dir/.demo_audio.tmp.mp3"
+voice_tmp="$resource_dir/.demo_voice.tmp.ogg"
+video_tmp="$resource_dir/.demo_video.tmp.mp4"
+sticker_tmp="$resource_dir/.demo_sticker.tmp.webp"
+
+cleanup() {
+    rm -f "$audio_tmp" "$voice_tmp" "$video_tmp" "$sticker_tmp"
+}
+trap cleanup EXIT
+
+# A short two-note MP3 that exercises ordinary audio-player messages.
+sox -n -r 44100 -c 1 "$audio_tmp" \
+    synth 2.4 sine 440 sine 660 \
+    fade 0.08 2.4 0.2 \
+    vol 0.12
+
+# OGG must contain Opus for WhatsApp. Telegram can present the same bytes as a
+# voice message, demonstrating a different client-side treatment of the media.
+gst-launch-1.0 -q \
+    audiotestsrc wave=ticks freq=660 num-buffers=100 samplesperbuffer=960 \
+    ! audio/x-raw,rate=48000,channels=1 \
+    ! audioconvert \
+    ! opusenc bitrate=24000 \
+    ! oggmux \
+    ! filesink location="$voice_tmp"
+
+# Meta accepts H.264 video with AAC or no audio stream. Square output also lets
+# Telegram reuse the same resource as both a regular video and a video note.
+gst-launch-1.0 -q \
+    videotestsrc pattern=ball num-buffers=45 \
+    ! video/x-raw,width=320,height=320,framerate=15/1 \
+    ! textoverlay text="OgreRobot Media Demo" valignment=bottom halignment=center shaded-background=true font-desc="Sans Bold 18" \
+    ! videoconvert \
+    ! x264enc bitrate=256 key-int-max=15 speed-preset=ultrafast tune=zerolatency \
+    ! video/x-h264,profile=baseline \
+    ! h264parse \
+    ! mp4mux faststart=true \
+    ! filesink location="$video_tmp"
+
+# This simple vector-style drawing is generated locally and has no third-party
+# artwork or licensing dependency.
+magick -size 512x512 canvas:none \
+    -fill '#275d3f' -stroke '#c7f9cc' -strokewidth 12 \
+    -draw 'roundrectangle 36,64 476,448 72,72' \
+    -fill '#c7f9cc' -stroke none \
+    -draw 'circle 176,220 176,184 circle 336,220 336,184' \
+    -fill '#102a20' \
+    -draw 'circle 176,220 176,204 circle 336,220 336,204' \
+    -fill '#ffffff' \
+    -draw 'polygon 150,330 190,330 170,376 polygon 322,330 362,330 342,376' \
+    -fill '#c7f9cc' -font DejaVu-Sans-Bold -pointsize 46 -gravity south \
+    -annotate +0+22 'OGRE ROBOT' \
+    -strip -define webp:lossless=true "$sticker_tmp"
+
+gst-discoverer-1.0 "$audio_tmp" | grep -q 'MPEG-1 Layer 3'
+gst-discoverer-1.0 "$voice_tmp" | grep -q 'Opus'
+gst-discoverer-1.0 "$video_tmp" | grep -q 'H.264 (Constrained Baseline Profile)'
+[[ $(magick identify -format '%wx%h' "$sticker_tmp") == 512x512 ]]
+if (( $(stat -c '%s' "$sticker_tmp") > 100000 )); then
+    echo "error: sticker exceeds WhatsApp's 100 KB limit" >&2
+    exit 1
+fi
+
+mv "$audio_tmp" "$audio"
+mv "$voice_tmp" "$voice"
+mv "$video_tmp" "$video"
+mv "$sticker_tmp" "$sticker"
+trap - EXIT
+
+for output in "${outputs[@]}"; do
+    printf '%s %s bytes\n' "${output#"$repo_root/"}" "$(stat -c '%s' "$output")"
+done

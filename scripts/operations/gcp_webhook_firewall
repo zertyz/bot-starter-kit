@@ -6,7 +6,7 @@ set -Eeuo pipefail
 #         can prevent automated network scanners from bothering our bot.
 #         The future solution would be to create different DNS names like:
 #         - telegram.bot.ogrerobot.com, at port 443
-#         - whatsapp.bot.ogrerobot.com, at port 443 with mTLS
+#         - whatsapp.bot.ogrerobot.com, at port 443 with signed webhook bodies (mTLS?)
 #         - admin.bot.ogrerobot.com, at port 443
 #         And hold any accesses targeted at any other SNI or host (including those made directly to the server's IP address)
 #         for 60 seconds without any reply. The intention is to slow down opportunistic malicious
@@ -41,10 +41,10 @@ TELEGRAM_RANGES="149.154.160.0/20,91.108.4.0/22"  # verified 2026-07-02 -- https
 # The intended security policy is to permit webhook connections only
 # from the source networks officially documented by Telegram, etc.
 #
-# PS: Whatsapp currently uses a different mechanism not tied to any firewall rules
-#     -- it uses mTLS (Mutual TLS) for the server to be sure it is talking with a trusted client
-#     -- and would require the bot to listen on different ports to support both
-#     Telegram and Whatsapp webhooks.
+# PS: WhatsApp does not publish fixed webhook source ranges for this use. Its HTTP
+#     requests are authenticated with the X-Hub-Signature-256 HMAC header and the
+#     Meta app secret, not mutual TLS. A source-range firewall therefore cannot
+#     identify WhatsApp callers the way it can identify Telegram callers.
 #
 # Current webhook source networks for each messaging platform are declared above.
 #
