@@ -48,22 +48,25 @@ enum Cmd {
     HeedBenchmark,
     /// Perform a Live Trade Analysis simulation
     FollowAsset,
+    /// Simulates you received a Broadcast message for the starting day
+    Broadcast,
 }
 
 struct ProcessUserMo;
 
 /// Texts to be used both in the InlineKeyboardMarkup Menu (MT leg) and the parsing (MO leg)
 mod callbacks {
-    pub(super) const RUN: &str = "mm:run";
-    pub(super) const RENDER: &str = "mm:render";
-    pub(super) const ADDITIONAL_MEDIA: &str = "mm:additionalmedia";
-    pub(super) const CHAT_ID: &str = "mm:chatid";
-    pub(super) const FOLLOW_ASSET: &str = "mm:followasset";
-    pub(super) const SQLITE_BENCHMARK: &str = "mm:sqlitebenchmark";
-    pub(super) const REDB_BENCHMARK: &str = "mm:redbbenchmark";
-    pub(super) const HEED_BENCHMARK: &str = "mm:heedbenchmark";
-    pub(super) const SETTINGS: &str = "mm:settings";
-    pub(super) const CLOSE: &str = "mm:close";
+    pub const RUN: &str = "mm:run";
+    pub const RENDER: &str = "mm:render";
+    pub const ADDITIONAL_MEDIA: &str = "mm:additionalmedia";
+    pub const CHAT_ID: &str = "mm:chatid";
+    pub const FOLLOW_ASSET: &str = "mm:followasset";
+    pub const SQLITE_BENCHMARK: &str = "mm:sqlitebenchmark";
+    pub const REDB_BENCHMARK: &str = "mm:redbbenchmark";
+    pub const HEED_BENCHMARK: &str = "mm:heedbenchmark";
+    pub const BROADCAST: &str = "mm:broadcast";
+    pub const SETTINGS: &str = "mm:settings";
+    pub const CLOSE: &str = "mm:close";
 }
 
 impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUserMo {
@@ -115,6 +118,7 @@ impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUs
                                 Cmd::RedbBenchmark => mts(redb_benchmark(bot.clone(), chat_id)),
                                 Cmd::HeedBenchmark => mts(heed_benchmark(bot.clone(), chat_id)),
                                 Cmd::FollowAsset => mts(follow_asset(bot.clone(), chat_id)),
+                                Cmd::Broadcast => mts(broadcast(bot.clone(), chat_id)),
                             }
                         } else {
                             mt(bot.send_message(chat_id, "Unknown command. Try /help"))
@@ -154,6 +158,7 @@ impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUs
                             callbacks::SQLITE_BENCHMARK => sqlite_benchmark(bot.clone(), chat_id).await?,
                             callbacks::REDB_BENCHMARK => redb_benchmark(bot.clone(), chat_id).await?,
                             callbacks::HEED_BENCHMARK => heed_benchmark(bot.clone(), chat_id).await?,
+                            callbacks::BROADCAST => broadcast(bot.clone(), chat_id).await?,
                             callbacks::CLOSE => bot
                                 .edit_message_reply_markup(chat_id, msg_id)
                                 .await
@@ -182,7 +187,8 @@ pub async fn run(config: BotConfig) -> Result<()> {
 
 fn main_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![InlineKeyboardButton::callback("💩 Show Your Chat ID", callbacks::CHAT_ID), InlineKeyboardButton::callback("📈 Live Trade Simulation", callbacks::FOLLOW_ASSET)],
+        vec![InlineKeyboardButton::callback("💩 Show Your Chat ID", callbacks::CHAT_ID)],
+        vec![InlineKeyboardButton::callback("📈 Live Trade Simulation", callbacks::FOLLOW_ASSET), InlineKeyboardButton::callback("💩 Broadcast demo", callbacks::BROADCAST)],
         vec![InlineKeyboardButton::callback("🧪 Progress demo", callbacks::RUN), InlineKeyboardButton::callback("🖼️ Swap media demo", callbacks::RENDER)],
         vec![
             InlineKeyboardButton::callback("🎞️ Additional Media", callbacks::ADDITIONAL_MEDIA),
@@ -251,10 +257,10 @@ async fn additional_media(bot: Bot, chat_id: ChatId) -> Result<()> {
         .caption("Embedded H.264 MP4 video")
         .supports_streaming(true)
         .await?;
-    bot.send_video_note(chat_id, InputFile::memory(DEMO_VIDEO.bytes).file_name("demo_video_note.mp4"))
-        .duration(3)
-        .length(320)
-        .await?;
+    // bot.send_video_note(chat_id, InputFile::memory(DEMO_VIDEO.bytes).file_name("demo_video_note.mp4"))
+    //     .duration(3)
+    //     .length(320)
+    //     .await?;
     bot.send_sticker(chat_id, InputFile::memory(DEMO_STICKER.bytes).file_name(DEMO_STICKER.file_name))
         .await
         .map(|_| ())
@@ -319,6 +325,47 @@ async fn follow_asset(bot: Bot, chat_id: ChatId) -> Result<()> {
     plot::demo::demo(&bot, chat_id)
         .await
         .map_err(|err| anyhow!("`follow-asset` demo failed: {err}"))
+}
+
+async fn broadcast(bot: Bot, chat_id: ChatId) -> Result<()> {
+    let ai_analysis = r#"<b>Boletim Diário do Mercado - Análise para Day-Trade (Referente a 15/07/2026)</b><br><br>
+
+<i>Bom dia, trader! Para planejar sua estratégia de hoje, analisamos o comportamento do mercado no pregão de ontem (quarta-feira, 15 de julho de 2026). O cenário apresentou oportunidades claras tanto na ponta compradora quanto na vendedora, com forte concentração de liquidez nos ativos tradicionais e movimentos extremos fora do índice.</i><br><br>
+
+<b>1. Panorama do IBOVESPA (Altas e Baixas)</b><br>
+O índice mostrou comportamento misto, excelente para estratégias de momentum e reversão:<br>
+• <b>Maiores Altas:</b> Lideradas por <b>TOTS3 (+4,17%)</b> e <b>GGBR4 (+3,77%)</b>. Estes ativos demonstraram forte pressão compradora e devem ser monitorados na abertura de hoje para possíveis operações de continuidade de tendência (<i>Trend Following</i>).<br>
+• <b>Maiores Baixas:</b> A ponta vendedora foi puxada por <b>BRKM5 (-6,14%)</b> e <b>EGIE3 (-5,11%)</b>. Fique atento a esses papéis na perda das mínimas de ontem para trades de venda descoberta (<i>Shorting</i>).<br><br>
+
+<b>2. Liquidez e Volume (Onde o dinheiro está posicionado)</b><br>
+Como day-traders, precisamos de liquidez para entrar e sair rapidamente das posições. Ontem, o volume se concentrou fortemente em:<br>
+• <b>IBOV11:</b> Dominou com 31,48% de participação.<br>
+• <b>VALE3 (3,93% part.)</b> e <b>PETR4 (3,54% part.):</b> Mantêm-se como as melhores opções para trades rápidos com spreads curtos.<br>
+• <b>AXIA3:</b> Chamou atenção com 3,31% de participação no mercado à vista, fechando em queda de <b>-4,19%</b>. O alto volume acompanhado de desvalorização sugere forte presença institucional na venda. Pode abrir espaço para forte volatilidade hoje.<br><br>
+
+<b>3. Alerta de Volatilidade Extrema (Fora do Índice)</b><br>
+Para quem busca trades de risco agressivo em papéis menores do mercado à vista:<br>
+• <b>RDLI11</b> disparou extraordinários <b>+58,33%</b>.<br>
+• Na contramão, <b>ONCO11</b> despencou impressionantes <b>-66,66%</b>, seguida por <b>CARE11 (-35,93%)</b>. <i>Atenção:</i> Opere esses ativos com mão muito reduzida devido ao risco de gap e falta de contraparte instantânea.<br><br>
+
+<b>4. Insights de Estratégia para Hoje:</b><br>
+<pre>
++------------------+-----------------------+------------------------------------------+
+| Ativo            | Direção Estimada      | Gatilho / Justificativa                  |
++------------------+-----------------------+------------------------------------------+
+| TOTS3 / GGBR4    | Compra (Continuidade) | Rompimento da máxima de ontem.           |
+| BRKM5            | Venda (Continuidade)  | Perda da mínima de ontem (forte momentum)|
+| AXIA3            | Compra/Venda (Volume) | Monitorar abertura; alto volume ontem.   |
+| VALE3 / PETR4    | Scalping              | Operações rápidas aproveitando o book.   |
++------------------+-----------------------+------------------------------------------+
+</pre>
+
+<i>Lembre-se sempre de gerenciar seu risco, definir seus stops antes de entrar na operação e acompanhar a abertura dos mercados internacionais para alinhar a tendência macro. Bons trades!</i>"#;
+    bot.send_message(chat_id, ai_analysis)
+        .parse_mode(ParseMode::Html)
+        .await
+        .map(|_message| ())
+        .map_err(|err| anyhow!("`broadcast` demo failed: {err}"))
 }
 
 #[cfg(test)]
