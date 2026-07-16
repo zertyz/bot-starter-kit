@@ -57,7 +57,6 @@
 //! | `WHATSAPP_WEBHOOK_BIND_ADDR` | Local listener; defaults to `127.0.0.1:8080` without direct TLS | webhook modes |
 //! | `WHATSAPP_WEBHOOK_CERTIFICATE_FILE` | Optional direct-TLS full certificate chain from your ACME client | webhook modes |
 //! | `WHATSAPP_WEBHOOK_PRIVATE_KEY_FILE` | Optional matching PEM private key; set both TLS file variables or neither | webhook modes |
-//! | `WHATSAPP_DEMO_MEDIA_PATH` | Optional local image, video, audio, sticker, or document | send, media menu item |
 //!
 //! Example shell setup (replace every placeholder):
 //!
@@ -78,6 +77,9 @@
 //! `0.0.0.0:443`) and point both file variables at the full-chain `.crt` and
 //! private `.key` produced by an ACME client such as `lego`. Self-signed
 //! certificates work for local `curl` checks, not for Meta's callback.
+//! Media samples are compiled in through `src/resources.rs`; regenerate them with
+//! `scripts/generate_demo_media --force`. No media-path environment variable is
+//! required.
 //!
 //! Other modes are `send`, `send-batch`, `serve`, and `register-webhook`.
 //! `register-webhook` serves the verification challenge only while Meta registers
@@ -103,6 +105,9 @@
 //! no documented Cloud API operation for editing an already delivered message or
 //! media. Interactive rows/buttons have no arbitrary icon field; use emoji,
 //! media headers, or product imagery where the message type permits it.
+//! The official API also distinguishes voice audio with `voice: true`, but this
+//! crate cannot express that field. ZIP is not one of Meta's supported document
+//! MIME types, so the existing ZIP resource remains Telegram-only.
 //! Meta does not publish an official Rust SDK. No reviewed community crate is a
 //! clear production replacement: `wacloudapi` 0.1.0 exposes a non-cryptographic
 //! placeholder as signature verification, `whatsapp_handler` 0.2.0 unwraps
@@ -138,6 +143,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use bot_starter_kit::resources::{DEMO_AUDIO, DEMO_IMAGE, DEMO_STICKER, DEMO_VIDEO, DEMO_VOICE, EmbeddedMedia};
 use hmac::{Hmac, Mac};
 use rustls::{
     ServerConfig,
@@ -194,24 +200,10 @@ struct Config {
     webhook_bind_addr: Option<SocketAddr>,
     webhook_certificate_file: Option<String>,
     webhook_private_key_file: Option<String>,
-    media_path: Option<String>,
 }
 
 #[derive(Clone, Debug)]
-struct WhatsAppDemosceneHandler {
-    media_path: Option<Arc<str>>,
-}
-
-impl WhatsAppDemosceneHandler {
-    fn new(config: &Config) -> Self {
-        Self {
-            media_path: config
-                .media_path
-                .as_deref()
-                .map(Arc::from),
-        }
-    }
-}
+struct WhatsAppDemosceneHandler;
 
 impl WebhookHandler for WhatsAppDemosceneHandler {
     async fn handle_message(&self, _ctx: EventContext, incoming: IncomingMessage) {
@@ -241,12 +233,7 @@ impl WebhookHandler for WhatsAppDemosceneHandler {
             eprintln!("WhatsApp demoscene: failed to set the replying indicator for {}: {err}", message.id);
         }
 
-        let action = response_for(
-            message,
-            self.media_path
-                .as_deref(),
-        )
-        .await;
+        let action = response_for(message);
         if let Err(err) = execute_demo_action(&incoming, action).await {
             eprintln!("WhatsApp demoscene: failed to handle inbound message {}: {err}", message.id);
         }
@@ -332,7 +319,6 @@ impl Config {
             webhook_bind_addr: parse_socket_addr_env("WHATSAPP_WEBHOOK_BIND_ADDR")?,
             webhook_certificate_file: env_optional("WHATSAPP_WEBHOOK_CERTIFICATE_FILE"),
             webhook_private_key_file: env_optional("WHATSAPP_WEBHOOK_PRIVATE_KEY_FILE"),
-            media_path: env_optional("WHATSAPP_DEMO_MEDIA_PATH"),
         })
     }
 
@@ -581,18 +567,12 @@ async fn send_demos(config: &Config, client: &Client) -> Result<()> {
         .map_err(|err| anyhow!("WhatsApp demoscene: sending location-request demo failed: {err}"))?;
     print_sent("location request", &location_request);
 
-    if let Some(media_path) = &config.media_path {
-        let media = Media::from_path(media_path)
+    for sample in embedded_media_drafts()? {
+        let metadata = sender
+            .send(outbound.recipient_phone_number, sample.draft)
             .await
-            .map_err(|err| anyhow!("WhatsApp demoscene: loading media from {media_path:?} failed: {err}"))?
-            .caption("OgreRobot WhatsApp Demoscene: media loaded from WHATSAPP_DEMO_MEDIA_PATH.");
-        let media = sender
-            .send(outbound.recipient_phone_number, Draft::media(media).with_biz_opaque_callback_data("whatsapp-demoscene:media"))
-            .await
-            .map_err(|err| anyhow!("WhatsApp demoscene: sending media demo failed: {err}"))?;
-        print_sent("media", &media);
-    } else {
-        println!("media: skipped because WHATSAPP_DEMO_MEDIA_PATH is not set");
+            .map_err(|err| anyhow!("WhatsApp demoscene: sending {} demo failed: {err}", sample.label))?;
+        print_sent(sample.label, &metadata);
     }
 
     Ok(())
@@ -710,7 +690,7 @@ async fn serve_webhook(config: &Config, client: Client, app_client: Option<Clien
     // Do not configure WebhookService's verify-token or verify-payload builders:
     // version 0.5.0 reaches those paths through unsound Arc transmutes. The
     // routes below perform both checks before forwarding message payloads.
-    let service = WebhookService::<WhatsAppDemosceneHandler>::builder().build(WhatsAppDemosceneHandler::new(config), client);
+    let service = WebhookService::<WhatsAppDemosceneHandler>::builder().build(WhatsAppDemosceneHandler, client);
     let app_secret: Arc<str> = Arc::from(app_secret);
     let app = Router::new()
         .route(
@@ -1009,6 +989,7 @@ fn load_tls_server_config(certificate_file: &str, private_key_file: &str) -> Res
 
 enum DemoAction {
     Reply(Draft),
+    Replies(Vec<Draft>),
     SwipeReply(Draft),
     React(char),
 }
@@ -1022,6 +1003,19 @@ async fn execute_demo_action(incoming: &IncomingMessage, action: Result<DemoActi
                 .await
                 .map(|_| ())
                 .map_err(|err| anyhow!("sending reply failed: {err}"))
+        }
+        DemoAction::Replies(drafts) => {
+            for (index, draft) in drafts
+                .into_iter()
+                .enumerate()
+            {
+                validate_demo_draft(&draft)?;
+                incoming
+                    .reply(draft)
+                    .await
+                    .map_err(|err| anyhow!("sending embedded media reply {} failed: {err}", index + 1))?;
+            }
+            Ok(())
         }
         DemoAction::SwipeReply(draft) => {
             validate_demo_draft(&draft)?;
@@ -1039,7 +1033,7 @@ async fn execute_demo_action(incoming: &IncomingMessage, action: Result<DemoActi
     }
 }
 
-async fn response_for(message: &Message, media_path: Option<&str>) -> Result<DemoAction> {
+fn response_for(message: &Message) -> Result<DemoAction> {
     let command = message
         .content
         .button_click()
@@ -1057,7 +1051,12 @@ async fn response_for(message: &Message, media_path: Option<&str>) -> Result<Dem
         "/start" | "start" | "help" | "menu" | "demo:menu" => DemoAction::Reply(menu_draft()),
         "demo:list" | "list" => DemoAction::Reply(list_draft()),
         "demo:formatting" | "formatting" => DemoAction::Reply(formatted_text_draft()),
-        "demo:media" | "media" => DemoAction::Reply(media_draft(media_path).await?),
+        "demo:media" | "media" => DemoAction::Replies(
+            embedded_media_drafts()?
+                .into_iter()
+                .map(|sample| sample.draft)
+                .collect(),
+        ),
         "demo:reaction" | "reaction" => DemoAction::React('👍'),
         "demo:quote" | "quote" => DemoAction::SwipeReply(Draft::text("This is a quoted (swipe-style) reply.")),
         "demo:location" | "location" => DemoAction::Reply(location_draft()),
@@ -1089,7 +1088,7 @@ fn list_draft() -> Draft {
         .add_list_section("Messages")
         .add_list_option("demo:menu", "Quick replies", "Buttons using Draft::add_reply_button")
         .add_list_option("demo:formatting", "Formatting", "Bold, italic, strike, and monospace text")
-        .add_list_option("demo:media", "Media", "Image, video, audio, sticker, or document from a file")
+        .add_list_option("demo:media", "Media", "Embedded PNG, MP3, OGG/Opus, MP4, and WebP sticker")
         .add_list_option("demo:reaction", "Reaction", "React to the selected message with an emoji")
         .add_list_option("demo:quote", "Quoted reply", "Reply with the selected message as context")
         .add_list_section("Interactive")
@@ -1112,15 +1111,39 @@ fn formatted_text_draft() -> Draft {
     Draft::text("*Bold*\n_Italic_\n~Strikethrough~\n```Monospace```").with_biz_opaque_callback_data("whatsapp-demoscene:formatting")
 }
 
-async fn media_draft(media_path: Option<&str>) -> Result<Draft> {
-    let Some(media_path) = media_path else {
-        return Ok(Draft::text("Set WHATSAPP_DEMO_MEDIA_PATH on the server, then choose Media again."));
-    };
-    let media = Media::from_path(media_path)
-        .await
-        .map_err(|err| anyhow!("loading media from {media_path:?} failed: {err}"))?
-        .caption("OgreRobot WhatsApp Demoscene media reply.");
-    Ok(Draft::media(media).with_biz_opaque_callback_data("whatsapp-demoscene:media-reply"))
+struct DemoMediaDraft {
+    label: &'static str,
+    draft: Draft,
+}
+
+fn embedded_media_drafts() -> Result<Vec<DemoMediaDraft>> {
+    Ok(vec![
+        embedded_media_draft(DEMO_IMAGE, "image", Some("Embedded PNG image."), "image")?,
+        embedded_media_draft(DEMO_AUDIO, "MP3 audio", None, "audio-mp3")?,
+        embedded_media_draft(DEMO_VOICE, "OGG/Opus audio", None, "audio-opus")?,
+        embedded_media_draft(DEMO_VIDEO, "MP4 video", Some("Embedded H.264 MP4 video."), "video-mp4")?,
+        embedded_media_draft(DEMO_STICKER, "WebP sticker", None, "sticker-webp")?,
+    ])
+}
+
+fn embedded_media_draft(resource: EmbeddedMedia, label: &'static str, caption: Option<&str>, callback_suffix: &str) -> Result<DemoMediaDraft> {
+    let media_type = resource
+        .mime_type
+        .parse()
+        .map_err(|err: String| anyhow!("embedded resource {} has unsupported MIME type {}: {err}", resource.file_name, resource.mime_type))?;
+    let mut media = Media::new(
+        resource
+            .bytes
+            .to_vec(),
+        media_type,
+    );
+    if let Some(caption) = caption {
+        media = media.caption(caption);
+    }
+    Ok(DemoMediaDraft {
+        label,
+        draft: Draft::media(media).with_biz_opaque_callback_data(format!("whatsapp-demoscene:media:{callback_suffix}")),
+    })
 }
 
 fn location_draft() -> Draft {
@@ -1325,6 +1348,34 @@ mod tests {
     }
 
     #[test]
+    fn embedded_media_builds_five_outbound_drafts() {
+        let samples = embedded_media_drafts().unwrap();
+
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample.label)
+                .collect::<Vec<_>>(),
+            ["image", "MP3 audio", "OGG/Opus audio", "MP4 video", "WebP sticker"]
+        );
+        for sample in samples {
+            let Content::Media(media) = sample
+                .draft
+                .content
+            else {
+                panic!("{} did not build a media draft", sample.label);
+            };
+            match sample.label {
+                "image" => assert!(media.is_image()),
+                "MP3 audio" | "OGG/Opus audio" => assert!(media.is_audio()),
+                "MP4 video" => assert!(media.is_video()),
+                "WebP sticker" => assert!(media.is_sticker()),
+                label => panic!("unexpected media sample: {label}"),
+            }
+        }
+    }
+
+    #[test]
     fn webhook_challenge_accepts_only_the_configured_token() {
         let accepted = verify_webhook_challenge(
             "expected",
@@ -1432,7 +1483,7 @@ mod tests {
             .connect("unused-test-token".to_owned())
             .await
             .unwrap();
-        let service = WebhookService::<WhatsAppDemosceneHandler>::builder().build(WhatsAppDemosceneHandler { media_path: None }, client);
+        let service = WebhookService::<WhatsAppDemosceneHandler>::builder().build(WhatsAppDemosceneHandler, client);
 
         let response = handle_signed_webhook(service, Arc::from(secret), request).await;
 
