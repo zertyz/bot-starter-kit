@@ -134,7 +134,7 @@ def browser_dom(browser: str, url: str, directory: Path) -> tuple[int, str, str]
             start_new_session=True,
         )
         try:
-            return_code = process.wait(timeout=30)
+            return_code = process.wait(timeout=60)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)

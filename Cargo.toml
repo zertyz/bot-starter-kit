@@ -24,7 +24,7 @@ futures-time = { version = "3" } # enables the async-io backend required by ogre
 ogre-config-meld = { version = "0.1.7" }  # for config & cmdline models, merging, encryption
 litcrypt = { version = "0.4" }  # in-program safe-ish secrets
 serde = { version = "1", features = ["derive"] }
-#serde_json = "1"
+serde_json = "1"
 
 derive_more = { version = "2", features = ["debug"] }   # several auto-implementation macros for convenience traits, field redaction, and more
 
@@ -56,7 +56,10 @@ whatsapp-business-rs = { version = "0.5", features = ["incoming_message_ext"] }
 
 # HTTP endpoints
 axum = { version = "0.8", features = ["tokio", "http1", "http2"] }
+hex = "0.4"
+hmac = "0.12"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "0.10"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 url = "2"
 
