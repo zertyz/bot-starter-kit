@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  ./concat_clips OUTPUT FILE START_SECONDS END_SECONDS [FILE START_SECONDS END_SECONDS ...]
+
+Example:
+  ./concat_clips output.mp4 \
+    video1.mp4 10 25.5 \
+    video2.mkv 63.25 80 \
+    video3.mov 5 17.75
+
+Optional environment variables:
+  WIDTH=1280 HEIGHT=720 FPS=24 CRF=28 PRESET=veryslow
+  AUDIO_RATE=48000 AUDIO_BITRATE=128k
+USAGE
+  exit 2
+}
+
+command -v ffmpeg >/dev/null 2>&1 || { echo "error: ffmpeg not found" >&2; exit 127; }
+command -v ffprobe >/dev/null 2>&1 || { echo "error: ffprobe not found" >&2; exit 127; }
+command -v awk >/dev/null 2>&1 || { echo "error: awk not found" >&2; exit 127; }
+
+(( $# >= 4 )) || usage
+output=$1
+shift
+(( $# % 3 == 0 )) || usage
+
+width=${WIDTH:-1280}
+height=${HEIGHT:-720}
+fps=${FPS:-24}
+crf=${CRF:-28}
+preset=${PRESET:-veryslow}
+audio_rate=${AUDIO_RATE:-48000}
+audio_bitrate=${AUDIO_BITRATE:-128k}
+
+number_re='^([0-9]+([.][0-9]*)?|[.][0-9]+)$'
+
+ffmpeg_args=(-hide_banner -y)
+filter_graph=''
+concat_pads=''
+input_index=0
+clip_index=0
+
+while (( $# )); do
+  file=$1
+  start=$2
+  end=$3
+  shift 3
+
+  [[ -f $file ]] || { echo "error: input does not exist: $file" >&2; exit 1; }
+  [[ $start =~ $number_re ]] || { echo "error: invalid start time '$start' for $file" >&2; exit 1; }
+  [[ $end =~ $number_re ]] || { echo "error: invalid end time '$end' for $file" >&2; exit 1; }
+
+  duration=$(awk -v start="$start" -v end="$end" 'BEGIN {
+    duration = end - start
+    if (duration <= 0) exit 1
+    printf "%.9f", duration
+  }') || { echo "error: end must be greater than start for $file" >&2; exit 1; }
+
+  video_stream=$(ffprobe -v error -select_streams v:0 \
+    -show_entries stream=index -of csv=p=0 "$file")
+  if [[ -z $video_stream ]]; then
+    echo "error: no video stream found in $file" >&2
+    exit 1
+  fi
+
+  video_input=$input_index
+  ffmpeg_args+=(-ss "$start" -t "$duration" -i "$file")
+  ((input_index += 1))
+
+  audio_stream=$(ffprobe -v error -select_streams a:0 \
+    -show_entries stream=index -of csv=p=0 "$file")
+  if [[ -n $audio_stream ]]; then
+    audio_input=$video_input
+  else
+    audio_input=$input_index
+    ffmpeg_args+=(-f lavfi -t "$duration" -i "anullsrc=r=${audio_rate}:cl=stereo")
+    ((input_index += 1))
+  fi
+
+  filter_graph+="[${video_input}:v:0]"
+  filter_graph+="setpts=PTS-STARTPTS,"
+  filter_graph+="trim=duration=${duration},"
+  filter_graph+="scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,"
+  filter_graph+="pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+  filter_graph+="setsar=1,"
+  filter_graph+="fps=fps=${fps}:round=near,"
+  filter_graph+="format=yuv420p,"
+  filter_graph+="setpts=PTS-STARTPTS[v${clip_index}];"
+
+  filter_graph+="[${audio_input}:a:0]"
+  filter_graph+="asetpts=PTS-STARTPTS,"
+  filter_graph+="atrim=duration=${duration},"
+  filter_graph+="aresample=${audio_rate}:async=1:first_pts=0,"
+  filter_graph+="aformat=sample_fmts=fltp:sample_rates=${audio_rate}:channel_layouts=stereo,"
+  filter_graph+="apad=whole_dur=${duration},"
+  filter_graph+="atrim=duration=${duration},"
+  filter_graph+="asetpts=PTS-STARTPTS[a${clip_index}];"
+
+  concat_pads+="[v${clip_index}][a${clip_index}]"
+  ((clip_index += 1))
+done
+
+filter_graph+="${concat_pads}concat=n=${clip_index}:v=1:a=1[outv][outa]"
+
+ffmpeg "${ffmpeg_args[@]}" \
+  -filter_complex "$filter_graph" \
+  -map '[outv]' \
+  -map '[outa]' \
+  -c:v libx264 \
+  -preset "$preset" \
+  -crf "$crf" \
+  -profile:v high \
+  -pix_fmt yuv420p \
+  -c:a aac \
+  -b:a "$audio_bitrate" \
+  -ar "$audio_rate" \
+  -movflags +faststart \
+  "$output"
