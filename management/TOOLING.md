@@ -73,6 +73,50 @@ The command moves a work item to the next state by default, appends the dated st
 
 Actual state changes are allowed only on `main`, as required by `MANAGEMENT.md`; `--dry-run` remains available on work branches. `--override-gate` records a reason and can bypass only missing evidence gates, never ownership, blocker, ordering, terminal-state, or date rules.
 
+`advance_state` prints the commands that normally follow a successful transition or dry run. The complete lifecycle command map is:
+
+| Current state | Preparation and next command |
+| --- | --- |
+| `Under Planning` | Run `evaluate_plan`, then dry-run `advance_state WORK_ITEM_ID --to Planned`. |
+| `Planned` | Dry-run and then run `advance_state WORK_ITEM_ID --engineer ENGINEER`; after it reaches `Started`, use `start_work`. |
+| `Started` | Use `start_work`, then `chat_about`; before review, run `verification_check` and `review`. |
+| `In Code Review` | Run `verification_check` and `review`, then choose `QA`, `Integrated`, or direct `Merged` according to the work. |
+| `Integrated` | Link concrete evidence, inspect it with `trace_requirement`, then dry-run the move to `Merged`. |
+| `QA` | Use `acceptance_packet`, link concrete evidence, inspect it, then dry-run the move to `Merged`. |
+| `Merged` | Use `prepare_release`, optionally create the approved tag, record the observed outcome with `record_release`, link `management/RELEASES.md`, then dry-run `Rolled Out`. |
+| `Rolled Out` | The lifecycle is complete; use `trace_requirement` and `sync_requirement` for final inspection. |
+| `Rejected`, `Cancelled`, or `Superseded by ...` | Terminal; no further lifecycle transition applies. |
+
+Blocked is independent of those states. When an advance fails because the item is blocked, run `unblock_work WORK_ITEM_ID --reason "..."` after the blocker has actually been resolved.
+
+When the command reports that a work item has no `TRACEABILITY.md` row or no existing concrete evidence path, add both with `link_evidence`, inspect the result, and retry the transition:
+
+```bash
+scripts/management/link_evidence WORK_ITEM_ID EXISTING_REPO_PATH [MORE_EXISTING_PATHS ...]
+scripts/management/trace_requirement REQUIREMENT_ID
+scripts/management/advance_state WORK_ITEM_ID --dry-run
+scripts/management/advance_state WORK_ITEM_ID
+```
+
+For `EF.Gov.01-002`, the governing requirement is `E.Gov.01`. A concrete command covering the management implementation, tests, documentation, and bug-report intake is:
+
+```bash
+scripts/management/link_evidence EF.Gov.01-002 \
+  --note "Management command guidance, bug-report intake, and shared GUI/report support" \
+  scripts/management/management_tool \
+  scripts/management/gui_server \
+  scripts/management/gui_static/app.js \
+  scripts/management/gui_static/index.html \
+  scripts/management/test_management_tool \
+  scripts/management/test_gui_server \
+  management/BUGS.md \
+  management/TOOLING.md
+```
+
+Link only artifacts that substantively support the work. At least one linked path must already exist for the deterministic evidence gate to pass; a note alone is not a concrete path, and `--allow-missing` does not make a missing path satisfy the gate.
+
+When the target is `Rolled Out`, evidence of implementation alone is insufficient. The work item must be named in a schema-valid `Released` entry and must link release or operational evidence. The release workflow below creates that record without manually editing `RELEASES.md`.
+
 
 ## Block and Unblock Work
 
@@ -83,6 +127,8 @@ scripts/management/unblock_work ER.MCP.02.a-001 --reason "The contract decision 
 ```
 
 Blocking is append-only history independent of lifecycle state. Repeated block or unblock operations that do not change the current blocked condition are rejected. Actual writes require `main`; `--dry-run` can be used elsewhere.
+
+Use `block_work` when a specific work item temporarily cannot proceed; it does not move that item's lifecycle state. Before writing, it validates the complete management graph. An error naming another management file means that record must be made coherent before the blocker can be appended.
 
 
 ## Start Engineering Work
@@ -138,9 +184,14 @@ The command checks whether a proposed work item or branch is structurally cohere
 ```bash
 scripts/management/draft_plan E.MCP.02.b
 scripts/management/draft_plan E.MCP.02.b --write
+scripts/management/draft_plan E.Gov.01 --motivation F --title "Fix management command behavior" --write
 ```
 
 The command proposes the next syntactically valid backlog entry for a requirement and prints the existing work already tied to that requirement. By default it is a dry run; `--write` appends the entry under `Under Planning`. Use `--title`, `--motivation`, `--body-line`, `--date`, and `--allow-existing-open` when the default draft is not the intended plan.
+
+`BUGS.md` is the intake ledger for unresolved reports. A report may be unverified, may be a misunderstanding, and need not initially identify a Business, Engineering, or Operations requirement. It is therefore not planned work. Only entries under the single exact `## Open Reports` section are validated and included in GUI, status, dashboard, and meeting-packet counts; other level-two sections are inactive history.
+
+After validation, create an `F`-motivation work item for any required corrective work and link it from the report. Keep the report current until that work reaches `Rolled Out`. If investigation resolves the report through clarification or documentation without corrective work, keep it current until that disposition is complete. An addressed report may then move to `## Addressed Reports` while useful and be deleted later; git history also retains it. `INCIDENTS.md` remains reserved for production, staging, data, security, or release failures.
 
 
 ## Audit Requirements
@@ -177,10 +228,13 @@ The command checks one requirement against mapped backlog work, `TRACEABILITY.md
 
 ```bash
 scripts/management/trace_requirement E.MCP.01
-scripts/management/link_evidence E.MCP.01 EN.MCP.01-001 src/messaging/user_router.rs
+scripts/management/link_evidence EN.MCP.01-001 src/messaging/user_router.rs
+scripts/management/link_evidence EN.MCP.01-001 src/messaging/user_router.rs --note "Routing implementation and same-module tests"
 ```
 
-Evidence is a concrete artifact that supports a requirement or work item: code, tests, benchmarks, review notes, release notes, operational logs, incident follow-up, or documentation. `trace_requirement` shows the current knowledge base for one requirement. `link_evidence` updates `TRACEABILITY.md` after validating the requirement, work item, and evidence paths.
+Evidence is a concrete artifact that supports a requirement or work item: code, tests, benchmarks, review notes, release notes, operational logs, incident follow-up, or documentation. Paths are repository-relative and normally must exist. `trace_requirement` shows the parsed Current Links row and reports whether its evidence paths exist. `link_evidence` derives the exact governing requirement from the work item, validates the paths, then creates or updates the row using the work item's current state. Repeating it appends evidence that is not already present. The older `REQUIREMENT_ID WORK_ITEM_ID` form remains accepted for compatibility, but the requirement argument is unnecessary.
+
+Use `--note` for a short explanation in addition to concrete paths. Use `--allow-missing` only to record a planned artifact; a missing artifact remains insufficient for a `Merged` or `Rolled Out` evidence gate.
 
 
 ## Release Commands
@@ -189,9 +243,19 @@ Evidence is a concrete artifact that supports a requirement or work item: code, 
 scripts/management/prepare_release 1.2.3-rc.1
 scripts/management/create_release_tag 1.2.3-rc.1
 scripts/management/create_release_tag 1.2.3-rc.1 --execute
+scripts/management/record_release 1.2.3 EF.Gov.01-002 \
+  --decision Released \
+  --verification "Branch, main, post-merge, and operational checks passed" \
+  --rollback "Restore the preceding deployed revision" \
+  --notes "Management tooling guidance release"
+scripts/management/link_evidence EF.Gov.01-002 management/RELEASES.md
+scripts/management/advance_state EF.Gov.01-002 --dry-run
+scripts/management/advance_state EF.Gov.01-002
 ```
 
-`prepare_release` prints a release decision packet and never creates tags. `create_release_tag` validates the tag format and clean worktree; it is a dry run unless `--execute` is passed.
+`prepare_release` prints a packet containing the currently `Merged` work and never creates tags. `create_release_tag` validates the tag format and clean worktree; it is a dry run unless `--execute` is passed, and it creates only a local tag. Pushing the tag and observing deployment checks remain deliberate release-owner actions.
+
+After the outcome is known, `record_release` writes one structured entry before the retained format section in `RELEASES.md`. It derives requirement IDs and summaries from the supplied work item IDs, accepts only `Merged` or already `Rolled Out` work, and requires an explicit decision, verification, rollback or mitigation, and notes. It does not create or push a tag, deploy, link evidence, or change backlog states. A release-candidate version cannot have a production decision of `Released`. For a production `Released` decision, link `management/RELEASES.md` to each still-`Merged` work item before retrying `advance_state`. A `Rejected` or `Rolled back` entry documents the outcome but cannot satisfy the `Rolled Out` gate.
 
 
 ## Supporting Ledgers

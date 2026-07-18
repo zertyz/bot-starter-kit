@@ -462,6 +462,17 @@ button.local-only {
   white-space: pre-wrap;
 }
 
+.bug-report-text {
+  min-width: 260px;
+  white-space: pre-wrap;
+}
+
+.bug-report-text pre {
+  margin: 6px 0 0;
+  font: inherit;
+  white-space: pre-wrap;
+}
+
 .coverage-breakdown {
   display: block;
   margin-top: 4px;

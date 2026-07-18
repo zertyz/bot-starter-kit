@@ -2,6 +2,8 @@
 
 Production releases are recorded here when a production tag is created. Release-candidate tags are test artifacts and should only be recorded when they affect a release decision.
 
+Use `scripts/management/record_release --help` after the release outcome is known. The command writes the structure below; it does not create or push tags, deploy, link evidence, or advance work items.
+
 
 ## No Production Releases Recorded Yet
 

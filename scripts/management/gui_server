@@ -12,6 +12,7 @@ import ipaddress
 import json
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -58,6 +59,7 @@ DIAGRAM_ACTIONS = {
 }
 ALWAYS_MUTATING_ACTIONS = {
     "link-evidence",
+    "record-release",
     "record-decision",
     "record-risk",
     "close-risk",
@@ -414,6 +416,37 @@ def ledger_payload(entry) -> dict[str, object]:
     }
 
 
+def markdown_blockquote_text(value: str) -> str:
+    lines = []
+    for line in value.splitlines():
+        if line == ">":
+            lines.append("")
+        elif line.startswith("> "):
+            lines.append(line[2:])
+        else:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def bug_report_payload(entry) -> dict[str, object]:
+    related_work = sorted(
+        set(
+            re.findall(
+                r"\b[BEO][NRFX]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*-\d{3}\b",
+                tool._ledger_section(entry, "Related work"),
+            )
+        )
+    )
+    return {
+        **ledger_payload(entry),
+        "reported": tool._ledger_field(entry, "Reported"),
+        "reporter": tool._ledger_field(entry, "Reporter"),
+        "related_work": related_work,
+        "report": markdown_blockquote_text(tool._ledger_section(entry, "Report")),
+        "assessment": tool._ledger_section(entry, "Assessment"),
+    }
+
+
 def stale_payload(item) -> dict[str, object]:
     return {
         "id": item.item.id,
@@ -456,6 +489,8 @@ def model_payload(stale_days: int = DEFAULT_STALE_DAYS, loaded_model=None) -> di
     incidents = tool.open_ledger_entries(tool.MANAGEMENT_DIR / "INCIDENTS.md")
     experiments = tool.open_ledger_entries(tool.MANAGEMENT_DIR / "EXPERIMENTS.md")
     decisions = tool.ledger_entries(tool.MANAGEMENT_DIR / "DECISIONS.md")[-10:]
+    releases = tool.ledger_entries(tool.MANAGEMENT_DIR / "RELEASES.md")[-10:]
+    bug_reports = tool.open_bug_report_entries()
     gaps = tool.traceability_gaps(model) if not model.errors else []
     unmapped = tool.unmapped_requirements(model) if not model.errors else []
     stale = tool.stale_work_items(model, stale_days) if not model.errors else []
@@ -491,6 +526,7 @@ def model_payload(stale_days: int = DEFAULT_STALE_DAYS, loaded_model=None) -> di
             "open_risks": len(risks),
             "open_incidents": len(incidents),
             "active_experiments": len(experiments),
+            "open_bug_reports": len(bug_reports),
             "audit_blockers": sum(1 for finding in audit if finding.severity == "BLOCKER"),
             "audit_reviews": sum(1 for finding in audit if finding.severity == "REVIEW"),
             "quality_blockers": sum(1 for finding in quality if finding.severity == "BLOCKER"),
@@ -514,12 +550,14 @@ def model_payload(stale_days: int = DEFAULT_STALE_DAYS, loaded_model=None) -> di
             work_item_payload(item, model, quality_by_requirement, links)
             for item in sorted(model.work_items.values(), key=lambda candidate: candidate.id)
         ],
+        "bug_reports": [bug_report_payload(entry) for entry in bug_reports],
         "traceability": [traceability_payload(link, model) for link in links],
         "traceability_gaps": [requirement.id for requirement in gaps],
         "unmapped_requirements": [requirement.id for requirement in unmapped],
         "stale_work": [stale_payload(item) for item in stale],
         "ledgers": {
             "decisions": [ledger_payload(entry) for entry in decisions],
+            "releases": [ledger_payload(entry) for entry in releases],
             "risks": [ledger_payload(entry) for entry in risks],
             "incidents": [ledger_payload(entry) for entry in incidents],
             "experiments": [ledger_payload(entry) for entry in experiments],
@@ -866,7 +904,7 @@ def build_management_command(action: str, payload: dict[str, object]) -> list[st
         args = ["trace-requirement", required(payload, "requirement_id")]
         add_option(args, "--limit", optional(payload, "limit"))
     elif action == "link-evidence":
-        args = ["link-evidence", required(payload, "requirement_id"), required(payload, "work_item_id")]
+        args = ["link-evidence", required(payload, "work_item_id")]
         paths = list_value(payload, "paths")
         if not paths:
             raise ClientError("paths is required")
@@ -888,6 +926,20 @@ def build_management_command(action: str, payload: dict[str, object]) -> list[st
             if optional(payload, "confirm") != version:
                 raise ClientError("confirm must match the release version before creating a tag")
             args.append("--execute")
+    elif action == "record-release":
+        work_item_ids = list_value(payload, "work_item_ids")
+        if not work_item_ids:
+            raise ClientError("work_item_ids is required")
+        args = ["record-release", required(payload, "version"), *work_item_ids]
+        args.extend(["--decision", required(payload, "decision")])
+        verification = list_value(payload, "verification")
+        if not verification:
+            raise ClientError("verification is required")
+        for check in verification:
+            args.extend(["--verification", check])
+        args.extend(["--rollback", required(payload, "rollback")])
+        args.extend(["--notes", required(payload, "notes")])
+        add_option(args, "--date", optional(payload, "date"))
     elif action == "chase-techdebts":
         args = ["chase-techdebts"]
         add_option(args, "--limit", optional(payload, "limit"))
@@ -1320,7 +1372,20 @@ def bind_server(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the local management GUI or export the static Management Report.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the local management GUI or export the static Management Report.\n\n"
+            "When to use:\n"
+            "  Run the GUI for local interactive authoring; use --html for a read-only static report."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  scripts/management/gui --no-browser\n"
+            "  scripts/management/management_report --html public/management\n\n"
+            "See management/TOOLING.md for the complete workflow documentation."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1.")
     parser.add_argument(
         "--unsafe-allow-non-loopback",

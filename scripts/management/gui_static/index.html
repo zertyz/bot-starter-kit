@@ -27,6 +27,7 @@
       <button class="nav-item active" data-view="overview" type="button" aria-current="page">Overview</button>
       <button class="nav-item" data-view="requirements" type="button">Requirements</button>
       <button class="nav-item" data-view="work" type="button">Work</button>
+      <button class="nav-item" data-view="bugs" type="button">Open Bug Reports</button>
       <button class="nav-item" data-view="traceability" type="button">Traceability</button>
       <button class="nav-item" data-view="workflows" type="button">Workflows</button>
       <button class="nav-item" data-view="ledgers" type="button">Ledgers</button>
@@ -100,6 +101,30 @@
         </div>
       </section>
 
+      <section class="view" id="view-bugs">
+        <div class="toolbar">
+          <input id="bug-filter" type="search" placeholder="Filter open bug reports" aria-label="Filter open bug reports">
+        </div>
+        <p class="section-note">Unresolved intake from <code>management/BUGS.md</code>'s exact <code>## Open Reports</code> section. Other level-two sections are inactive history and do not appear here.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Status</th>
+                <th>Reported</th>
+                <th>Reporter</th>
+                <th>Report</th>
+                <th>Related work</th>
+                <th>Assessment</th>
+                <th>Source</th>
+              </tr>
+            </thead>
+            <tbody id="bugs-table"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="view" id="view-traceability">
         <div class="toolbar">
           <input id="traceability-filter" type="search" placeholder="Filter coverage and evidence" aria-label="Filter traceability coverage and evidence">
@@ -159,7 +184,7 @@
             <h2>Draft Plan</h2>
             <label>Requirement <select name="requirement_id" data-select="requirements"></select></label>
             <label>Title <input name="title"></label>
-            <label>Motivation <select name="motivation"><option value="">Default</option><option>N</option><option>R</option><option>F</option><option>X</option></select></label>
+            <label>Motivation <select name="motivation"><option value="">Default — N or R based on prior work</option><option value="N">N — New requirement work</option><option value="R">R — Revisit or changed implementation approach</option><option value="F">F — Fix for faulty or buggy implementation</option><option value="X">X — Experiment, prototype, R&amp;D, or spike</option></select></label>
             <label>Date <input name="date" placeholder="YYYY-MM-DD"></label>
             <label>Body Lines <textarea name="body_lines" rows="3"></textarea></label>
             <label class="check"><input name="write" type="checkbox"> Write backlog entry</label>
@@ -191,7 +216,6 @@
 
           <form class="panel" data-form="link-evidence">
             <h2>Link Evidence</h2>
-            <label>Requirement <select name="requirement_id" data-select="requirements"></select></label>
             <label>Work Item <select name="work_item_id" data-select="work-items"></select></label>
             <label>Paths <textarea name="paths" rows="3" placeholder="src/lib.rs"></textarea></label>
             <label>Note <input name="note"></label>
@@ -201,12 +225,26 @@
 
           <form class="panel" data-form="release">
             <h2>Release</h2>
-            <label>Version <input name="version" placeholder="1.2.3-rc.1"></label>
+            <label>Version <input name="version" placeholder="1.2.3"></label>
             <label>Tag Message <input name="message"></label>
             <label>Confirm Tag <input name="confirm" placeholder="Must match version"></label>
+            <label class="check"><input name="execute" type="checkbox"> Create local tag</label>
+            <label>Included Work <textarea name="work_item_ids" rows="2" placeholder="EF.Gov.01-002&#10;EN.Demo.02-001"></textarea></label>
+            <label>Production Decision
+              <select name="decision">
+                <option value="Released">Released</option>
+                <option value="Rejected">Rejected</option>
+                <option value="Rolled back">Rolled back</option>
+              </select>
+            </label>
+            <label>Verification <textarea name="verification" rows="3" placeholder="One completed check per line"></textarea></label>
+            <label>Rollback or Mitigation <textarea name="rollback" rows="2"></textarea></label>
+            <label>Release Notes <textarea name="notes" rows="2"></textarea></label>
+            <label>Decision Date <input name="date" placeholder="YYYY-MM-DD"></label>
             <div class="button-row">
               <button type="button" data-form-action="prepare-release">Prepare</button>
-              <button type="button" data-form-action="create-release-tag">Dry Tag</button>
+              <button type="button" data-form-action="create-release-tag">Tag</button>
+              <button type="button" data-form-action="record-release">Record Outcome</button>
             </div>
           </form>
 

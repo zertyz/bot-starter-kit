@@ -22,6 +22,7 @@ Ground every conclusion in repository evidence. Treat deterministic tooling as a
 ## Apply Guardrails
 
 - Preserve the distinction between lifecycle state and the independent blocked condition.
+- Treat `management/BUGS.md`'s exact `## Open Reports` section as unresolved report intake, not confirmed defects or planned work. A validated report links to `F` work and remains open until that work reaches `Rolled Out`; do not erase the observation when planning its correction. Other level-two sections are inactive history and may retain addressed reports.
 - Never turn an `active` lexical prompt into a semantic conclusion without inspecting context. Treat an `acknowledged` prompt as an explicit author disposition; mixed plain occurrences remain evidence to inspect, not grounds to reactivate it automatically.
 - Do not call zero work requirement drift. Describe `work_coverage: unplanned` as planning state unless a separate commitment or historical inconsistency makes it drift.
 - Treat only rows parsed from the single canonical `## Current Links` table as traceability evidence. Each row belongs to the exact requirement governing its work item; parent views may aggregate descendant rows. Unmapped Requirement Areas are coverage acknowledgements, not evidence.

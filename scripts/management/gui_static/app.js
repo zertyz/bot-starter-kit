@@ -176,6 +176,7 @@ function render() {
   renderAttention();
   renderRequirements();
   renderWorkItems();
+  renderBugReports();
   renderTraceability();
   renderSelects();
   renderLedgers();
@@ -224,6 +225,7 @@ function renderMetrics() {
   const labels = [
     ["requirements", "Requirements"],
     ["work_items", "Work Items"],
+    ["open_bug_reports", "Open Bug Reports"],
     ["unplanned_requirements", "Unplanned Requirements"],
     ["evidence_gaps", "Evidence Gaps"],
     ["evidence_pending", "Evidence Pending"],
@@ -264,6 +266,9 @@ function renderAttention() {
   }
   for (const item of state.model.stale_work.slice(0, 8)) {
     items.push(`<div class="list-item"><strong>${escapeHtml(item.id)}</strong><span>${escapeHtml(item.reason)}</span></div>`);
+  }
+  for (const report of (state.model.bug_reports ?? []).slice(0, 8)) {
+    items.push(`<div class="list-item"><strong>${escapeHtml(report.id)} · ${escapeHtml(report.status)}</strong><span>${escapeHtml(report.title)}</span></div>`);
   }
   for (const finding of state.model.quality_findings.filter((item) => item.severity === "BLOCKER").slice(0, 8)) {
     items.push(`<div class="list-item"><strong class="error">${escapeHtml(finding.requirement_id)} ${escapeHtml(finding.category)}</strong><span>${escapeHtml(finding.message)} · ${escapeHtml(finding.edit_hint)}</span></div>`);
@@ -344,6 +349,38 @@ function renderWorkItems() {
       </tr>
     `).join("");
   $("#work-table").innerHTML = rows || `<tr><td colspan="7" class="empty">None</td></tr>`;
+}
+
+function bugStatusKind(status) {
+  if (status === "Investigating" || status === "Validated") return "blue";
+  return "orange";
+}
+
+function renderBugReports() {
+  const filter = $("#bug-filter").value.toLowerCase();
+  const rows = (state.model.bug_reports ?? [])
+    .filter((report) => `${report.id} ${report.status} ${report.reported ?? ""} ${report.reporter ?? ""} ${report.title} ${report.report} ${(report.related_work ?? []).join(" ")} ${report.assessment}`.toLowerCase().includes(filter))
+    .map((report) => {
+      const related = (report.related_work ?? []).map((workId) => {
+        const item = workById(workId);
+        return item
+          ? `<button type="button" data-select-work="${escapeHtml(workId)}">${escapeHtml(workId)}</button>`
+          : escapeHtml(workId);
+      }).join(" ") || '<span class="empty">None</span>';
+      return `
+        <tr>
+          <td><strong>${escapeHtml(report.id)}</strong></td>
+          <td>${pill(report.status, bugStatusKind(report.status))}</td>
+          <td>${escapeHtml(report.reported ?? "")}</td>
+          <td>${escapeHtml(report.reporter ?? "")}</td>
+          <td class="bug-report-text"><strong>${escapeHtml(report.title)}</strong><pre>${escapeHtml(report.report || "No report text")}</pre></td>
+          <td>${related}</td>
+          <td class="bug-report-text">${escapeHtml(report.assessment || "Pending")}</td>
+          <td>${escapeHtml(report.path)}:${report.line}</td>
+        </tr>
+      `;
+    }).join("");
+  $("#bugs-table").innerHTML = rows || `<tr><td colspan="8" class="empty">None</td></tr>`;
 }
 
 function coverageDetail(req) {
@@ -442,6 +479,7 @@ function renderAdvanceStateTargets() {
 function renderLedgers() {
   const sections = [
     ["decisions", "Recent Decisions"],
+    ["releases", "Recent Releases"],
     ["risks", "Open Risks"],
     ["incidents", "Open Incidents"],
     ["experiments", "Active Experiments"],
@@ -744,6 +782,7 @@ function wireEvents() {
   $("#clear-output").addEventListener("click", () => { $("#command-output").textContent = ""; });
   $("#requirement-filter").addEventListener("input", renderRequirements);
   $("#work-filter").addEventListener("input", renderWorkItems);
+  $("#bug-filter").addEventListener("input", renderBugReports);
   $("#traceability-filter").addEventListener("input", renderTraceability);
   $("#tech-debt-filter").addEventListener("input", renderTechDebt);
   $("#advance-state-work").addEventListener("change", renderAdvanceStateTargets);

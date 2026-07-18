@@ -21,6 +21,7 @@ SOURCE_TOOL = Path(__file__).resolve().parent / "management_tool"
 SUPPORTING_FILES = [
     "MANAGEMENT.md",
     "README.ai.md",
+    "BUGS.md",
     "DECISIONS.md",
     "DEFINITION_OF_READY_DONE.md",
     "RELEASES.md",
@@ -115,6 +116,10 @@ class ManagementToolTest(unittest.TestCase):
         )
         for name in SUPPORTING_FILES:
             (self.management / name).write_text(f"# {name}\n", encoding="utf-8")
+        (self.management / "BUGS.md").write_text(
+            "# Bug Reports\n\n## Open Reports\n",
+            encoding="utf-8",
+        )
         (self.management / "TRACEABILITY.md").write_text(
             "# Traceability\n\n## Current Links\n\n"
             "| Requirement | Work Item | State | Evidence |\n"
@@ -203,6 +208,22 @@ class ManagementToolTest(unittest.TestCase):
         self.assertIn("already has Planned: 2026-07-05", result.stdout)
         backlog = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
         self.assertNotIn("2026-07-07", backlog)
+
+    def test_planned_to_started_error_points_to_engineer_command(self) -> None:
+        result = self.tool_run(
+            "advance-state",
+            "ER.MCP.02.a-001",
+            "--to",
+            "Started",
+            "--date",
+            "2026-07-06",
+            expected=1,
+        )
+        self.assertIn("--engineer is required", result.stderr)
+        self.assertIn(
+            "scripts/management/advance_state ER.MCP.02.a-001 --engineer <ENGINEER> --dry-run",
+            result.stderr,
+        )
 
     def test_start_work_dry_run_requires_started_owner(self) -> None:
         started = self.tool_run("start-work", "Luiz/EN.MCP.01-001", "--dry-run")
@@ -590,12 +611,18 @@ class ManagementToolTest(unittest.TestCase):
         self.write_traceability()
         exact_link = self.tool_run(
             "link-evidence",
-            "E.MCP.02.a",
             "ER.MCP.02.a-001",
             "src/lib.rs",
         )
         self.assertIn("Requirement: E.MCP.02.a", exact_link.stdout)
         self.assertIn("| `E.MCP.02.a` | `ER.MCP.02.a-001` |", traceability.read_text(encoding="utf-8"))
+        legacy_link = self.tool_run(
+            "link-evidence",
+            "E.MCP.02.a",
+            "ER.MCP.02.a-001",
+            "src/lib.rs",
+        )
+        self.assertIn("Action:      updated", legacy_link.stdout)
 
     def test_work_and_evidence_coverage_are_structured_and_lifecycle_aware(self) -> None:
         module = self.load_tool_module()
@@ -838,13 +865,27 @@ class ManagementToolTest(unittest.TestCase):
         src = self.root / "src"
         src.mkdir()
         (src / "lib.rs").write_text("pub fn route() {}\n", encoding="utf-8")
-        link = self.tool_run("link-evidence", "E.MCP.01", "EN.MCP.01-001", "src/lib.rs")
+        link = self.tool_run("link-evidence", "EN.MCP.01-001", "src/lib.rs")
         self.assertIn("Evidence Link", link.stdout)
         traceability = (self.management / "TRACEABILITY.md").read_text(encoding="utf-8")
         self.assertIn("| `E.MCP.01` | `EN.MCP.01-001` | Started | `src/lib.rs` |", traceability)
         trace = self.tool_run("trace-requirement", "E.MCP.01")
         self.assertIn("Requirement Trace", trace.stdout)
         self.assertIn("src/lib.rs", trace.stdout)
+
+    def test_link_evidence_derives_requirement_from_work_item(self) -> None:
+        link = self.tool_run(
+            "link-evidence",
+            "EN.MCP.01-001",
+            "./management",
+            "--note",
+            "Manually verified by Luiz",
+        )
+
+        self.assertIn("Requirement: E.MCP.01", link.stdout)
+        self.assertIn("Work item:   EN.MCP.01-001", link.stdout)
+        traceability = (self.management / "TRACEABILITY.md").read_text(encoding="utf-8")
+        self.assertIn("`management`; Manually verified by Luiz", traceability)
 
     def test_prepare_release_and_tag_dry_run(self) -> None:
         release = self.tool_run("prepare-release", "1.2.3-rc.1")
@@ -853,6 +894,100 @@ class ManagementToolTest(unittest.TestCase):
         tag = self.tool_run("create-release-tag", "1.2.3-rc.1")
         self.assertIn("Release Tag", tag.stdout)
         self.assertIn("Dry run:", tag.stdout)
+        self.assertIn("create_release_tag 1.2.3-rc.1 --execute", tag.stdout)
+
+    def test_record_release_writes_valid_entry_and_guides_rollout_dependencies(self) -> None:
+        src = self.root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text("pub fn route() {}\n", encoding="utf-8")
+        self.tool_run("link-evidence", "EN.MCP.01-001", "src/lib.rs")
+        self.tool_run("advance-state", "EN.MCP.01-001", "--to", "In Code Review", "--date", "2026-07-06")
+        self.tool_run("advance-state", "EN.MCP.01-001", "--to", "Merged", "--date", "2026-07-07")
+
+        release_candidate = self.tool_run(
+            "record-release",
+            "1.2.3-rc.1",
+            "EN.MCP.01-001",
+            "--decision",
+            "Released",
+            "--verification",
+            "Checks passed",
+            "--rollback",
+            "Restore the preceding release.",
+            "--notes",
+            "Candidate outcome.",
+            expected=1,
+        )
+        self.assertIn("release candidate 1.2.3-rc.1 cannot have production decision Released", release_candidate.stderr)
+
+        release = self.tool_run(
+            "record-release",
+            "1.2.3",
+            "EN.MCP.01-001",
+            "--decision",
+            "Released",
+            "--verification",
+            "Branch and main CI passed",
+            "--verification",
+            "Post-merge operational check passed",
+            "--rollback",
+            "Restore release 1.2.2.",
+            "--notes",
+            "Per-user routing release.",
+            "--date",
+            "2026-07-08",
+        )
+
+        self.assertIn("Decision: Released", release.stdout)
+        self.assertIn("link_evidence EN.MCP.01-001 management/RELEASES.md", release.stdout)
+        releases = (self.management / "RELEASES.md").read_text(encoding="utf-8")
+        self.assertIn("### 1.2.3 -- 2026-07-08", releases)
+        self.assertIn("`EN.MCP.01-001` -- Started routing work", releases)
+        self.assertIn("`E.MCP.01` -- Per User Routing", releases)
+        self.assertIn("`Released`", releases)
+        self.tool_run("lint", "--strict")
+
+        missing_link = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Rolled Out",
+            "--date",
+            "2026-07-08",
+            expected=1,
+        )
+        self.assertNotIn("schema-valid Released entry", missing_link.stderr)
+        self.assertIn("link_evidence EN.MCP.01-001 management/RELEASES.md", missing_link.stderr)
+
+        original = (self.management / "RELEASES.md").read_bytes()
+        duplicate = self.tool_run(
+            "record-release",
+            "1.2.3",
+            "EN.MCP.01-001",
+            "--decision",
+            "Released",
+            "--verification",
+            "Checks passed",
+            "--rollback",
+            "Restore release 1.2.2.",
+            "--notes",
+            "Duplicate.",
+            expected=1,
+        )
+        self.assertIn("already recorded", duplicate.stderr)
+        self.assertEqual(original, (self.management / "RELEASES.md").read_bytes())
+
+        self.tool_run("link-evidence", "EN.MCP.01-001", "management/RELEASES.md")
+        rollout = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Rolled Out",
+            "--date",
+            "2026-07-08",
+        )
+        self.assertIn("State:       Rolled Out", rollout.stdout)
+        self.assertIn("sync_requirement E.MCP.01", rollout.stdout)
 
     def test_record_and_close_supporting_ledgers(self) -> None:
         decision = self.tool_run(
@@ -1198,6 +1333,20 @@ class ManagementToolTest(unittest.TestCase):
     def test_optional_qa_path_is_allowed(self) -> None:
         self.tool_run("advance-state", "EN.MCP.01-001", "--to", "In Code Review", "--date", "2026-07-06")
         self.tool_run("advance-state", "EN.MCP.01-001", "--to", "QA", "--date", "2026-07-07")
+        missing_evidence = self.tool_run(
+            "advance-state",
+            "EN.MCP.01-001",
+            "--to",
+            "Merged",
+            "--date",
+            "2026-07-08",
+            expected=1,
+        )
+        self.assertIn(
+            "scripts/management/link_evidence EN.MCP.01-001 <EXISTING_REPO_PATH>",
+            missing_evidence.stderr,
+        )
+        self.assertIn("scripts/management/trace_requirement E.MCP.01", missing_evidence.stderr)
         result = self.tool_run(
             "advance-state",
             "EN.MCP.01-001",
@@ -1323,11 +1472,98 @@ class ManagementToolTest(unittest.TestCase):
             expected=1,
         )
         self.assertIn("is blocked", blocked_advance.stderr)
+        self.assertIn(
+            'scripts/management/unblock_work EN.MCP.01-001 --reason "<RESOLUTION>"',
+            blocked_advance.stderr,
+        )
         self.tool_run("unblock-work", "EN.MCP.01-001", "--reason", "The API decision was recorded.", "--date", "2026-07-07")
         self.tool_run("advance-state", "EN.MCP.01-001", "--to", "In Code Review", "--date", "2026-07-08")
         final_text = (self.management / "ENGINEERING.backlog.md").read_text(encoding="utf-8")
         self.assertIn("==> Unblocked: 2026-07-07; Reason: The API decision was recorded.", final_text)
         self.assertLess(final_text.index("==> Blocked:"), final_text.index("==> Unblocked:"))
+
+    def test_planned_work_can_be_blocked_without_changing_lifecycle_state(self) -> None:
+        result = self.tool_run(
+            "block-work",
+            "ER.MCP.02.a-001",
+            "--reason",
+            "Underlying requirement is under revision after the WhatsApp Demoscene findings.",
+            "--date",
+            "2026-07-18",
+        )
+        self.assertIn("State:       Planned", result.stdout)
+
+        module = self.load_tool_module()
+        item = module.load_model().work_items["ER.MCP.02.a-001"]
+        self.assertEqual("Planned", item.state)
+        self.assertEqual({"Planned": "2026-07-05"}, item.timeline)
+        self.assertTrue(item.blocked)
+        self.assertEqual("Blocked", item.block_events[-1].action)
+
+    def test_every_command_help_explains_purpose_timing_and_examples(self) -> None:
+        module = self.load_tool_module()
+        parser = module.build_parser()
+        subparsers = next(
+            action
+            for action in parser._actions
+            if isinstance(action, module.argparse._SubParsersAction)
+        )
+        canonical_commands = [action.dest for action in subparsers._choices_actions]
+        self.assertEqual(set(canonical_commands), set(module.COMMAND_GUIDANCE))
+
+        for command in canonical_commands:
+            with self.subTest(command=command):
+                help_text = subparsers.choices[command].format_help()
+                self.assertIn("When to use:", help_text)
+                self.assertIn("Examples:", help_text)
+                self.assertIn("management/TOOLING.md", help_text)
+
+        block_help = subparsers.choices["block-work"].format_help()
+        self.assertIn("Blocking is independent of lifecycle", block_help)
+        self.assertIn("complete management graph must validate", block_help)
+        self.assertIn("ER.MCP.02.a-001", block_help)
+
+        advance_help = subparsers.choices["advance-state"].format_help()
+        self.assertIn("link_evidence EF.Gov.01-002", advance_help)
+        self.assertIn("trace_requirement E.Gov.01", advance_help)
+
+        release_help = subparsers.choices["record-release"].format_help()
+        self.assertIn("record_release 0.1.0 EF.Gov.01-002", release_help)
+        self.assertIn("link_evidence EF.Gov.01-002 management/RELEASES.md", release_help)
+
+        evidence_help = subparsers.choices["link-evidence"].format_help()
+        self.assertIn("work_item_id path", evidence_help)
+        self.assertNotIn("requirement_id work_item_id", evidence_help)
+        self.assertIn("governing requirement is derived from the work item", evidence_help)
+        self.assertIn("Optional explanatory text", evidence_help)
+        self.assertIn("replaces concrete paths", evidence_help)
+        self.assertIn("Allow paths that do not exist yet", evidence_help)
+        self.assertIn("satisfy deterministic evidence gates", evidence_help)
+
+    def test_every_lifecycle_state_has_follow_up_guidance(self) -> None:
+        module = self.load_tool_module()
+        item = module.load_model().work_items["EN.MCP.01-001"]
+
+        for state in module.VALID_STATES:
+            with self.subTest(state=state):
+                commands, note = module.lifecycle_next_commands(module.dataclasses.replace(item, state=state))
+                self.assertTrue(commands or note)
+
+        merged_commands, merged_note = module.lifecycle_next_commands(
+            module.dataclasses.replace(item, state="Merged")
+        )
+        self.assertTrue(any("record_release" in command for command in merged_commands))
+        self.assertTrue(any("link_evidence" in command for command in merged_commands))
+        self.assertIn("release-owner approval", merged_note)
+
+        rendered = module.render_release_record(
+            "# Releases\n\n## No Production Releases Recorded Yet\n\nNo tags.\n\n## Preserved Notes\n\nKeep this.\n\n## Release Entry Format\n\nTemplate.\n",
+            "### 1.2.3 -- 2026-07-18\n\nProduction decision:\n`Released`\n",
+            production_released=True,
+        )
+        self.assertNotIn("No Production Releases Recorded Yet", rendered)
+        self.assertIn("## Preserved Notes\n\nKeep this.", rendered)
+        self.assertIn("## Release Entry Format\n\nTemplate.", rendered)
 
     def test_actual_mutations_require_main_but_dry_runs_do_not(self) -> None:
         self.switch_branch("Luiz/audit")
@@ -1383,6 +1619,9 @@ class ManagementToolTest(unittest.TestCase):
             expected=1,
         )
         self.assertIn("is not included in a schema-valid Released entry in RELEASES.md", blocked_rollout.stderr)
+        self.assertIn("prepare_release <VERSION> --strict", blocked_rollout.stderr)
+        self.assertIn("record_release <VERSION> EN.MCP.01-001", blocked_rollout.stderr)
+        self.assertIn("link_evidence EN.MCP.01-001 management/RELEASES.md", blocked_rollout.stderr)
         release_entry = textwrap.dedent(
             """\
             # Releases
@@ -1412,7 +1651,7 @@ class ManagementToolTest(unittest.TestCase):
             """
         )
         (self.management / "RELEASES.md").write_text(release_entry, encoding="utf-8")
-        self.tool_run("link-evidence", "E.MCP.01", "EN.MCP.01-001", "management/RELEASES.md")
+        self.tool_run("link-evidence", "EN.MCP.01-001", "management/RELEASES.md")
         rejected_release = self.tool_run(
             "advance-state",
             "EN.MCP.01-001",
@@ -1676,6 +1915,132 @@ class ManagementToolTest(unittest.TestCase):
         invalid = self.tool_run("lint", "--strict", expected=1)
         self.assertIn("invalid or missing status", invalid.stderr)
 
+    def test_bug_reports_are_validated_intake_and_remain_while_fix_work_is_active(self) -> None:
+        backlog = self.management / "ENGINEERING.backlog.md"
+        backlog.write_text(
+            backlog.read_text(encoding="utf-8").replace(
+                "# Planned\n",
+                "# Planned\n\n"
+                "## EF.MCP.02.a-002 -- Correct validated report\n"
+                "Related bug: `BUG-0001`\n"
+                "1. Correct the validated behavior.\n"
+                "==> Planned: 2026-07-18;\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        bugs = self.management / "BUGS.md"
+        bugs.write_text(
+            textwrap.dedent(
+                """\
+                # Bug Reports
+
+                ## Open Reports
+
+                ### BUG-0001 -- Reported behavior
+
+                Status: Validated
+                Reported: 2026-07-18
+                Reporter: Luiz
+                Related work: `EF.MCP.02.a-002`
+
+                Report:
+
+                > The behavior may be wrong.
+
+                Assessment:
+
+                The report requires corrective work.
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        self.tool_run("lint", "--strict")
+        module = self.load_tool_module()
+        entries = module.open_bug_report_entries(bugs)
+        self.assertEqual(["BUG-0001"], [entry.id for entry in entries])
+        self.assertEqual("Validated", entries[0].status)
+
+        bugs.write_text("# Bug Reports\n\n## Open Reports\n", encoding="utf-8")
+        backlog.write_text(backlog.read_text(encoding="utf-8").replace("Related bug: `BUG-0001`\n", ""), encoding="utf-8")
+        missing_report = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("corrective work EF.MCP.02.a-002 has not reached Rolled Out and has no open validated bug report", missing_report.stderr)
+
+    def test_only_open_bug_report_section_is_active(self) -> None:
+        bugs = self.management / "BUGS.md"
+        bugs.write_text(
+            textwrap.dedent(
+                """\
+                # Bug Reports
+
+                ## Open Reports
+
+                ### BUG-0002 -- Open observation
+
+                Status: Reported
+                Reported: 2026-07-19
+                Reporter: Luiz
+                Related work: None
+
+                Report:
+
+                > A new observation.
+
+
+                ## Addressed Reports
+
+                ### BUG-0001 -- Historical observation
+
+                Status: Rolled Out
+                Reported: 2026-07-18
+                Reporter: Luiz
+                Related work: `EF.MCP.02.a-002`
+
+                Report:
+
+                > The historical observation.
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        self.tool_run("lint", "--strict")
+        module = self.load_tool_module()
+        self.assertEqual(["BUG-0002"], [entry.id for entry in module.open_bug_report_entries(bugs)])
+        self.assertEqual(["BUG-0002", "BUG-0001"], [entry.id for entry in module.ledger_entries(bugs)])
+
+        bugs.write_text("# Bug Reports\n\n## Addressed Reports\n", encoding="utf-8")
+        missing_section = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("must contain exactly one `## Open Reports` section", missing_section.stderr)
+
+    def test_validated_bug_report_requires_assessment_and_f_work(self) -> None:
+        (self.management / "BUGS.md").write_text(
+            textwrap.dedent(
+                """\
+                # Bug Reports
+
+                ## Open Reports
+
+                ### BUG-0001 -- Invalid validated report
+
+                Status: Validated
+                Reported: 2026-07-18
+                Reporter: Luiz
+                Related work: `ER.MCP.02.a-001`
+
+                Report:
+
+                > Something happened.
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        invalid = self.tool_run("lint", "--strict", expected=1)
+        self.assertIn("BUG-0001 is missing `Assessment:`", invalid.stderr)
+        self.assertIn("validated report BUG-0001 links non-F work item ER.MCP.02.a-001", invalid.stderr)
+
     def test_format_template_placeholders_are_accepted(self) -> None:
         (self.management / "INCIDENTS.md").write_text(
             textwrap.dedent(
@@ -1796,7 +2161,6 @@ class ManagementToolTest(unittest.TestCase):
         (src / "lib.rs").write_text("pub fn route() {}\n", encoding="utf-8")
         escaped = self.tool_run(
             "link-evidence",
-            "E.MCP.01",
             "EN.MCP.01-001",
             "../outside.txt",
             "--allow-missing",
@@ -1805,7 +2169,6 @@ class ManagementToolTest(unittest.TestCase):
         self.assertIn("escapes the repository", escaped.stderr)
         absolute = self.tool_run(
             "link-evidence",
-            "E.MCP.01",
             "EN.MCP.01-001",
             "/tmp/outside.txt",
             "--allow-missing",
@@ -1818,7 +2181,6 @@ class ManagementToolTest(unittest.TestCase):
             (self.root / "escape-link").symlink_to(outside_file)
             symlink = self.tool_run(
                 "link-evidence",
-                "E.MCP.01",
                 "EN.MCP.01-001",
                 "escape-link",
                 expected=1,
@@ -1826,7 +2188,6 @@ class ManagementToolTest(unittest.TestCase):
             self.assertIn("escapes the repository", symlink.stderr)
         unsafe = self.tool_run(
             "link-evidence",
-            "E.MCP.01",
             "EN.MCP.01-001",
             "src/lib.rs",
             "--note",
@@ -1838,7 +2199,6 @@ class ManagementToolTest(unittest.TestCase):
         original_traceability = traceability.read_bytes()
         backtick_note = self.tool_run(
             "link-evidence",
-            "E.MCP.01",
             "EN.MCP.01-001",
             "src/lib.rs",
             "--note",

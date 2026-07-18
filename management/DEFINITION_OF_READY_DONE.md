@@ -58,6 +58,8 @@ A work item is ready to move to `Merged` when:
 4. The traceability entry can point to the requirement, work item, and evidence.
 5. No release-blocking debt is known.
 
+If `advance_state` reports a missing Current Links row or concrete evidence path, use `scripts/management/link_evidence WORK_ITEM_ID EXISTING_REPO_PATH [...]`, verify it with `trace_requirement`, and retry. The complete workflow and examples are in `management/TOOLING.md`.
+
 
 ## Ready to Roll Out
 
@@ -67,6 +69,8 @@ A work item is ready to move to `Rolled Out` when:
 2. Post-merge checks and release checks passed.
 3. Operational evidence exists for behavior that needs staging, monitoring, recovery, or manual acceptance.
 4. Rollback or mitigation notes exist when the change can affect production availability or persisted data.
+
+If `advance_state` reports a missing Released entry or operational/release evidence, prepare and execute the approved release, then record the observed outcome with `scripts/management/record_release VERSION WORK_ITEM_ID ...`. Link the resulting ledger with `scripts/management/link_evidence WORK_ITEM_ID management/RELEASES.md`, inspect it with `trace_requirement`, and retry the transition. `record_release` never tags, deploys, links evidence, or advances state; the complete sequence is in `management/TOOLING.md`.
 
 
 ## Done

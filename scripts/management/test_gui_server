@@ -163,7 +163,9 @@ class ManagementGuiServerTest(unittest.TestCase):
         self.assertGreater(payload["counts"]["requirements"], 0)
         self.assertIn("requirements", payload)
         self.assertIn("work_items", payload)
+        self.assertIn("bug_reports", payload)
         self.assertIn("ledgers", payload)
+        self.assertIn("releases", payload["ledgers"])
         self.assertIn("diagrams", payload)
         self.assertIn("audit_findings", payload)
         self.assertIn("quality_findings", payload)
@@ -178,6 +180,23 @@ class ManagementGuiServerTest(unittest.TestCase):
         self.assertIn("evidence_pending", payload["counts"])
         self.assertIn("active_semantic_prompts", payload["counts"])
         self.assertIn("tech_debt_findings", payload["counts"])
+        self.assertEqual(0, payload["counts"]["open_bug_reports"])
+
+    def test_addressed_bug_report_is_excluded_from_open_gui_payload(self) -> None:
+        payload = self.gui.model_payload()
+        self.assertEqual([], payload["bug_reports"])
+
+        all_reports = self.gui.tool.ledger_entries(self.gui.tool.MANAGEMENT_DIR / "BUGS.md")
+        addressed = next(item for item in all_reports if item.id == "BUG-0001")
+        self.assertEqual("Rolled Out", addressed.status)
+        self.assertIn("A tooling behavior seems to be generating unexpected results.", addressed.body)
+
+    def test_gui_help_explains_local_and_static_modes(self) -> None:
+        help_text = self.gui.build_parser().format_help()
+        self.assertIn("When to use:", help_text)
+        self.assertIn("Examples:", help_text)
+        self.assertIn("scripts/management/gui --no-browser", help_text)
+        self.assertIn("scripts/management/management_report --html public/management", help_text)
 
     def test_requirement_payload_contains_proactive_audit_context(self) -> None:
         payload = self.gui.model_payload()
@@ -246,7 +265,7 @@ class ManagementGuiServerTest(unittest.TestCase):
         requirements = {item["id"]: item for item in payload["requirements"]}
 
         self.assertEqual("evidenced", requirements["E.MCP.01"]["evidence_coverage"]["status"])
-        self.assertEqual("evidenced", requirements["E.Demo.02"]["evidence_coverage"]["status"])
+        self.assertEqual("pending", requirements["E.Demo.02"]["evidence_coverage"]["status"])
         self.assertEqual("not_applicable", requirements["B.MsgP.02"]["evidence_coverage"]["status"])
         self.assertTrue(requirements["E.MCP.01"]["evidence_coverage"]["links"])
         trace = next(item for item in payload["traceability"] if item["work_item_id"] == "EN.Demo.01-001")
@@ -257,7 +276,7 @@ class ManagementGuiServerTest(unittest.TestCase):
         self.assertEqual("management/TRACEABILITY.md", trace["source_path"])
 
     def test_work_payload_accepts_rustrover_aligned_traceability(self) -> None:
-        model = self.gui.tool.load_model()
+        repository_model = self.gui.tool.load_model()
         text = """# Traceability
 
 ## Current Links
@@ -269,13 +288,17 @@ class ManagementGuiServerTest(unittest.TestCase):
         links = self.gui.tool.traceability_links_from_text(text)
         self.assertEqual(1, len(links))
 
-        item = model.work_items["EN.Gov.01-001"]
+        item = repository_model.work_items["EN.Gov.01-001"]
+        requirement = repository_model.requirements["E.Gov.01"]
+        model = self.gui.tool.ManagementModel(
+            requirements={requirement.id: requirement},
+            work_items={item.id: item},
+        )
         work = self.gui.work_item_payload(item, model, {}, links)
         attention_messages = {signal["message"] for signal in work["attention"]}
         self.assertNotIn("Completed work has no traceability row", attention_messages)
         self.assertNotIn("Completed work has no existing concrete evidence path", attention_messages)
 
-        requirement = model.requirements["E.Gov.01"]
         evidence = self.gui.evidence_coverage_payload(model, requirement, links)
         self.assertEqual("evidenced", evidence["status"])
         self.assertEqual(["EN.Gov.01-001"], [link["work_item_id"] for link in evidence["links"]])
@@ -355,6 +378,21 @@ class ManagementGuiServerTest(unittest.TestCase):
         args = self.gui.build_management_command("show-requirement", {"requirement_id": "E.MCP.01"})
         self.assertEqual(["show-requirement", "E.MCP.01"], args)
 
+    def test_link_evidence_command_derives_requirement_from_work_item(self) -> None:
+        args = self.gui.build_management_command(
+            "link-evidence",
+            {
+                "work_item_id": "EN.MCP.01-001",
+                "paths": ["src/lib.rs"],
+                "note": "Routing evidence",
+            },
+        )
+
+        self.assertEqual(
+            ["link-evidence", "EN.MCP.01-001", "src/lib.rs", "--note", "Routing evidence"],
+            args,
+        )
+
     def test_builds_every_allowlisted_action(self) -> None:
         cases = [
             ("lint", {}, "lint"),
@@ -375,11 +413,23 @@ class ManagementGuiServerTest(unittest.TestCase):
             ("trace-requirement", {"requirement_id": "E.MCP.01"}, "trace-requirement"),
             (
                 "link-evidence",
-                {"requirement_id": "E.MCP.01", "work_item_id": "EN.MCP.01-001", "paths": ["src/lib.rs"]},
+                {"work_item_id": "EN.MCP.01-001", "paths": ["src/lib.rs"]},
                 "link-evidence",
             ),
             ("prepare-release", {"version": "1.2.3"}, "prepare-release"),
             ("create-release-tag", {"version": "1.2.3"}, "create-release-tag"),
+            (
+                "record-release",
+                {
+                    "version": "1.2.3",
+                    "work_item_ids": "EF.Gov.01-002",
+                    "decision": "Released",
+                    "verification": "Checks passed",
+                    "rollback": "Restore the preceding release",
+                    "notes": "Release notes",
+                },
+                "record-release",
+            ),
             ("chase-techdebts", {}, "chase-techdebts"),
             (
                 "record-decision",
@@ -430,7 +480,7 @@ class ManagementGuiServerTest(unittest.TestCase):
             ("diagram-architecture-planned", {}, "diagram-architecture-planned"),
             ("diagram-module-dependencies", {}, "diagram-module-dependencies"),
         ]
-        self.assertEqual(35, len(cases))
+        self.assertEqual(36, len(cases))
         for action, payload, command in cases:
             with self.subTest(action=action):
                 self.assertEqual(command, self.gui.build_management_command(action, payload)[0])
@@ -475,8 +525,29 @@ class ManagementGuiServerTest(unittest.TestCase):
         )
         self.assertIn("--execute", args)
 
+    def test_record_release_command_forwards_structured_outcome(self) -> None:
+        args = self.gui.build_management_command(
+            "record-release",
+            {
+                "version": "1.2.3",
+                "work_item_ids": "EF.Gov.01-002\nEN.Demo.02-001",
+                "decision": "Released",
+                "verification": "Main CI passed\nOperational check passed",
+                "rollback": "Restore release 1.2.2.",
+                "notes": "Management and WhatsApp changes.",
+                "date": "2026-07-18",
+            },
+        )
+
+        self.assertEqual(["record-release", "1.2.3", "EF.Gov.01-002", "EN.Demo.02-001"], args[:4])
+        self.assertEqual(2, args.count("--verification"))
+        self.assertIn("--rollback", args)
+        self.assertIn("--notes", args)
+        self.assertIn("--date", args)
+
     def test_mutating_action_classification_preserves_dry_runs(self) -> None:
         self.assertTrue(self.gui.action_mutates_repository("record-risk", {}))
+        self.assertTrue(self.gui.action_mutates_repository("record-release", {}))
         self.assertTrue(self.gui.action_mutates_repository("draft-plan", {"write": True}))
         self.assertFalse(self.gui.action_mutates_repository("draft-plan", {"write": False}))
         self.assertTrue(self.gui.action_mutates_repository("advance-state", {"dry_run": False}))
@@ -907,6 +978,8 @@ class ManagementGuiServerTest(unittest.TestCase):
             self.assertIn(">Static offline report</span>", dom)
             self.assertIn(f">{self.gui.REPO_ROOT.name} (static export)</p>", dom)
             self.assertIn('id="view-traceability"', dom)
+            self.assertIn('id="view-bugs"', dom)
+            self.assertIn("BUG-0001", dom)
             self.assertIn("0 · Unplanned", dom)
             self.assertIn("Not applicable", dom)
             self.assertIn("Parsed Traceability Rows", dom)
@@ -946,9 +1019,12 @@ class ManagementGuiServerTest(unittest.TestCase):
         self.assertIn('aria-live="polite"', index)
         self.assertIn('aria-label="Filter requirements"', index)
         self.assertIn('aria-label="Filter work items"', index)
+        self.assertIn('aria-label="Filter open bug reports"', index)
         self.assertIn('aria-label="Filter traceability coverage and evidence"', index)
         self.assertIn('aria-label="Filter tech debt"', index)
         self.assertIn('data-view="traceability"', index)
+        self.assertIn('data-view="bugs"', index)
+        self.assertIn('id="view-bugs"', index)
         self.assertIn('id="view-traceability"', index)
         self.assertIn('aria-label="Quality help: Deterministic requirement-quality findings.', index)
         self.assertIn('aria-label="Work help: Backlog items mapped directly', index)
@@ -957,9 +1033,19 @@ class ManagementGuiServerTest(unittest.TestCase):
         self.assertIn('data-tooltip="Lifecycle-aware evidence coverage.', index)
         self.assertIn('id="work-coverage-metrics"', index)
         self.assertIn('id="evidence-coverage-metrics"', index)
+
+        link_evidence_form = re.search(
+            r'<form class="panel" data-form="link-evidence">(?P<body>.*?)</form>',
+            index,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(link_evidence_form)
+        self.assertIn('name="work_item_id"', link_evidence_form.group("body"))
+        self.assertNotIn('name="requirement_id"', link_evidence_form.group("body"))
         self.assertIn('name="override_gate"', index)
         self.assertIn('data-form-action="block-work"', index)
         self.assertIn('data-form-action="unblock-work"', index)
+        self.assertIn('<option value="F">F — Fix for faulty or buggy implementation</option>', index)
         self.assertIn('id="advance-state-target"', index)
         self.assertIn('<select name="status">', index)
         self.assertIn('<option value="Accepted" selected>Accepted</option>', index)

@@ -9,13 +9,13 @@ This file is the fast path for agents revisiting the project-management system. 
 2. `management/DEFINITION_OF_READY_DONE.md` for state-transition rules.
 3. `management/TOOLING.md` for the command surface.
 4. The relevant requirement file: `BUSINESS.md`, `ENGINEERING.md`, or `OPERATIONS.md`.
-5. The matching backlog file.
+5. `management/BUGS.md` when the task concerns a reported problem, then the matching backlog file if corrective work has been planned.
 6. `management/TRACEABILITY.md`, then ledgers that apply: `DECISIONS.md`, `RISKS.md`, `INCIDENTS.md`, `EXPERIMENTS.md`, `RELEASES.md`.
 
 
 ## Source of Truth
 
-Requirements describe desired behavior. Backlogs describe planned work. Code in `main` describes current behavior. Tests, benchmarks, reviews, operations notes, releases, and linked files are evidence.
+Requirements describe desired behavior. Bug reports describe unresolved observations that may not yet be confirmed or classified. Backlogs describe planned work. Code in `main` describes current behavior. Tests, benchmarks, reviews, operations notes, releases, and linked files are evidence.
 
 When those disagree, treat it as requirement drift. Report the drift and use the repo-local tools to gather context. Do not silently rewrite requirements, backlog history, comments, or evidence to make the disagreement disappear.
 
@@ -46,7 +46,7 @@ Use it for interactive planning and review. Use the CLI directly for scripted wo
 Before proposing or editing management work:
 
 1. Run or inspect `scripts/management/management_tool lint`.
-2. Identify the governing requirement and matching backlog item.
+2. Identify any current bug report, then the governing requirement and matching backlog item when those are known.
 3. Check whether traceability and ledgers already answer the question.
 4. For qualitative analysis, run the matching `semantic_context` workflow and use `$analyze-management`; inspect the cited code, tests, and git history rather than treating the packet as a conclusion.
 5. Prefer dry runs before writes: `draft_plan`, `advance_state`, `block_work`, `unblock_work`, release tagging, and branch commands all have dry-run paths.
@@ -69,11 +69,14 @@ After changing management tooling or management files:
 - `audit_requirements`: report deterministic quality separately from lexical prompts, work coverage, and lifecycle-aware evidence coverage.
 - `estimate_requirement`: prepare PM/manager planning context for one requirement.
 - `sync_requirement` and `trace_requirement`: compare one requirement against backlog and parsed traceability evidence without treating unplanned work as drift.
+- `link_evidence`: derive the governing requirement from the work item and create or update its Current Links row with existing repository-relative evidence paths before `Merged`; `--allow-missing` paths do not satisfy the evidence gate until they exist.
+- `prepare_release`, `create_release_tag`, and `record_release`: inspect release readiness, deliberately create an approved local tag, then record the observed production decision; a Released record must be linked as evidence before `Rolled Out`.
 - `draft_plan`: propose or write an `Under Planning` backlog item.
 - `evaluate_plan`: check whether a proposed work item coheres with its requirement.
-- `advance_state`: move a backlog item through the state model.
+- `advance_state`: move a backlog item through the state model and print the commands that normally follow the resulting state.
 - `block_work` and `unblock_work`: append blocker history without changing lifecycle state.
 - `start_work`, `chat_about`, `verification_check`, `review`, `acceptance_packet`: prepare engineering execution, review, and acceptance context.
+- `BUGS.md`: only `## Open Reports` is active intake; a validated report links to `F` work and remains open until that work reaches `Rolled Out`, after which it may move to an inactive addressed section.
 - Ledger commands record and close decisions, risks, incidents, and experiments.
 
 
@@ -81,4 +84,4 @@ After changing management tooling or management files:
 
 Preserve intent. Do not delete code, comments, strings, requirements, backlog entries, or ledger history just because they look wrong. If a record is stale or contradictory, add the right follow-up record or ask the human owner.
 
-Write the smallest coherent change that keeps the governance graph understandable: requirement, work item, evidence, decision/risk/incident/experiment, and tooling should point to each other when they are related.
+Write the smallest coherent change that keeps the governance graph understandable: bug report, requirement, work item, evidence, decision/risk/incident/experiment, and tooling should point to each other when they are related. Never delete an unresolved report merely because an `F` work item was created from it.

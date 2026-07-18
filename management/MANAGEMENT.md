@@ -17,9 +17,12 @@ This project is conducted under a formal management procedure. The top-level rul
    * The code in `main` is evidence of actual behavior; code in other branches are evidence of "behavior under development";
    * A disagreement between them is a formally detectable state called "requirement drift", which may further classified as defects, undocumented accepted behavior, incomplete
      implementation, or obsolete requirements.
-5) Work Items, including epics, stories, tasks, bugs, technical-debt remediation, experiments, and similar units of planned work, must be defined in the corresponding backlog
+5) Work Items, including epics, stories, tasks, validated bug fixes, technical-debt remediation, experiments, and similar units of planned work, must be defined in the corresponding backlog
    files BUSINESS.backlog.md, ENGINEERING.backlog.md, and OPERATIONS.backlog.md. These files offer the opportunity to describe what should be done to transform the current
    state of the software into the state described by the requirement.
+   Crude, unverified bug reports belong in `BUGS.md`, not a backlog. They may initially have no known Business, Engineering, or Operations classification. Once validated, a report
+   must link to `F`-motivation corrective work and remain under `BUGS.md`'s `Open Reports` until that work reaches `Rolled Out`. A report resolved as a misunderstanding or documentation question remains open until
+   its disposition is completed. An addressed report may then be moved to another level-two section for temporary reference or deleted; only `Open Reports` contributes active bug-report state.
 6) Version Control: the branch `main` contains production-grade code that is ready for automatic deployment to staging and is a candidate for production release.
    Production release requires all applicable post-merge QA and release checks to have succeeded. On top of these rules, no known technical
    debt classified as "release-blocking" may enter `main`. Non-blocking debt must be explicitly documented as a new entry in the "Engineering" or "Operational" requirements file,
@@ -116,6 +119,7 @@ This project is conducted under a formal management procedure. The top-level rul
         - the AI may indicate which branches changed the implementation / interpretation of that requirement as time passed and code changed;
 
 11) Supporting management ledgers:
+    * `BUGS.md` records unresolved intake under `Open Reports`; other level-two sections may retain addressed reports but do not contribute active bug-report state.
     * `DECISIONS.md` records accepted project decisions and their consequences.
     * `DEFINITION_OF_READY_DONE.md` defines state-transition readiness and completion rules.
     * `RELEASES.md` records production releases and release decisions.

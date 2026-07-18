@@ -6,6 +6,7 @@
 2. Update those demoscenes to use the new abstractions
 3. Check they work exactly as before
 ==> Luiz. Planned: 2026-07-05;
+==> Blocked: 2026-07-18; Reason: Underlying requirement is under revision after the findings of the WhatsApp Demoscene
 
 ## EN.Demo.02-002 -- The WhatsApp Demoscene is not fully exploring all the message types WhatsApp can deliver
 1. Please see the "Espaçolaser RJ - Shop Rio Sul" screenshot, proving WhatsApp do support "telegram-menu-like" messages, using two columns
@@ -23,15 +24,12 @@
 
 # Started
 
-
 # "In Code Review"
-
 
 # "Integrated"
 
 
 # QA
-
 
 # Merged
 
@@ -63,5 +61,13 @@
    ==> Luiz. Planned: 2026-07-05; Started: 2026-07-06; In Code Review: 2026-07-16; Merged: 2026-07-16; Rolled Out: 2026-07-16;
 ==> Gate override for Rolled Out: 2026-07-16; Reason: Still in auto-release phase; QA done by Luiz
 
-
-   
+## EF.Gov.01-002 -- Clarify `block_work` behavior and management command help
+Related bug: `BUG-0001`
+1. Investigate the reported `block_work ER.MCP.02.a-001` failure, which cited `management/BUSINESS.backlog.md:3` and said a Planned backlog state disagreed with a final recorded Rolled Out state.
+2. Confirm that Planned work can be blocked without changing its lifecycle state and retain regression coverage for that behavior.
+3. Explain in command help that blocking is an independent condition, full management-model validation precedes mutations, and errors may therefore identify a record unrelated to the requested work item.
+4. Make every management command's `--help` state its purpose, when to use it, and representative examples.
+5. Restore structured bug-report intake and document `F`-motivation backlog work as the path from a validated report to planned corrective work.
+6. Document the commands that create and inspect concrete `TRACEABILITY.md` evidence when an `advance_state` readiness gate fails.
+   ==> Codex. Under Planning: 2026-07-18; Planned: 2026-07-18; Started: 2026-07-18; In Code Review: 2026-07-18; QA: 2026-07-18; Merged: 2026-07-18; Rolled Out: 2026-07-18;
+   ==> Gate override for Rolled Out: 2026-07-18; Reason: Still in auto-release phase; QA done by Luiz

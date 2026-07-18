@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 from datetime import date, datetime
 from pathlib import Path
@@ -37,6 +38,7 @@ BACKLOG_FILES = {
 }
 
 SUPPORTING_FILES = [
+    "BUGS.md",
     "DECISIONS.md",
     "DEFINITION_OF_READY_DONE.md",
     "RELEASES.md",
@@ -211,6 +213,7 @@ TRACEABILITY_TABLE_HEADER = "| Requirement | Work Item | State | Evidence |"
 TRACEABILITY_TABLE_SEPARATOR = "| --- | --- | --- | --- |"
 TRACEABILITY_TABLE_COLUMNS = ("Requirement", "Work Item", "State", "Evidence")
 TRACEABILITY_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
+BUGS_OPEN_REPORTS_HEADING = "## Open Reports"
 
 TECH_DEBT_MARKERS = ["TODO", "FIXME", "HACK", "XXX"]
 SENSITIVE_TERMS = ["api_key", "credential", "password", "private_key", "secret", "token"]
@@ -262,6 +265,7 @@ LEVEL_TWO_HEADING_RE = re.compile(r"^##(?!#)\s+(?P<title>.+?)\s*$")
 PLACEHOLDER_TOKEN_RE = re.compile(r"^(?:`<[^<>\r\n]+>`|<[^<>\r\n]+>)$")
 
 SAFE_LEDGER_STATUSES = {
+    "BUGS.md": {"Reported", "Investigating", "Validated"},
     "DECISIONS.md": {"Accepted", "Superseded"},
     "RISKS.md": {"Open", "Closed"},
     "INCIDENTS.md": {"Open", "Mitigated", "Closed"},
@@ -269,6 +273,7 @@ SAFE_LEDGER_STATUSES = {
 }
 
 LEDGER_ENTRY_LEVELS = {
+    "BUGS.md": 3,
     "DECISIONS.md": 2,
     "RISKS.md": 3,
     "INCIDENTS.md": 3,
@@ -352,6 +357,7 @@ LEDGER_DOCUMENTATION_TEMPLATES = {
 }
 
 INCIDENT_ENVIRONMENTS = ["Production", "Staging", "Development", "Local"]
+RELEASE_DECISIONS = ["Released", "Rejected", "Rolled back"]
 RELEASE_REQUIRED_LABELS = [
     "Tag",
     "Included work",
@@ -1443,7 +1449,10 @@ def validate_state_transition(model: ManagementModel, item: WorkItem, target_sta
     if target_state == item.state:
         return
     if item.blocked:
-        raise ValueError(f"{item.id} is blocked; append an Unblocked event before advancing its lifecycle state")
+        raise ValueError(
+            f"{item.id} is blocked; run scripts/management/unblock_work {item.id} "
+            '--reason "<RESOLUTION>" before advancing its lifecycle state'
+        )
     if terminal_state(item.state):
         raise ValueError(f"{item.id} is in terminal state {item.state}; it cannot transition to {target_state}")
     superseding_id = superseded_work_id(target_state)
@@ -2565,19 +2574,35 @@ def is_documentation_template_entry(
     )
 
 
-def ledger_entries(path: Path) -> list[LedgerEntry]:
+def _ledger_entries(path: Path, section_heading: str | None = None) -> list[LedgerEntry]:
     if not path.exists():
         return []
     lines = path.read_text(encoding="utf-8").splitlines()
+    scope_start = 0
+    scope_end = len(lines)
+    if section_heading:
+        headings = [index for index, line in enumerate(lines) if line.strip() == section_heading]
+        if len(headings) != 1:
+            return []
+        scope_start = headings[0] + 1
+        scope_end = next(
+            (
+                index
+                for index in range(scope_start, len(lines))
+                if LEVEL_TWO_HEADING_RE.match(lines[index].strip())
+            ),
+            len(lines),
+        )
     starts: list[tuple[int, re.Match[str]]] = []
-    for index, line in enumerate(lines):
+    for index in range(scope_start, scope_end):
+        line = lines[index]
         match = LEDGER_HEADING_RE.match(line)
         if match:
             starts.append((index, match))
 
     entries: list[LedgerEntry] = []
     for position, (start, match) in enumerate(starts):
-        end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
+        end = starts[position + 1][0] if position + 1 < len(starts) else scope_end
         body_lines = lines[start + 1 : end]
         body = "\n".join(body_lines).strip()
         if is_documentation_template_entry(path, lines, start, match, body):
@@ -2595,6 +2620,14 @@ def ledger_entries(path: Path) -> list[LedgerEntry]:
             )
         )
     return entries
+
+
+def ledger_entries(path: Path) -> list[LedgerEntry]:
+    return _ledger_entries(path)
+
+
+def open_bug_report_entries(path: Path | None = None) -> list[LedgerEntry]:
+    return _ledger_entries(path or MANAGEMENT_DIR / "BUGS.md", BUGS_OPEN_REPORTS_HEADING)
 
 
 def validate_traceability(model: ManagementModel) -> None:
@@ -2703,7 +2736,7 @@ def _structured_references(text: str) -> set[str]:
     return {
         candidate
         for candidate in candidates
-        if re.fullmatch(r"(?:[BEO]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*|[BEO][NRFX]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*-\d{3}|(?:DEC|RISK|INCIDENT|EXP)-\d{4})", candidate)
+        if re.fullmatch(r"(?:[BEO]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*|[BEO][NRFX]\.[A-Za-z][A-Za-z0-9]*\.\d{2}(?:\.[a-z]+)*-\d{3}|(?:BUG|DEC|RISK|INCIDENT|EXP)-\d{4})", candidate)
     }
 
 
@@ -2718,8 +2751,10 @@ def release_entry_schema_errors(entry: LedgerEntry) -> list[str]:
         if not _ledger_has_label(entry, label):
             errors.append(f"release {entry.id} is missing `{label}:`")
     production_decision = _ledger_section(entry, "Production decision").splitlines()[0].strip("` ") if _ledger_section(entry, "Production decision") else ""
-    if production_decision not in {"Released", "Rejected", "Rolled back"}:
+    if production_decision not in set(RELEASE_DECISIONS):
         errors.append(f"release {entry.id} has invalid production decision {production_decision!r}")
+    elif release_candidate(entry.id) and production_decision == "Released":
+        errors.append(f"release candidate {entry.id} cannot have production decision Released")
     return errors
 
 
@@ -2734,12 +2769,14 @@ def release_entry_work_ids(entry: LedgerEntry) -> set[str]:
 
 def validate_supporting_ledgers(model: ManagementModel) -> None:
     required_labels = {
+        "BUGS.md": ["Reported", "Reporter", "Related work", "Report"],
         "DECISIONS.md": ["Context", "Decision", "Consequences", "Related"],
         "RISKS.md": ["Owner", "Related", "Risk", "Impact", "Mitigation"],
         "INCIDENTS.md": ["Detected", "Affected environment", "Impact", "Timeline", "Root cause", "Mitigation", "Follow-up work", "Requirement or decision changes"],
         "EXPERIMENTS.md": ["Branch", "Hypothesis", "Expires", "Success criteria", "Failure criteria", "Result", "Follow-up"],
     }
     prefixes = {
+        "BUGS.md": "BUG-",
         "DECISIONS.md": "DEC-",
         "RISKS.md": "RISK-",
         "INCIDENTS.md": "INCIDENT-",
@@ -2749,8 +2786,22 @@ def validate_supporting_ledgers(model: ManagementModel) -> None:
         path = MANAGEMENT_DIR / filename
         if path.exists():
             validate_ledger_entry_headings(model, path)
+    bugs_path = MANAGEMENT_DIR / "BUGS.md"
+    if bugs_path.exists():
+        open_report_headings = [
+            line_number
+            for line_number, line in enumerate(bugs_path.read_text(encoding="utf-8").splitlines(), start=1)
+            if line.strip() == BUGS_OPEN_REPORTS_HEADING
+        ]
+        if len(open_report_headings) != 1:
+            line = open_report_headings[1] if len(open_report_headings) > 1 else 1
+            model.error(bugs_path, line, "BUGS.md must contain exactly one `## Open Reports` section")
     entries_by_file = {
-        filename: ledger_entries(MANAGEMENT_DIR / filename)
+        filename: (
+            open_bug_report_entries(MANAGEMENT_DIR / filename)
+            if filename == "BUGS.md"
+            else ledger_entries(MANAGEMENT_DIR / filename)
+        )
         for filename in SAFE_LEDGER_STATUSES
         if (MANAGEMENT_DIR / filename).exists()
     }
@@ -2780,6 +2831,27 @@ def validate_supporting_ledgers(model: ManagementModel) -> None:
                         validate_iso_date(raw_date)
                     except ValueError as err:
                         model.error(path, entry.line, str(err))
+            if filename == "BUGS.md":
+                reported = _ledger_field(entry, "Reported")
+                if reported:
+                    try:
+                        validate_iso_date(reported)
+                    except ValueError as err:
+                        model.error(path, entry.line, str(err))
+                if entry.status == "Validated":
+                    if not _ledger_has_label(entry, "Assessment"):
+                        model.error(path, entry.line, f"{entry.id} is missing `Assessment:`")
+                    related_work = {
+                        reference
+                        for reference in _structured_references(_ledger_section(entry, "Related work"))
+                        if WORK_ITEM_ID_RE.fullmatch(reference)
+                    }
+                    if not related_work:
+                        model.error(path, entry.line, f"validated report {entry.id} must link at least one F-motivation work item in `Related work:`")
+                    for work_id in related_work:
+                        work_item = model.work_items.get(work_id)
+                        if work_item is not None and work_item.motivation != "F":
+                            model.error(path, entry.line, f"validated report {entry.id} links non-F work item {work_id}")
             if filename == "EXPERIMENTS.md":
                 expires = _ledger_field(entry, "Expires")
                 if expires:
@@ -2787,10 +2859,10 @@ def validate_supporting_ledgers(model: ManagementModel) -> None:
                         validate_iso_date(expires)
                     except ValueError as err:
                         model.error(path, entry.line, str(err))
-            reference_labels = ["Related", "Follow-up", "Follow-up work", "Requirement or decision changes"]
+            reference_labels = ["Related", "Related work", "Follow-up", "Follow-up work", "Requirement or decision changes"]
             for label in reference_labels:
                 for reference in _structured_references(_ledger_section(entry, label)):
-                    if reference.startswith(("DEC-", "RISK-", "INCIDENT-", "EXP-")):
+                    if reference.startswith(("BUG-", "DEC-", "RISK-", "INCIDENT-", "EXP-")):
                         exists = reference in known_ledger_ids
                     elif WORK_ITEM_ID_RE.fullmatch(reference):
                         exists = reference in model.work_items
@@ -2798,6 +2870,38 @@ def validate_supporting_ledgers(model: ManagementModel) -> None:
                         exists = reference in model.requirements
                     if not exists:
                         model.error(path, entry.line, f"{entry.id} {label} references missing structured id {reference}")
+
+    bug_entries = {entry.id: entry for entry in entries_by_file.get("BUGS.md", [])}
+    for entry in bug_entries.values():
+        if entry.status != "Validated":
+            continue
+        for work_id in _structured_references(_ledger_section(entry, "Related work")):
+            work_item = model.work_items.get(work_id)
+            if work_item is not None and entry.id not in _structured_references(work_item.body):
+                model.error(entry.path, entry.line, f"validated report {entry.id} links {work_id}, but that work item does not link back to the report")
+    for work_item in model.work_items.values():
+        if work_item.motivation == "F" and work_item.state != "Rolled Out":
+            open_reports = [
+                entry
+                for entry in bug_entries.values()
+                if entry.status == "Validated"
+                and work_item.id in _structured_references(_ledger_section(entry, "Related work"))
+            ]
+            if not open_reports:
+                model.error(work_item.path, work_item.line, f"corrective work {work_item.id} has not reached Rolled Out and has no open validated bug report")
+        related_bug_lines = re.findall(r"^Related bugs?:\s*(?P<value>.+)$", work_item.body, flags=re.MULTILINE)
+        related_bug_ids = {
+            reference
+            for line in related_bug_lines
+            for reference in _structured_references(line)
+            if reference.startswith("BUG-")
+        }
+        if related_bug_ids and work_item.motivation != "F":
+            model.error(work_item.path, work_item.line, f"work item {work_item.id} links a bug report but does not use motivation F")
+        if work_item.state != "Rolled Out":
+            for bug_id in related_bug_ids:
+                if bug_id not in bug_entries:
+                    model.error(work_item.path, work_item.line, f"corrective work {work_item.id} has not reached Rolled Out and references missing open report {bug_id}")
 
     releases_path = MANAGEMENT_DIR / "RELEASES.md"
     if releases_path.exists():
@@ -2998,6 +3102,7 @@ def render_management_dashboard(output_dir: Path, model: ManagementModel, stale_
     incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
     experiments = open_ledger_entries(MANAGEMENT_DIR / "EXPERIMENTS.md")
     decisions = ledger_entries(MANAGEMENT_DIR / "DECISIONS.md")[-5:]
+    bug_reports = open_bug_report_entries()
     gaps = traceability_gaps(model)
     unmapped = unmapped_requirements(model)
     stale = stale_work_items(model, stale_days)
@@ -3007,6 +3112,7 @@ def render_management_dashboard(output_dir: Path, model: ManagementModel, stale_
     cards = [
         ("Requirements", str(len(model.requirements))),
         ("Work Items", str(len(model.work_items))),
+        ("Open Bug Reports", str(len(bug_reports))),
         ("Evidence Gaps", str(len(gaps))),
         ("Unmapped", str(len(unmapped))),
         ("Stale Work", str(len(stale))),
@@ -3726,6 +3832,7 @@ def cmd_verify_branch(args: argparse.Namespace) -> int:
         sys.stdout.flush()
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
+        print_lifecycle_next_commands(item, stream=sys.stderr)
         return 1
 
     print()
@@ -3754,6 +3861,7 @@ def cmd_start_work(args: argparse.Namespace) -> int:
         sys.stdout.flush()
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
+        print_lifecycle_next_commands(item, stream=sys.stderr)
         return 1
 
     if not args.dry_run and not args.allow_dirty and git_worktree_is_dirty():
@@ -4019,6 +4127,8 @@ def cmd_draft_plan(args: argparse.Namespace) -> int:
     append_under_planning_entry(MANAGEMENT_DIR / BACKLOG_FILES[requirement.document], entry)
     print()
     print(f"Written: {work_item_id} was appended under Under Planning.")
+    print()
+    print_lifecycle_next_commands(load_model().work_items[work_item_id])
     return 0
 
 
@@ -4306,6 +4416,7 @@ def cmd_management_status(args: argparse.Namespace) -> int:
     risks = open_ledger_entries(MANAGEMENT_DIR / "RISKS.md")
     incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
     experiments = open_ledger_entries(MANAGEMENT_DIR / "EXPERIMENTS.md")
+    bug_reports = open_bug_report_entries()
     gaps = traceability_gaps(model)
     unmapped = unmapped_requirements(model)
     stale = stale_work_items(model, args.stale_days)
@@ -4315,6 +4426,7 @@ def cmd_management_status(args: argparse.Namespace) -> int:
     print("=================")
     print(f"Requirements:       {len(model.requirements)}")
     print(f"Work items:         {len(model.work_items)}")
+    print(f"Open bug reports:   {len(bug_reports)}")
     print(f"Evidence gaps:      {len(gaps)}")
     print(f"Unmapped reqs:      {len(unmapped)}")
     print(f"Stale work:         {len(stale)}")
@@ -4503,19 +4615,30 @@ def cmd_link_evidence(args: argparse.Namespace) -> int:
             print(issue.format(), file=sys.stderr)
         return 1
 
-    requirement = model.requirements.get(args.requirement_id)
-    if requirement is None:
-        print(f"unknown requirement: {args.requirement_id}", file=sys.stderr)
-        return 1
-    work_item = model.work_items.get(args.work_item_id)
+    work_item_id = args.work_item_id
+    evidence_path_arguments = list(args.path)
+    explicit_requirement_id = None
+    if (
+        work_item_id in model.requirements
+        and evidence_path_arguments
+        and WORK_ITEM_ID_RE.fullmatch(evidence_path_arguments[0])
+    ):
+        explicit_requirement_id = work_item_id
+        work_item_id = evidence_path_arguments.pop(0)
+
+    work_item = model.work_items.get(work_item_id)
     if work_item is None:
-        print(f"unknown work item: {args.work_item_id}", file=sys.stderr)
+        print(f"unknown work item: {work_item_id}", file=sys.stderr)
         return 1
-    if work_item.requirement_id != requirement.id:
-        print(f"error: {work_item.id} maps to {work_item.requirement_id}, not {requirement.id}", file=sys.stderr)
+    if explicit_requirement_id and work_item.requirement_id != explicit_requirement_id:
+        print(f"error: {work_item.id} maps to {work_item.requirement_id}, not {explicit_requirement_id}", file=sys.stderr)
+        return 1
+    requirement = model.requirements[work_item.requirement_id]
+    if not evidence_path_arguments:
+        print("error: at least one evidence path is required after the work item id", file=sys.stderr)
         return 1
     try:
-        canonical_paths, missing = validate_evidence_paths(args.path, args.allow_missing)
+        canonical_paths, missing = validate_evidence_paths(evidence_path_arguments, args.allow_missing)
         note = validate_markdown_table_field(args.note, "--note", forbid_backticks=True) if args.note else None
         if args.state:
             state = validate_markdown_table_field(args.state, "--state")
@@ -4539,6 +4662,10 @@ def cmd_link_evidence(args: argparse.Namespace) -> int:
         for path in missing:
             print(f"  - {path}")
     print("Source:      management/TRACEABILITY.md")
+    print()
+    print(f"Next command: scripts/management/trace_requirement {requirement.id}")
+    if work_item.state in {"In Code Review", "Integrated", "QA", "Merged"} and not missing:
+        print(f"Then inspect the next gate: scripts/management/advance_state {work_item.id} --dry-run")
     return 0
 
 
@@ -4566,7 +4693,7 @@ def cmd_prepare_release(args: argparse.Namespace) -> int:
         return 1
 
     included = sorted(
-        [item for item in model.work_items.values() if item.state in {"Merged", "Rolled Out"}],
+        [item for item in model.work_items.values() if item.state == "Merged"],
         key=lambda item: item.id,
     )
     open_incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
@@ -4620,6 +4747,15 @@ def cmd_prepare_release(args: argparse.Namespace) -> int:
     print()
     print("Tag command:")
     print(f"  scripts/management/create_release_tag {version} --execute")
+    if included:
+        work_ids = " ".join(item.id for item in included)
+        print()
+        print("After the production outcome is known, record it:")
+        print(
+            f"  scripts/management/record_release {version} {work_ids} --decision Released "
+            '--verification "<PASSED_CHECKS>" --rollback "<ROLLBACK_OR_MITIGATION>" '
+            '--notes "<RELEASE_NOTES>"'
+        )
     print("Scope note: this packet prepares a release decision. It does not create or push tags.")
     return 1 if args.strict and blockers else 0
 
@@ -4647,6 +4783,7 @@ def cmd_create_release_tag(args: argparse.Namespace) -> int:
     print(f"Command: git {' '.join(command)}")
     if not args.execute:
         print("Dry run: pass --execute to create the local tag.")
+        print(f"Next command: scripts/management/create_release_tag {version} --execute")
         return 0
     try:
         git_output(command)
@@ -4654,6 +4791,173 @@ def cmd_create_release_tag(args: argparse.Namespace) -> int:
         print(f"error: {err}", file=sys.stderr)
         return 1
     print(f"Created tag {version}. Push it intentionally when the release owner approves.")
+    print("After the deployment outcome and checks are known, record the release with:")
+    print(
+        f"  scripts/management/record_release {version} <WORK_ITEM_ID> [MORE_WORK_ITEM_IDS ...] "
+        '--decision Released --verification "<PASSED_CHECKS>" '
+        '--rollback "<ROLLBACK_OR_MITIGATION>" --notes "<RELEASE_NOTES>"'
+    )
+    return 0
+
+
+def release_entry_text(
+    version: str,
+    release_date: str,
+    work_items: list[WorkItem],
+    requirements: list[Requirement],
+    verification: list[str],
+    decision: str,
+    rollback: str,
+    notes: str,
+) -> str:
+    work_lines = "\n".join(
+        f"{index}. `{item.id}` -- {item.title}"
+        for index, item in enumerate(work_items, start=1)
+    )
+    requirement_lines = "\n".join(
+        f"{index}. `{requirement.id}` -- {requirement.title}"
+        for index, requirement in enumerate(requirements, start=1)
+    )
+    verification_lines = "\n".join(
+        f"{index}. {check}"
+        for index, check in enumerate(verification, start=1)
+    )
+    return f"""### {version} -- {release_date}
+
+Tag:
+`{version}`
+
+Included work:
+{work_lines}
+
+Requirements affected:
+{requirement_lines}
+
+Verification:
+{verification_lines}
+
+Production decision:
+`{decision}`
+
+Rollback or mitigation:
+{rollback}
+
+Notes:
+{notes}
+"""
+
+
+def render_release_record(content: str, entry: str, production_released: bool) -> str:
+    marker = "\n## Release Entry Format"
+    marker_index = content.find(marker)
+    if marker_index < 0:
+        return f"{content.rstrip()}\n\n{entry.rstrip()}\n"
+
+    before = content[:marker_index].rstrip()
+    after = content[marker_index:].lstrip("\n")
+    if production_released:
+        before = re.sub(
+            r"\n*## No Production Releases Recorded Yet\n.*?(?=\n## |\Z)",
+            "",
+            before,
+            flags=re.DOTALL,
+        ).rstrip()
+    return f"{before}\n\n{entry.rstrip()}\n\n{after.rstrip()}\n"
+
+
+def cmd_record_release(args: argparse.Namespace) -> int:
+    model = load_model()
+    if model.errors:
+        for issue in model.errors:
+            print(issue.format(), file=sys.stderr)
+        return 1
+
+    try:
+        version = validate_release_version(args.version)
+        release_date = validate_iso_date(args.date or date.today().isoformat())
+        decision = validate_single_line_markdown_field(args.decision, "--decision")
+        if release_candidate(version) and decision == "Released":
+            raise ValueError(
+                f"release candidate {version} cannot have production decision Released; "
+                "use a production semver for rollout or record Rejected/Rolled back"
+            )
+        verification = []
+        for check in args.verification:
+            validated = validate_single_line_markdown_field(check.strip(), "--verification")
+            if not validated or is_placeholder_token(validated):
+                raise ValueError("--verification must contain a concrete completed check")
+            verification.append(validated)
+        rollback = args.rollback.strip()
+        notes = args.notes.strip()
+        for value, field_name in ((rollback, "--rollback"), (notes, "--notes")):
+            if not value or is_placeholder_token(value):
+                raise ValueError(f"{field_name} must contain concrete release information")
+            validate_multiline_markdown_prose(value, field_name)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    releases_path = MANAGEMENT_DIR / "RELEASES.md"
+    if any(entry.id == version for entry in ledger_entries(releases_path)):
+        print(f"error: release {version} is already recorded in management/RELEASES.md", file=sys.stderr)
+        return 1
+
+    work_item_ids = list(dict.fromkeys(args.work_item_id))
+    work_items: list[WorkItem] = []
+    for work_item_id in work_item_ids:
+        item = model.work_items.get(work_item_id)
+        if item is None:
+            print(f"error: unknown work item: {work_item_id}", file=sys.stderr)
+            return 1
+        if item.state not in {"Merged", "Rolled Out"}:
+            print(
+                f"error: {item.id} is {item.state}; release records may include only Merged or Rolled Out work",
+                file=sys.stderr,
+            )
+            return 1
+        work_items.append(item)
+
+    requirement_ids = list(dict.fromkeys(item.requirement_id for item in work_items))
+    requirements = [model.requirements[requirement_id] for requirement_id in requirement_ids]
+    entry = release_entry_text(
+        version,
+        release_date,
+        work_items,
+        requirements,
+        verification,
+        decision,
+        rollback,
+        notes,
+    )
+    content = releases_path.read_text(encoding="utf-8") if releases_path.exists() else "# Releases\n"
+    atomic_write_text(
+        releases_path,
+        render_release_record(content, entry, production_released=decision == "Released"),
+    )
+
+    print("Release Record")
+    print("==============")
+    print(f"Version:  {version}")
+    print(f"Date:     {release_date}")
+    print(f"Decision: {decision}")
+    print("Included work:")
+    for item in work_items:
+        print(f"  - {item.id}: {item.state} -- {item.title}")
+    print("Source:   management/RELEASES.md")
+    print()
+    if decision == "Released":
+        merged_items = [item for item in work_items if item.state == "Merged"]
+        if merged_items:
+            print("Next commands for each Merged work item:")
+            for item in merged_items:
+                print(f"  scripts/management/link_evidence {item.id} management/RELEASES.md")
+                print(f"  scripts/management/advance_state {item.id} --dry-run")
+                print(f"  scripts/management/advance_state {item.id}")
+        else:
+            print("All included work is already Rolled Out; no lifecycle transition remains.")
+    else:
+        print("Do not advance the included work to Rolled Out from this release decision.")
+        print("Prepare a new version after the rejected or rolled-back outcome has been addressed.")
     return 0
 
 
@@ -4886,6 +5190,7 @@ def cmd_meeting_packet(args: argparse.Namespace) -> int:
     risks = open_ledger_entries(MANAGEMENT_DIR / "RISKS.md")
     incidents = open_ledger_entries(MANAGEMENT_DIR / "INCIDENTS.md")
     experiments = open_ledger_entries(MANAGEMENT_DIR / "EXPERIMENTS.md")
+    bug_reports = open_bug_report_entries()
     gaps = traceability_gaps(model)
     counts = state_counts(model)
 
@@ -4900,6 +5205,7 @@ def cmd_meeting_packet(args: argparse.Namespace) -> int:
     print()
     print("Needs attention:")
     print(f"  - Stale work: {len(stale)}")
+    print(f"  - Open bug reports: {len(bug_reports)}")
     print(f"  - Evidence coverage gaps: {len(gaps)}")
     print(f"  - Open risks: {len(risks)}")
     print(f"  - Open incidents: {len(incidents)}")
@@ -5606,6 +5912,102 @@ def cmd_semantic_context(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def lifecycle_next_commands(item: WorkItem) -> tuple[list[str], str | None]:
+    if item.state == "Under Planning":
+        return (
+            [
+                f"scripts/management/evaluate_plan {item.id}",
+                f"scripts/management/advance_state {item.id} --to Planned --dry-run",
+            ],
+            None,
+        )
+    if item.state == "Planned":
+        return (
+            [
+                f"scripts/management/advance_state {item.id} --engineer <ENGINEER> --dry-run",
+                f"scripts/management/advance_state {item.id} --engineer <ENGINEER>",
+            ],
+            None,
+        )
+    if item.state == "Started":
+        owner = item.owner if item.owner and re.fullmatch(r"[A-Za-z0-9_.-]+", item.owner) else "<ENGINEER>"
+        branch = f"{owner}/{item.id}"
+        return (
+            [
+                f"scripts/management/start_work {branch} --dry-run",
+                f"scripts/management/start_work {branch}",
+                f"scripts/management/chat_about {item.id}",
+            ],
+            None,
+        )
+    if item.state == "In Code Review":
+        return (
+            [
+                f"scripts/management/verification_check {item.id}",
+                f"scripts/management/review {item.id}",
+                f"scripts/management/advance_state {item.id} --to QA --dry-run",
+            ],
+            "QA is optional; choose Integrated or Merged only when that path matches the work.",
+        )
+    if item.state == "Integrated":
+        return (
+            [
+                f"scripts/management/link_evidence {item.id} <EXISTING_REPO_PATH> [MORE_EXISTING_PATHS ...]",
+                f"scripts/management/trace_requirement {item.requirement_id}",
+                f"scripts/management/advance_state {item.id} --to Merged --dry-run",
+            ],
+            None,
+        )
+    if item.state == "QA":
+        return (
+            [
+                f"scripts/management/acceptance_packet {item.id}",
+                f"scripts/management/link_evidence {item.id} <EXISTING_REPO_PATH> [MORE_EXISTING_PATHS ...]",
+                f"scripts/management/trace_requirement {item.requirement_id}",
+                f"scripts/management/advance_state {item.id} --to Merged --dry-run",
+            ],
+            None,
+        )
+    if item.state == "Merged":
+        return (
+            [
+                "scripts/management/prepare_release <VERSION> --strict",
+                "scripts/management/create_release_tag <VERSION>",
+                "scripts/management/create_release_tag <VERSION> --execute",
+                (
+                    f"scripts/management/record_release <VERSION> {item.id} --decision Released "
+                    '--verification "<PASSED_CHECKS>" --rollback "<ROLLBACK_OR_MITIGATION>" '
+                    '--notes "<RELEASE_NOTES>"'
+                ),
+                f"scripts/management/link_evidence {item.id} management/RELEASES.md",
+                f"scripts/management/advance_state {item.id} --dry-run",
+            ],
+            "Create and push a production tag only after release-owner approval; record the actual outcome after deployment checks.",
+        )
+    if item.state == "Rolled Out":
+        return (
+            [
+                f"scripts/management/trace_requirement {item.requirement_id}",
+                f"scripts/management/sync_requirement {item.requirement_id}",
+            ],
+            "The lifecycle is complete; these commands inspect the final requirement and evidence state.",
+        )
+    if terminal_state(item.state):
+        return [], f"{item.state} is terminal; no further lifecycle command applies."
+    return [], None
+
+
+def print_lifecycle_next_commands(item: WorkItem, *, stream=None) -> None:
+    output = stream or sys.stdout
+    commands, note = lifecycle_next_commands(item)
+    if commands:
+        print("Next commands:", file=output)
+        for command in commands:
+            print(f"  {command}", file=output)
+    if note:
+        print(f"Note: {note}", file=output)
+
+
 def cmd_advance_state(args: argparse.Namespace) -> int:
     model = load_model()
     if model.errors:
@@ -5631,6 +6033,11 @@ def cmd_advance_state(args: argparse.Namespace) -> int:
             return 1
     if item.state == "Planned" and target_state == "Started" and not (engineer or item.owner):
         print("error: --engineer is required when moving Planned to Started", file=sys.stderr)
+        print(
+            f"error: retry first with: scripts/management/advance_state {item.id} "
+            "--engineer <ENGINEER> --dry-run",
+            file=sys.stderr,
+        )
         return 1
 
     override_reason = args.override_gate.strip() if args.override_gate else None
@@ -5641,6 +6048,36 @@ def cmd_advance_state(args: argparse.Namespace) -> int:
     if gate_failures and not override_reason:
         for failure in gate_failures:
             print(f"error: readiness gate failed: {failure}", file=sys.stderr)
+        if any(
+            "no TRACEABILITY.md row" in failure or "no existing concrete evidence path" in failure
+            for failure in gate_failures
+        ):
+            print("error: add or update concrete evidence with:", file=sys.stderr)
+            print(
+                f"error:   scripts/management/link_evidence {item.id} "
+                "<EXISTING_REPO_PATH> [MORE_EXISTING_PATHS ...]",
+                file=sys.stderr,
+            )
+            print(f"error: inspect it with: scripts/management/trace_requirement {item.requirement_id}", file=sys.stderr)
+        if any("schema-valid Released entry" in failure for failure in gate_failures):
+            print("error: prepare, execute, and record the production release with:", file=sys.stderr)
+            print("error:   scripts/management/prepare_release <VERSION> --strict", file=sys.stderr)
+            print("error:   scripts/management/create_release_tag <VERSION>", file=sys.stderr)
+            print("error:   scripts/management/create_release_tag <VERSION> --execute", file=sys.stderr)
+            print(
+                f"error:   scripts/management/record_release <VERSION> {item.id} "
+                '--decision Released --verification "<PASSED_CHECKS>" '
+                '--rollback "<ROLLBACK_OR_MITIGATION>" --notes "<RELEASE_NOTES>"',
+                file=sys.stderr,
+            )
+        if any("no linked operational or release evidence path" in failure for failure in gate_failures):
+            print("error: link the release record and any additional operational evidence with:", file=sys.stderr)
+            print(
+                f"error:   scripts/management/link_evidence {item.id} management/RELEASES.md "
+                "[<OPERATIONAL_EVIDENCE_PATH> ...]",
+                file=sys.stderr,
+            )
+            print(f"error: inspect it with: scripts/management/trace_requirement {item.requirement_id}", file=sys.stderr)
         print("error: satisfy the deterministic gates or pass --override-gate with an auditable reason", file=sys.stderr)
         return 1
     if override_reason and not gate_failures:
@@ -5655,6 +6092,8 @@ def cmd_advance_state(args: argparse.Namespace) -> int:
     if target_state == item.state and target_state in item.timeline:
         print()
         print(f"No change: {item.id} already has {target_state}: {item.timeline[target_state]}")
+        print()
+        print_lifecycle_next_commands(item)
         return 0
 
     try:
@@ -5666,6 +6105,8 @@ def cmd_advance_state(args: argparse.Namespace) -> int:
     if args.dry_run:
         print()
         print(f"Dry run: would move {item.id} from {item.state} to {target_state} using date {state_date}.")
+        print()
+        print_lifecycle_next_commands(dataclasses.replace(item, state=target_state))
         return 0
 
     try:
@@ -5686,11 +6127,224 @@ def cmd_advance_state(args: argparse.Namespace) -> int:
     print()
     print("After:")
     print_work_item(updated_model, updated_item)
+    print()
+    print_lifecycle_next_commands(updated_item)
     return 0
 
 
+COMMAND_GUIDANCE: dict[str, tuple[str, tuple[str, ...]]] = {
+    "lint": (
+        "Run before management work or CI to find structural and cross-record inconsistencies.",
+        ("scripts/management/management_tool lint --strict",),
+    ),
+    "show-requirement": (
+        "Use when you need the authoritative text and source location for one requirement.",
+        ("scripts/management/management_tool show-requirement E.Gov.01",),
+    ),
+    "show-work": (
+        "Use when you need one backlog item's state, history, description, and governing requirement.",
+        ("scripts/management/management_tool show-work ER.MCP.02.a-001",),
+    ),
+    "chat-about": (
+        "Use before or during implementation to load the current work and requirement into an engineering discussion.",
+        ("scripts/management/chat_about Luiz/ER.MCP.02.a-001",),
+    ),
+    "verify-branch": (
+        "Use before implementation to check that a branch names a Started item owned by the expected engineer.",
+        ("scripts/management/management_tool verify-branch Luiz/ER.MCP.02.a-001",),
+    ),
+    "advance-state": (
+        "Use on main when a work item has met the gate for its next lifecycle state; inspect with --dry-run first. If a Merged or Rolled Out gate reports missing traceability evidence, run link_evidence before retrying.",
+        (
+            "scripts/management/advance_state ER.MCP.02.a-001 --engineer Luiz --dry-run",
+            "scripts/management/link_evidence EF.Gov.01-002 management/TOOLING.md scripts/management/test_management_tool",
+            "scripts/management/trace_requirement E.Gov.01",
+            "scripts/management/advance_state EF.Gov.01-002 --dry-run",
+        ),
+    ),
+    "start-work": (
+        "Use after an item reaches Started to validate and create or switch to its implementation branch.",
+        ("scripts/management/start_work Luiz/ER.MCP.02.a-001 --dry-run",),
+    ),
+    "evaluate-plan": (
+        "Use to check whether a proposed backlog item is structurally coherent with its requirement and sibling work.",
+        ("scripts/management/evaluate_plan ER.MCP.02.a-001",),
+    ),
+    "draft-plan": (
+        "Use to propose requirement-backed work; choose motivation F when reporting a faulty implementation.",
+        (
+            "scripts/management/draft_plan E.MCP.02.b",
+            "scripts/management/draft_plan E.Gov.01 --motivation F --title \"Fix management command behavior\" --write",
+        ),
+    ),
+    "audit-requirements": (
+        "Use to inspect deterministic requirement quality separately from planning, evidence, and semantic prompts.",
+        ("scripts/management/audit_requirements --document E",),
+    ),
+    "management-status": (
+        "Use for a concise snapshot of work states, coverage, stale work, and management warnings.",
+        ("scripts/management/management_status --stale-days 14",),
+    ),
+    "diagram-architecture-real": (
+        "Use to render architecture inferred from current Rust source dependencies.",
+        ("scripts/management/diagram_architecture_real",),
+    ),
+    "diagram-architecture-planned": (
+        "Use to compare current architecture with active work and unplanned requirements.",
+        ("scripts/management/diagram_architecture_planned",),
+    ),
+    "diagram-module-dependencies": (
+        "Use to inspect Rust module dependency edges, optionally narrowed to one namespace.",
+        ("scripts/management/diagram_module_dependencies --scope messaging",),
+    ),
+    "trace-requirement": (
+        "Use to inspect one requirement's mapped work, parsed evidence, and source mentions.",
+        ("scripts/management/trace_requirement E.Gov.01",),
+    ),
+    "link-evidence": (
+        "Use after implementation or verification to append or update a work item's Current Links row. The governing requirement is derived from the work item.",
+        (
+            "scripts/management/link_evidence EF.Gov.01-002 management/TOOLING.md scripts/management/test_management_tool --note \"Guidance and regression coverage\"",
+            "scripts/management/trace_requirement E.Gov.01",
+        ),
+    ),
+    "prepare-release": (
+        "Use before a release decision to gather blockers, currently Merged work, verification, and operational readiness. After tagging and deployment checks, record the outcome with record_release.",
+        (
+            "scripts/management/prepare_release 0.1.0 --strict",
+            "scripts/management/create_release_tag 0.1.0",
+            'scripts/management/record_release 0.1.0 EF.Gov.01-002 --decision Released --verification "Checks passed" --rollback "Restore the preceding release" --notes "Release notes"',
+        ),
+    ),
+    "create-release-tag": (
+        "Use after release acceptance to preview or explicitly create an annotated local release tag. After deployment checks, record the outcome with record_release.",
+        (
+            "scripts/management/create_release_tag 0.1.0",
+            "scripts/management/create_release_tag 0.1.0 --execute",
+        ),
+    ),
+    "record-release": (
+        "Use after a release or rollback outcome is known to append a schema-valid RELEASES.md entry. A Released record must then be linked as evidence before Merged work can move to Rolled Out.",
+        (
+            'scripts/management/record_release 0.1.0 EF.Gov.01-002 --decision Released --verification "Branch, main, post-merge, and operational checks passed" --rollback "Revert the deployment to the preceding revision" --notes "Management tooling guidance release"',
+            "scripts/management/link_evidence EF.Gov.01-002 management/RELEASES.md",
+            "scripts/management/advance_state EF.Gov.01-002 --dry-run",
+        ),
+    ),
+    "estimate-requirement": (
+        "Use to prepare deterministic planning context before a human semantic estimate.",
+        ("scripts/management/estimate_requirement E.MCP.02.b",),
+    ),
+    "sync-requirement": (
+        "Use to compare a requirement with its backlog, traceability, and source evidence for possible drift.",
+        ("scripts/management/sync_requirement E.MCP.01 --strict",),
+    ),
+    "chase-techdebts": (
+        "Use to collect deterministic technical-debt review leads that still require engineering judgment.",
+        ("scripts/management/chase_techdebts --limit 20",),
+    ),
+    "semantic-context": (
+        "Use to emit deterministic JSON evidence for the repo-local semantic management-analysis workflow.",
+        ("scripts/management/semantic_context review EF.Gov.01-002 --base origin/main",),
+    ),
+    "record-decision": (
+        "Use when the project accepts a durable choice whose context and consequences must remain auditable.",
+        ("scripts/management/record_decision \"Decision title\" --context \"Context\" --decision \"Choice\" --consequence \"Effect\"",),
+    ),
+    "record-risk": (
+        "Use for an uncertain future problem that needs an owner, impact, mitigation, and review.",
+        ("scripts/management/record_risk \"Risk title\" --owner Luiz --risk \"What may happen\" --impact \"Why it matters\" --mitigation \"What reduces it\"",),
+    ),
+    "close-risk": (
+        "Use when an open risk is no longer active and concrete closure evidence exists.",
+        ("scripts/management/close_risk RISK-0001 --evidence \"Resolved by EF.Gov.01-002\"",),
+    ),
+    "record-incident": (
+        "Use for a production, staging, data, security, release, development, or local failure with operational learning value.",
+        ("scripts/management/record_incident \"Incident title\" --environment Local --impact \"Impact\" --timeline \"Observed then mitigated\" --mitigation \"Mitigation\"",),
+    ),
+    "close-incident": (
+        "Use when an incident has been mitigated or resolved and closure evidence is available.",
+        ("scripts/management/close_incident INCIDENT-0001 --evidence \"Verification evidence\"",),
+    ),
+    "record-experiment": (
+        "Use before an X-motivation spike or prototype to record its hypothesis, expiry, and criteria.",
+        ("scripts/management/record_experiment \"Experiment title\" --branch Luiz/EX.Gov.01-002 --hypothesis \"Hypothesis\" --expires 2026-08-01 --success \"Success\" --failure \"Failure\"",),
+    ),
+    "close-experiment": (
+        "Use when an experiment ends and its result should be adopted, rejected, or marked expired.",
+        ("scripts/management/close_experiment EXP-0001 --status Adopted --result \"Result\"",),
+    ),
+    "stale-work": (
+        "Use to find active work whose latest lifecycle entry is older than the selected threshold.",
+        ("scripts/management/stale_work --days 14",),
+    ),
+    "meeting-packet": (
+        "Use before a manager, product, and engineering sync to gather the current management snapshot.",
+        ("scripts/management/meeting_packet --stale-days 14",),
+    ),
+    "acceptance-packet": (
+        "Use when a human owner is reviewing whether a work item satisfies its requirement and definition of done.",
+        ("scripts/management/acceptance_packet EN.Gov.01-001",),
+    ),
+    "verification-check": (
+        "Use before review or acceptance to inventory changed files and likely verification evidence.",
+        ("scripts/management/verification_check EF.Gov.01-002 --base origin/main",),
+    ),
+    "review": (
+        "Use before human code review to gather the work item, requirement, diff, evidence, and review checklist.",
+        ("scripts/management/review EF.Gov.01-002 --base origin/main",),
+    ),
+    "block-work": (
+        "Use when a work item temporarily cannot proceed. Blocking is independent of lifecycle state, and the complete management graph must validate before the event is written.",
+        (
+            "scripts/management/block_work ER.MCP.02.a-001 --reason \"Underlying requirement is under revision\" --dry-run",
+            "scripts/management/block_work ER.MCP.02.a-001 --reason \"Underlying requirement is under revision\"",
+        ),
+    ),
+    "unblock-work": (
+        "Use when the latest blocker has been resolved; this appends history without changing lifecycle state.",
+        ("scripts/management/unblock_work ER.MCP.02.a-001 --reason \"The requirement revision is decided\"",),
+    ),
+}
+
+
+def configure_subcommand_help(subparsers) -> None:
+    canonical_actions = {action.dest: action for action in subparsers._choices_actions}
+    missing = sorted(set(canonical_actions) - set(COMMAND_GUIDANCE))
+    unknown = sorted(set(COMMAND_GUIDANCE) - set(canonical_actions))
+    if missing or unknown:
+        raise RuntimeError(f"command guidance mismatch; missing={missing}, unknown={unknown}")
+
+    for command, action in canonical_actions.items():
+        when, examples = COMMAND_GUIDANCE[command]
+        command_parser = subparsers.choices[command]
+        command_parser.formatter_class = argparse.RawDescriptionHelpFormatter
+        purpose_text = textwrap.fill(action.help, width=88)
+        when_text = textwrap.fill(when, width=88, initial_indent="  ", subsequent_indent="  ")
+        command_parser.description = f"{purpose_text}\n\nWhen to use:\n{when_text}"
+        command_parser.epilog = (
+            "Examples:\n"
+            + "\n".join(f"  {example}" for example in examples)
+            + "\n\nSee management/TOOLING.md for the complete workflow documentation."
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Management requirements and backlog helper.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Management requirements and backlog helper.\n\n"
+            "When to use:\n"
+            "  Use a subcommand to inspect or safely mutate the git-controlled management model."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  scripts/management/management_tool lint --strict\n"
+            "  scripts/management/management_tool block-work --help\n\n"
+            "See management/TOOLING.md for the complete workflow documentation."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     lint = subparsers.add_parser("lint", help="Validate management file structure and links.")
@@ -5827,14 +6481,13 @@ def build_parser() -> argparse.ArgumentParser:
     link_evidence = subparsers.add_parser(
         "link-evidence",
         aliases=["link_evidence"],
-        help="Append or update TRACEABILITY.md evidence for a requirement and work item.",
+        help="Append or update TRACEABILITY.md evidence for a work item and its derived requirement.",
     )
-    link_evidence.add_argument("requirement_id")
-    link_evidence.add_argument("work_item_id")
-    link_evidence.add_argument("path", nargs="+", help="Evidence path(s) to link.")
-    link_evidence.add_argument("--note", help="Additional evidence note.")
+    link_evidence.add_argument("work_item_id", help="Work item receiving evidence; its governing requirement is derived and validated automatically.")
+    link_evidence.add_argument("path", nargs="+", help="One or more repository-relative evidence paths, such as source, tests, or documentation.")
+    link_evidence.add_argument("--note", help="Optional explanatory text; it supplements rather than replaces concrete paths.")
     link_evidence.add_argument("--state", help="Traceability state. Defaults to the backlog work-item state.")
-    link_evidence.add_argument("--allow-missing", action="store_true", help="Allow evidence paths that do not currently exist.")
+    link_evidence.add_argument("--allow-missing", action="store_true", help="Allow paths that do not exist yet; missing paths do not satisfy deterministic evidence gates.")
     link_evidence.set_defaults(func=cmd_link_evidence)
 
     prepare_release = subparsers.add_parser("prepare-release", aliases=["prepare_release"], help="Prepare a release decision packet.")
@@ -5848,6 +6501,20 @@ def build_parser() -> argparse.ArgumentParser:
     create_release_tag.add_argument("--message", help="Annotated tag message. Default: Release <version>.")
     create_release_tag.add_argument("--execute", action="store_true", help="Create the tag. Without this flag the command is a dry run.")
     create_release_tag.set_defaults(func=cmd_create_release_tag)
+
+    record_release = subparsers.add_parser(
+        "record-release",
+        aliases=["record_release"],
+        help="Append a structured production release decision to RELEASES.md.",
+    )
+    record_release.add_argument("version", help="Semver release or release-candidate version.")
+    record_release.add_argument("work_item_id", nargs="+", help="Merged or Rolled Out work included in this release decision.")
+    record_release.add_argument("--decision", choices=RELEASE_DECISIONS, required=True, help="Observed production outcome.")
+    record_release.add_argument("--verification", action="append", required=True, help="Completed release check. May be passed more than once.")
+    record_release.add_argument("--rollback", required=True, help="Concrete rollback or mitigation plan or action.")
+    record_release.add_argument("--notes", required=True, help="Concise release notes.")
+    record_release.add_argument("--date", help="Release decision date in YYYY-MM-DD. Defaults to today.")
+    record_release.set_defaults(func=cmd_record_release)
 
     estimate_requirement = subparsers.add_parser(
         "estimate-requirement",
@@ -5993,6 +6660,7 @@ def build_parser() -> argparse.ArgumentParser:
     unblock_work.add_argument("--dry-run", action="store_true", help="Print the event without editing the backlog.")
     unblock_work.set_defaults(func=cmd_block_work, block_action="unblock")
 
+    configure_subcommand_help(subparsers)
     return parser
 
 
