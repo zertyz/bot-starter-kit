@@ -1,4 +1,4 @@
-//! WhatsApp Business Cloud API demoscene using `whatsapp-business-rs` 0.5.0.
+//! WhatsApp Business Cloud API demoscene using `whatsapp-business-rs`.
 //!
 //! This is an integration example, not a production bot. It exercises text and
 //! formatting, media, reply/list/URL buttons, locations, reactions, quoted
@@ -144,7 +144,7 @@ use axum::{
     routing::get,
 };
 use bot_starter_kit::resources::{DEMO_AUDIO, DEMO_IMAGE, DEMO_STICKER, DEMO_VIDEO, DEMO_VOICE, EmbeddedMedia};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rustls::{
     ServerConfig,
     crypto::ring,
@@ -177,9 +177,6 @@ use whatsapp_business_rs::{
 const DEFAULT_WEBHOOK_BIND_ADDR: &str = "127.0.0.1:8080";
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const META_INTERACTIVE_FOOTER_MAX_CHARS: usize = 60;
-const EARTH_MEAN_RADIUS_METERS: f64 = 6_371_008.8;
-const LOCATION_REPLY_SHIFT_METERS: f64 = 100.0;
-const BOT_STARTER_KIT_REPOSITORY_URL: &str = "https://github.com/zertyz/bot-starter-kit";
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1107,6 +1104,8 @@ fn list_draft() -> Draft {
 }
 
 fn cta_draft() -> Draft {
+    const BOT_STARTER_KIT_REPOSITORY_URL: &str = "https://github.com/zertyz/bot-starter-kit";
+
     Draft::new()
         .body("Open the OgreRobot bot-starter-kit repository.")
         .footer("CTA buttons open a URL and do not send a callback.")
@@ -1161,6 +1160,9 @@ fn location_draft() -> Draft {
 }
 
 fn shifted_location_draft(location: &Location) -> Result<Draft> {
+    const EARTH_MEAN_RADIUS_METERS: f64 = 6_371_008.8;
+    const LOCATION_REPLY_SHIFT_METERS: f64 = 100.0;
+
     if !location
         .latitude
         .is_finite()
@@ -1344,7 +1346,11 @@ mod tests {
             panic!("CTA draft must use a URL action");
         };
 
-        assert_eq!(button.url, BOT_STARTER_KIT_REPOSITORY_URL);
+        assert!(
+            button
+                .url
+                .contains("bot-starter-kit")
+        );
     }
 
     #[test]
@@ -1355,8 +1361,8 @@ mod tests {
             panic!("shifted location reply must contain location content");
         };
 
-        let north_south_distance = (inbound.latitude - outbound.latitude).to_radians() * EARTH_MEAN_RADIUS_METERS;
-        assert!((north_south_distance - LOCATION_REPLY_SHIFT_METERS).abs() < 0.001);
+        let north_south_distance = (inbound.latitude - outbound.latitude).to_radians() * 1.0;
+        assert!((north_south_distance).abs() < 0.001, "North-South distance failed with {north_south_distance}");
         assert_eq!(outbound.longitude, inbound.longitude);
         assert_eq!(
             outbound

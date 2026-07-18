@@ -25,6 +25,11 @@ Any breaking upstream changes to the Messaging Platform should be identified at 
 3. Messaging Platform stopping to execute – with a log message clearly stating the model drift;
 4. QA session via one of the test plans.
 
+UPDATE: 2026-07-17: this requirement is, currently, under revision. It might not be possible -- nor desireable -- to have the same presentation logic for all platforms.
+                    For instance: Telegram does support message editing; whatsapp seems not to. SMS certainly don't support it. In order to be able to take the most of each platform,
+                    having specific presentation logic per platform seems to be the way to go. Somewhere else, we define "logic layers". That other requirement should be reviewed as well.
+                    It seems to be the solution for this problem and, As-is, seems to contradict the requirement hereby.
+
 
 ## 02.b) Messaging Platform Inquiry and Features Inquiry
 

@@ -15,7 +15,7 @@ pub struct Sqlite {
 }
 
 impl Sqlite {
-    pub async fn open(db_path: impl AsRef<Path>, model_setup_sqls: &[&str]) -> Result<Self> {
+    pub async fn open(db_path: impl AsRef<Path>, model_setup_sqls: &[&'static str]) -> Result<Self> {
         let options = SqliteConnectOptions::from_str(&format!(
             "sqlite://{}",
             db_path
@@ -69,7 +69,7 @@ impl Sqlite {
             .await
             .map_err(|err| anyhow!("opening SQLite database: {err}"))?;
 
-        for (i, model_setup_sql) in model_setup_sqls
+        for (i, &model_setup_sql) in model_setup_sqls
             .iter()
             .enumerate()
         {
@@ -151,9 +151,9 @@ impl Sqlite {
 
     pub async fn ingest_stream<ItemType>(
         &self,
-        insert_sql: &str,
+        insert_sql: &'static str,
         input_stream: impl Stream<Item = ItemType>,
-        bind_fn: impl for<'r> Fn(Query<'r, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'r>>, ItemType) -> Query<'r, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'r>>,
+        bind_fn: impl Fn(Query<sqlx::Sqlite, sqlx::sqlite::SqliteArguments>, ItemType) -> Query<sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     ) -> Result<u64> {
         let mut tx = self
             .pool

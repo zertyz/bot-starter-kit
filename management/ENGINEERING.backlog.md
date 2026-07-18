@@ -7,10 +7,25 @@
 3. Check they work exactly as before
 ==> Luiz. Planned: 2026-07-05;
 
+## EN.Demo.02-002 -- The WhatsApp Demoscene is not fully exploring all the message types WhatsApp can deliver
+1. Please see the "Espaçolaser RJ - Shop Rio Sul" screenshot, proving WhatsApp do support "telegram-menu-like" messages, using two columns
+2. Please compare that to the screenshots showing what the current WhatsApp Demoscene is presenting, using a single column
+3. Research the docs and solve the gap: change the demoscene "menu" command to offer a 2 columns row and a 1 colum row containing the existing options
+4. Do additional resources and see if emojis / icons can be presented there, exactly as we do for Telegram
+5. Go ahead and cover additional gaps between WhatsApp and Telegram, like message editing -- for text and image
+6. Document -- in the Demoscene -- what messaging and UI features WhatsApp is missing in relation to Telegram.
+7. Now go ahead and treat the Telegram code. Check if the existing Telegram code can do everything WhatsApp is doing. Including:
+   * Offering a pop-up to select one among a long list of options -- In the WhatsApp demoscene this is called "Features" and is presented with an icon
+   * The WhatsApp demoscene do demonstrate a "reaction to a message". Make sure our Telegram code is demoing doing the same.
+   * If Telegram cannot do something WhatsApp can, please document it in the telegram demoscene code.
+   ==> Luiz. Planned: 2026-07-17
+   
 
 # Started
 
+
 # "In Code Review"
+
 
 # "Integrated"
 
@@ -19,6 +34,7 @@
 
 
 # Merged
+
 
 # Rolled Out
 
