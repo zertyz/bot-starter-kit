@@ -56,7 +56,7 @@ type DynError = Box<dyn Error + Send + Sync>;
 
 /// Gemini text models suitable for this PDF-analysis pipeline, as documented on 2026-07-17
 /// using the Google AI Studio console.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeminiModel {
     /// ### Gemini 3.5 Flash
     ///
@@ -65,6 +65,7 @@ pub enum GeminiModel {
     /// - **Capabilities used here**: PDF input and structured JSON output.
     /// - **Recommended use**: Default for this pipeline. It provides the best
     ///   balance of extraction quality, reasoning, latency, and lifecycle safety.
+    #[default]
     Gemini35Flash,
 
     /// ### Gemini 3.1 Flash-Lite
@@ -124,12 +125,6 @@ impl GeminiModel {
             Self::Gemini25Flash => "gemini-2.5-flash",
             Self::Gemini25FlashLite => "gemini-2.5-flash-lite",
         }
-    }
-}
-
-impl Default for GeminiModel {
-    fn default() -> Self {
-        Self::Gemini35Flash
     }
 }
 
@@ -548,10 +543,9 @@ fn extract_generated_text(response: &Value) -> Result<String, DynError> {
     if let Some(finish_reason) = candidate
         .get("finishReason")
         .and_then(Value::as_str)
+        && finish_reason != "STOP"
     {
-        if finish_reason != "STOP" {
-            return Err(format!("Gemini did not finish normally; finishReason={finish_reason}; response: {}", truncate_for_error(&response.to_string())).into());
-        }
+        return Err(format!("Gemini did not finish normally; finishReason={finish_reason}; response: {}", truncate_for_error(&response.to_string())).into());
     }
 
     let mut text = String::new();
