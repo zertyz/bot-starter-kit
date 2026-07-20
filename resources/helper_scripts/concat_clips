@@ -2,26 +2,97 @@
 set -euo pipefail
 
 usage() {
+  local status=${1:-2}
   cat >&2 <<'USAGE'
 Usage:
-  ./concat_clips OUTPUT FILE START_SECONDS END_SECONDS [FILE START_SECONDS END_SECONDS ...]
+  concat_clips [--av1] OUTPUT.mp4 FILE START_SECONDS END_SECONDS \
+    [FILE START_SECONDS END_SECONDS ...]
 
-Example:
-  ./concat_clips output.mp4 \
-    video1.mp4 10 25.5 \
-    video2.mkv 63.25 80 \
-    video3.mov 5 17.75
+Modes:
+  default  WhatsApp/Telegram-compatible MP4: H.264 Main, no B-frames, AAC-LC
+  --av1    SVT-AV1 10-bit + Opus; use .webm or .mkv for the output
 
-Optional environment variables:
-  WIDTH=1280 HEIGHT=720 FPS=24 CRF=28 PRESET=veryslow
-  AUDIO_RATE=48000 AUDIO_BITRATE=128k
+Hint:
+  Use the original videos as input files -- not re-encoded ones.
+
+Examples:
+  MUSIC_FILE=music.flac MUSIC_SOURCE_START=37.5 MUSIC_DURATION=10 VIDEO_INSERT_MS=83000 \
+    concat_clips output.mp4 \
+      video1.mp4 10 25.5 \
+      video2.mkv 63.25 80 \
+      video3.mov 5 17.75
+
+  concat_clips --av1 output.webm video1.mp4 10 25.5
+
+  LOGO_FILE=logo.png LOGO_X=48 LOGO_Y=36 LOGO_WIDTH=180 LOGO_HEIGHT=-1 \
+  LOGO_FADE_IN=0.50 LOGO_FADE_OUT=0.75 \
+    concat_clips output.mp4 video1.mp4 10 25.5
+
+Common environment variables:
+  WIDTH=1280 HEIGHT=720 FPS=24 AUDIO_RATE=48000 AUDIO_CHANNELS=1
+  AUDIO_BITRATE overrides the mode-specific default.
+  GOP overrides the key-frame interval in frames.
+  WHATSAPP_MAX_BYTES=16000000 controls the post-encode size warning; 0 disables it.
+
+H.264/AAC defaults:
+  H264_CRF=27 H264_PRESET=veryslow H264_REFS=4 H264_LOOKAHEAD=60
+  H264_GOP_SECONDS=2
+  Audio bitrate: 32k without music, 48k with music
+
+AV1/Opus defaults:
+  AV1_CRF=54 AV1_PRESET=0 AV1_LOOKAHEAD=120 AV1_GOP_SECONDS=5
+  Audio bitrate: 16k without music, 24k with music
+
+Backward-compatible aliases:
+  CRF and PRESET override the selected mode; LOOKAHEAD overrides its lookahead.
+
+Music mixing is enabled when MUSIC_FILE is set:
+  MUSIC_FILE=music.flac
+  MUSIC_SOURCE_START=0 VIDEO_INSERT_MS=0
+  MUSIC_DURATION may be set for a finite cue. When omitted, the music is
+  looped as needed and spans from VIDEO_INSERT_MS to the end of the complete
+  concatenated output.
+  MUSIC_DB=-14 FADE_IN=0.35 FADE_OUT_DURATION=0.80
+  FADE_OUT_START defaults to the effective music duration minus FADE_OUT_DURATION.
+
+Logo overlay is enabled when LOGO_FILE is set:
+  LOGO_FILE=logo.png
+  LOGO_X=0 LOGO_Y=0                  final-canvas coordinates; FFmpeg expressions allowed
+  LOGO_WIDTH= LOGO_HEIGHT=           empty keeps the PNG's native size
+  Set one dimension to -1 to preserve aspect ratio, e.g. 180:-1.
+  LOGO_OPACITY=1                     range 0..1; multiplies the PNG's existing alpha
+  LOGO_FADE_IN=0 LOGO_FADE_OUT=0     seconds at the beginning/end of the final video
 USAGE
-  exit 2
+  exit "$status"
 }
 
 command -v ffmpeg >/dev/null 2>&1 || { echo "error: ffmpeg not found" >&2; exit 127; }
 command -v ffprobe >/dev/null 2>&1 || { echo "error: ffprobe not found" >&2; exit 127; }
 command -v awk >/dev/null 2>&1 || { echo "error: awk not found" >&2; exit 127; }
+
+codec_mode=h264
+while (( $# )); do
+  case $1 in
+    --av1)
+      codec_mode=av1
+      shift
+      ;;
+    -h|--help)
+      usage 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      usage
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 (( $# >= 4 )) || usage
 output=$1
@@ -31,18 +102,116 @@ shift
 width=${WIDTH:-1280}
 height=${HEIGHT:-720}
 fps=${FPS:-24}
-crf=${CRF:-28}
-preset=${PRESET:-veryslow}
 audio_rate=${AUDIO_RATE:-48000}
-audio_bitrate=${AUDIO_BITRATE:-128k}
+audio_channels=${AUDIO_CHANNELS:-1}
+music_file=${MUSIC_FILE:-}
+logo_file=${LOGO_FILE:-}
+logo_x=${LOGO_X:-0}
+logo_y=${LOGO_Y:-0}
+logo_width=${LOGO_WIDTH:-}
+logo_height=${LOGO_HEIGHT:-}
+logo_opacity=${LOGO_OPACITY:-1}
+logo_fade_in=${LOGO_FADE_IN:-0}
+logo_fade_out=${LOGO_FADE_OUT:-0}
+
+if [[ $codec_mode == h264 ]]; then
+  case ${output,,} in
+    *.mp4) ;;
+    *)
+      echo "error: the default WhatsApp-compatible mode requires an .mp4 output filename" >&2
+      echo "hint: use '${output%.*}.mp4', or add --av1 for an AV1/WebM output" >&2
+      exit 2
+      ;;
+  esac
+
+  crf=${H264_CRF:-${CRF:-31}}
+  preset=${H264_PRESET:-${PRESET:-veryslow}}
+  refs=${H264_REFS:-32}
+  lookahead=${H264_LOOKAHEAD:-${LOOKAHEAD:-256}}
+  gop_seconds=${H264_GOP_SECONDS:-60}
+  default_audio_bitrate=$([[ -n $music_file ]] && echo 48k || echo 32k)
+  whatsapp_max_bytes=${WHATSAPP_MAX_BYTES:-16000000}
+  [[ $whatsapp_max_bytes =~ ^[0-9]+$ ]] || {
+    echo "error: WHATSAPP_MAX_BYTES must be a non-negative integer" >&2
+    exit 2
+  }
+else
+  crf=${AV1_CRF:-${CRF:-54}}
+  preset=${AV1_PRESET:-${PRESET:-0}}
+  lookahead=${AV1_LOOKAHEAD:-${LOOKAHEAD:-120}}
+  gop_seconds=${AV1_GOP_SECONDS:-120}
+  default_audio_bitrate=$([[ -n $music_file ]] && echo 24k || echo 16k)
+
+  case ${output,,} in
+    *.webm|*.mkv) ;;
+    *.mp4)
+      echo "warning: AV1 + Opus in MP4 has weaker client compatibility; .webm is recommended" >&2
+      ;;
+    *)
+      echo "warning: use a .webm or .mkv extension for AV1 + Opus" >&2
+      ;;
+  esac
+fi
+
+audio_bitrate=${AUDIO_BITRATE:-$default_audio_bitrate}
+
+if [[ -n ${GOP:-} ]]; then
+  gop=$GOP
+else
+  gop=$(awk -v fps="$fps" -v seconds="$gop_seconds" 'BEGIN {
+    frames = int((fps * seconds) + 0.5)
+    if (frames < 1) frames = 1
+    print frames
+  }')
+fi
+
+#min_keyint=$(awk -v fps="$fps" 'BEGIN {
+#  frames = int(fps + 0.5)
+#  if (frames < 1) frames = 1
+#  print frames
+#}')
+music_source_start=${MUSIC_SOURCE_START:-0}
+# Empty means: cover the remainder of the complete concatenated timeline.
+music_duration=${MUSIC_DURATION:-}
+video_insert_ms=${VIDEO_INSERT_MS:-0}
+music_db=${MUSIC_DB:--14}
+fade_in=${FADE_IN:-0.35}
+fade_out_duration=${FADE_OUT_DURATION:-0.80}
+fade_out_start=${FADE_OUT_START:-}
 
 number_re='^([0-9]+([.][0-9]*)?|[.][0-9]+)$'
+logo_dimension_re='^(-1|[1-9][0-9]*)$'
 
-ffmpeg_args=(-hide_banner -y)
+if [[ -n $logo_file ]]; then
+  [[ -f $logo_file ]] || { echo "error: LOGO_FILE does not exist: $logo_file" >&2; exit 1; }
+  [[ $logo_opacity =~ $number_re ]] || { echo "error: LOGO_OPACITY must be a number from 0 through 1" >&2; exit 2; }
+  awk -v value="$logo_opacity" 'BEGIN { exit !(value >= 0 && value <= 1) }' || {
+    echo "error: LOGO_OPACITY must be from 0 through 1" >&2
+    exit 2
+  }
+  [[ $logo_fade_in =~ $number_re ]] || { echo "error: LOGO_FADE_IN must be a non-negative number" >&2; exit 2; }
+  [[ $logo_fade_out =~ $number_re ]] || { echo "error: LOGO_FADE_OUT must be a non-negative number" >&2; exit 2; }
+
+  if [[ -n $logo_width && ! $logo_width =~ $logo_dimension_re ]]; then
+    echo "error: LOGO_WIDTH must be a positive integer, -1, or empty" >&2
+    exit 2
+  fi
+  if [[ -n $logo_height && ! $logo_height =~ $logo_dimension_re ]]; then
+    echo "error: LOGO_HEIGHT must be a positive integer, -1, or empty" >&2
+    exit 2
+  fi
+  if [[ $logo_width == -1 && $logo_height == -1 ]]; then
+    echo "error: LOGO_WIDTH and LOGO_HEIGHT cannot both be -1" >&2
+    exit 2
+  fi
+fi
+
+ffmpeg_args=(-y)
 filter_graph=''
 concat_pads=''
 input_index=0
 clip_index=0
+total_duration=0
 
 while (( $# )); do
   file=$1
@@ -59,6 +228,10 @@ while (( $# )); do
     if (duration <= 0) exit 1
     printf "%.9f", duration
   }') || { echo "error: end must be greater than start for $file" >&2; exit 1; }
+
+  total_duration=$(awk -v total="$total_duration" -v duration="$duration" 'BEGIN {
+    printf "%.9f", total + duration
+  }')
 
   video_stream=$(ffprobe -v error -select_streams v:0 \
     -show_entries stream=index -of csv=p=0 "$file")
@@ -88,7 +261,7 @@ while (( $# )); do
   filter_graph+="pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,"
   filter_graph+="setsar=1,"
   filter_graph+="fps=fps=${fps}:round=near,"
-  filter_graph+="format=yuv420p,"
+#  filter_graph+="format=yuv420p,"
   filter_graph+="setpts=PTS-STARTPTS[v${clip_index}];"
 
   filter_graph+="[${audio_input}:a:0]"
@@ -104,19 +277,227 @@ while (( $# )); do
   ((clip_index += 1))
 done
 
-filter_graph+="${concat_pads}concat=n=${clip_index}:v=1:a=1[outv][outa]"
+# The concatenated audio is the program signal to be mixed, not [0:a] or [1:a].
+filter_graph+="${concat_pads}concat=n=${clip_index}:v=1:a=1[outv][program_concat]"
+video_output_label='[outv]'
+audio_output_label='[program_concat]'
 
-ffmpeg "${ffmpeg_args[@]}" \
-  -filter_complex "$filter_graph" \
-  -map '[outv]' \
-  -map '[outa]' \
-  -c:v libx264 \
-  -preset "$preset" \
-  -crf "$crf" \
-  -profile:v high \
-  -pix_fmt yuv420p \
-  -c:a aac \
-  -b:a "$audio_bitrate" \
-  -ar "$audio_rate" \
-  -movflags +faststart \
+if [[ -n $music_file ]]; then
+  [[ -f $music_file ]] || { echo "error: MUSIC_FILE does not exist: $music_file" >&2; exit 1; }
+
+  # If MUSIC_DURATION is omitted, cover the concatenated output from the
+  # insertion point to its end. VIDEO_INSERT_MS is an output-timeline offset.
+  if [[ -z $music_duration ]]; then
+    music_duration=$(awk \
+      -v total="$total_duration" \
+      -v insert_ms="$video_insert_ms" 'BEGIN {
+        duration = total - (insert_ms / 1000.0)
+        if (duration <= 0) exit 1
+        printf "%.9f", duration
+      }') || {
+        echo "error: VIDEO_INSERT_MS must be before the end of the concatenated output (${total_duration}s)" >&2
+        exit 1
+      }
+  fi
+
+  if [[ -z $fade_out_start ]]; then
+    fade_out_start=$(awk -v duration="$music_duration" -v fade="$fade_out_duration" 'BEGIN {
+      start = duration - fade
+      if (start < 0) exit 1
+      printf "%.9f", start
+    }') || { echo "error: FADE_OUT_DURATION must not exceed the effective music duration" >&2; exit 1; }
+  fi
+
+  music_input=$input_index
+  # Looping makes MUSIC_FILE-only mode cover the full concatenated output even
+  # when the music asset itself is shorter than the output timeline. atrim below
+  # imposes the exact desired duration, so the infinite input cannot extend it.
+  ffmpeg_args+=(-stream_loop -1 -i "$music_file")
+  ((input_index += 1))
+
+  # The semicolon before this chain is required: concat and the next chain are
+  # separate filterchains. The concatenated program audio is split so one copy
+  # is preserved for the final mix and one drives the sidechain compressor.
+  filter_graph+=";[program_concat]"
+  filter_graph+="aresample=${audio_rate},"
+  filter_graph+="aformat=sample_fmts=fltp:sample_rates=${audio_rate}:channel_layouts=stereo,"
+  filter_graph+="asplit=2[program][duck_key];"
+
+  filter_graph+="[${music_input}:a:0]"
+  filter_graph+="atrim=start=${music_source_start}:duration=${music_duration},"
+  filter_graph+="asetpts=PTS-STARTPTS,"
+  filter_graph+="aresample=${audio_rate},"
+  filter_graph+="aformat=sample_fmts=fltp:sample_rates=${audio_rate}:channel_layouts=stereo,"
+  filter_graph+="volume=${music_db}dB,"
+  filter_graph+="afade=t=in:st=0:d=${fade_in}:curve=qsin,"
+  filter_graph+="afade=t=out:st=${fade_out_start}:d=${fade_out_duration}:curve=qsin,"
+  filter_graph+="adelay=delays=${video_insert_ms}:all=1[music];"
+
+  filter_graph+="[music][duck_key]"
+  filter_graph+="sidechaincompress=threshold=0.04:ratio=8:attack=15:release=350:knee=4:detection=rms"
+  filter_graph+="[ducked_music];"
+
+  filter_graph+="[program][ducked_music]"
+  filter_graph+="amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+  filter_graph+="alimiter=limit=0.95:attack=5:release=50:level=0:latency=1,"
+  filter_graph+="atrim=duration=${total_duration},asetpts=PTS-STARTPTS"
+  filter_graph+="[aout]"
+
+  audio_output_label='[aout]'
+fi
+
+if [[ -n $logo_file ]]; then
+  logo_fade_out_start=$(awk \
+    -v duration="$total_duration" \
+    -v fade="$logo_fade_out" 'BEGIN {
+      start = duration - fade
+      if (start < 0) exit 1
+      printf "%.9f", start
+    }') || {
+      echo "error: LOGO_FADE_OUT must not exceed the final video duration (${total_duration}s)" >&2
+      exit 2
+    }
+
+  awk -v duration="$total_duration" -v fade="$logo_fade_in" 'BEGIN {
+    exit !(fade <= duration)
+  }' || {
+    echo "error: LOGO_FADE_IN must not exceed the final video duration (${total_duration}s)" >&2
+    exit 2
+  }
+
+  logo_input=$input_index
+  # A still image needs monotonically increasing timestamps for time-dependent
+  # alpha fades. Loop it at the output frame rate for the complete timeline.
+  ffmpeg_args+=(-loop 1 -framerate "$fps" -t "$total_duration" -i "$logo_file")
+  ((input_index += 1))
+
+  if [[ -z $logo_width && -z $logo_height ]]; then
+    logo_scale_filter=''
+  else
+    effective_logo_width=${logo_width:--1}
+    effective_logo_height=${logo_height:--1}
+    logo_scale_filter="scale=${effective_logo_width}:${effective_logo_height}:flags=lanczos,"
+  fi
+
+  filter_graph+=";[${logo_input}:v:0]"
+  filter_graph+="format=rgba,"
+  filter_graph+="${logo_scale_filter}"
+  filter_graph+="setsar=1,"
+  filter_graph+="colorchannelmixer=aa=${logo_opacity},"
+
+  if awk -v value="$logo_fade_in" 'BEGIN { exit !(value > 0) }'; then
+    filter_graph+="fade=t=in:st=0:d=${logo_fade_in}:alpha=1,"
+  fi
+  if awk -v value="$logo_fade_out" 'BEGIN { exit !(value > 0) }'; then
+    filter_graph+="fade=t=out:st=${logo_fade_out_start}:d=${logo_fade_out}:alpha=1,"
+  fi
+
+  filter_graph+="trim=duration=${total_duration},"
+  filter_graph+="setpts=PTS-STARTPTS[logo_overlay];"
+  filter_graph+="${video_output_label}[logo_overlay]"
+  filter_graph+="overlay=x=${logo_x}:y=${logo_y}:shortest=1:format=auto[outv_logo]"
+  video_output_label='[outv_logo]'
+fi
+
+common_output_args=(
+  -filter_complex "$filter_graph"
+  -map "$video_output_label"
+  -map "$audio_output_label"
+  -r "$fps"
+#  -fps_mode cfr
+  -map_metadata -1
+  -map_chapters -1
+  -sn
+  -dn
+)
+
+if [[ $codec_mode == h264 ]]; then
+  video_codec_args=(
+    -c:v libx264
+    -pix_fmt yuv420p
+    -profile:v main
+    -preset "$preset"
+    -crf "$crf"
+    -g "$gop"
+    -keyint_min "$gop"
+    #-keyint_min "$min_keyint"
+    -bf 64
+    -refs "$refs"
+    -coder cabac
+    -x264-params "open-gop=0:scenecut=40:rc-lookahead=${lookahead}:aq-mode=3:aq-strength=1.0:qcomp=0.70:mbtree=1:weightp=2:mixed-refs=1"
+    -extbrc 1
+    -look_ahead_depth ${lookahead}
+    -b_strategy 1
+    -adaptive_i 0
+    -adaptive_b 1
+    -low_power 0
+    -async_depth 16
+    -tile_cols 0
+    -tile_rows 0
+    -tag:v avc1
+    -tune animation
+  )
+  audio_codec_args=(
+    -c:a aac
+    -profile:a aac_low
+    -aac_coder twoloop
+    -ac "$audio_channels"
+    -b:a "$audio_bitrate"
+    -ar "$audio_rate"
+  )
+# if libfdk_aac is available -- preferred:
+#   audio_codec_args=(
+#    -c:a libfdk_aac
+#    -afterburner 1
+#    -profile:a aac_low
+#    -vbr 3
+#    -aac_coder twoloop
+#    -ac "$audio_channels"
+#    -b:a "$audio_bitrate"
+#    -ar "$audio_rate"
+#  )
+else
+  video_codec_args=(
+    -c:v libsvtav1
+    -pix_fmt yuv420p10le
+    -profile:v main
+    -preset "$preset"
+    -crf "$crf"
+    -g "$gop"
+    -svtav1-params "lp=0:tune=0:film-grain-denoise=0:lookahead=${lookahead}"
+  )
+  audio_codec_args=(
+    -c:a libopus
+    -ac "$audio_channels"
+    -b:a "$audio_bitrate"
+    -vbr on
+    -compression_level 10
+    -application audio
+    -frame_duration 60
+    -ar "$audio_rate"
+  )
+
+  case ${output,,} in
+    *.webm) muxer_args=(-f webm) ;;
+    *.mkv)  muxer_args=(-f matroska) ;;
+    *.mp4)  muxer_args=(-tag:v av01 -movflags +faststart -f mp4) ;;
+    *)      muxer_args=() ;;
+  esac
+fi
+
+ffmpeg -hide_banner -fflags +discardcorrupt -err_detect ignore_err \
+  "${ffmpeg_args[@]}" \
+  "${common_output_args[@]}" \
+  "${video_codec_args[@]}" \
+  "${audio_codec_args[@]}" \
+  "${muxer_args[@]}" \
   "$output"
+
+if [[ $codec_mode == h264 && $whatsapp_max_bytes -gt 0 ]]; then
+  output_bytes=$(wc -c < "$output")
+  if (( output_bytes > whatsapp_max_bytes )); then
+    printf 'warning: output is %d bytes, above the WhatsApp video-message limit configured as %d bytes\n' \
+      "$output_bytes" "$whatsapp_max_bytes" >&2
+    echo "hint: increase H264_CRF, reduce dimensions/FPS, shorten the video, or use a target-size two-pass encode" >&2
+  fi
+fi

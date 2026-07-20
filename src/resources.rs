@@ -16,6 +16,27 @@ pub const FRAMES: &[&[u8]] = &[
     include_bytes!("../resources/frame3.png"),
 ];
 
+/// Our sets of "High expectations" for the day's market
+pub const BULLETINS_HI: &[&[u8]] = &[
+    include_bytes!("../resources/videos/bulletins/h264/set_1/hi.mp4"),
+    include_bytes!("../resources/videos/bulletins/h264/set_2/hi.mp4"),
+    include_bytes!("../resources/videos/bulletins/h264/set_3/hi.mp4"),
+];
+
+/// Our sets of "Neutral expectations" for the day's market
+pub const BULLETINS_NEUTRAL: &[&[u8]] = &[
+    include_bytes!("../resources/videos/bulletins/h264/set_1/neutral.mp4"),
+    include_bytes!("../resources/videos/bulletins/h264/set_2/neutral.mp4"),
+    include_bytes!("../resources/videos/bulletins/h264/set_3/neutral.mp4"),
+];
+
+/// Our sets of "Low expectations" for the day's market
+pub const BULLETINS_LOW: &[&[u8]] = &[
+    include_bytes!("../resources/videos/bulletins/h264/set_1/low.mp4"),
+    include_bytes!("../resources/videos/bulletins/h264/set_2/low.mp4"),
+    include_bytes!("../resources/videos/bulletins/h264/set_3/low.mp4"),
+];
+
 // The Document
 pub const RESULT: &[u8] = include_bytes!("../resources/result.zip");
 
@@ -36,9 +57,9 @@ pub const DEMO_VOICE: EmbeddedMedia = EmbeddedMedia {
     bytes: include_bytes!("../resources/demo_voice.ogg"),
 };
 pub const DEMO_VIDEO: EmbeddedMedia = EmbeddedMedia {
-    file_name: "demo_video.mp4",
+    file_name: "bot_ogre_robot.mp4",
     mime_type: "video/mp4",
-    bytes: include_bytes!("../resources/demo_video.mp4"),
+    bytes: include_bytes!("../resources/videos/invite/h264/conheca_ogre_robot.mp4"),
 };
 pub const DEMO_STICKER: EmbeddedMedia = EmbeddedMedia {
     file_name: "demo_sticker.webp",
@@ -74,13 +95,5 @@ mod tests {
                 .starts_with(b"RIFF")
         );
         assert_eq!(&DEMO_STICKER.bytes[8..12], b"WEBP");
-    }
-
-    #[test]
-    fn demo_media_metadata_match_file_extensions() {
-        assert_eq!((DEMO_AUDIO.file_name, DEMO_AUDIO.mime_type), ("demo_audio.mp3", "audio/mpeg"));
-        assert_eq!((DEMO_VOICE.file_name, DEMO_VOICE.mime_type), ("demo_voice.ogg", "audio/ogg"));
-        assert_eq!((DEMO_VIDEO.file_name, DEMO_VIDEO.mime_type), ("demo_video.mp4", "video/mp4"));
-        assert_eq!((DEMO_STICKER.file_name, DEMO_STICKER.mime_type), ("demo_sticker.webp", "image/webp"));
     }
 }

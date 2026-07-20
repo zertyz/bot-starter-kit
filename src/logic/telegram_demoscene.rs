@@ -1,4 +1,8 @@
-//! This is a Telegram-exclusive logic
+//! This is the Telegram-exclusive logic.
+//!
+//! Telegram exposes this demo's long command list through its native menu
+//! button, supports multi-column inline keyboards, reacts to user messages, and
+//! demonstrates delivered text and image edits through `/run` and `/render`.
 
 use crate::db::{heed, redb, sqlite};
 use crate::messaging::contracts::messaging::Mo;
@@ -6,11 +10,12 @@ use crate::messaging::gateways::telegram_gateway::{TelegramBoxSendFuture, Telegr
 use crate::messaging::user_router::UserMoProcessor;
 use crate::models::config::BotConfig;
 use crate::plot;
-use crate::resources::{DEMO_AUDIO, DEMO_STICKER, DEMO_VIDEO, DEMO_VOICE, FRAMES, RESULT};
+use crate::resources::{BULLETINS_HI, BULLETINS_LOW, BULLETINS_NEUTRAL, DEMO_AUDIO, DEMO_STICKER, DEMO_VIDEO, DEMO_VOICE, FRAMES, RESULT};
 use anyhow::{Result, anyhow};
 use futures::{Stream, StreamExt};
+use rand::RngExt;
 use std::sync::Arc;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, User};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MenuButton, MessageId, ParseMode, ReactionType, User};
 use teloxide::{
     prelude::*,
     types::{InputFile, InputMedia, InputMediaPhoto},
@@ -22,33 +27,35 @@ use tokio::time::{Duration, sleep};
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Available commands:")]
 enum Cmd {
-    /// Show this help message
+    /// ℹ️ Show this help message
     Help,
-    /// Also show this help message. Meant to be used when first interacting with this bot.
+    /// 🤖 Also show this help message. Meant to be used when first interacting with this bot.
     Start,
-    /// Show your ChatID
+    /// 🆔 Show your ChatID
     ChatId,
-    /// Reply to a message then type `/pin`: that message will be pinned to the Chat Window
+    /// 📌 Reply to a message then type `/pin`: that message will be pinned to the Chat Window
     Pin,
-    /// Go into graphics mode -- click-based navigation instead of typing
+    /// 🎨️ Go into graphics mode -- click-based navigation instead of typing
     Graphical,
-    /// Same as `/graphical`: open the inline menu with buttons
+    /// ☰ Same as `/graphical`: open the inline menu with buttons
     Menu,
-    /// Demonstrate progress updates with text edits
+    /// 🏃 Demonstrate progress updates with text edits
     Run,
-    /// Demonstrate replacing an image in place
+    /// 🎨 Demonstrate replacing an image in place
     Render,
-    /// Send embedded audio, voice, video, video-note, and sticker samples
+    /// 🎭 React to this message with an emoji
+    React,
+    /// 🎬 Send embedded audio, voice, video, video-note, and sticker samples
     AdditionalMedia,
-    /// Perform the SQLite benchmark
+    /// 🪶 Perform the SQLite benchmark
     SqliteBenchmark,
-    /// Perform the ReDB benchmark
+    /// 🔴 Perform the ReDB benchmark
     RedbBenchmark,
-    /// Perform the Heed benchmark
+    /// ⚡ Perform the Heed benchmark
     HeedBenchmark,
-    /// Perform a Live Trade Analysis simulation
+    /// 📈 Perform a Live Trade Analysis simulation
     FollowAsset,
-    /// Simulates you received a Broadcast message for the starting day
+    /// 📢 Simulates you received a Broadcast message for the starting day
     Broadcast,
 }
 
@@ -93,14 +100,15 @@ impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUs
                         if let Ok(cmd) = Cmd::parse(text, "telegram_demoscene") {
                             match cmd {
                                 Cmd::Start => mt(bot
-                                    .send_message(chat_id, format!("Welcome to the <b>OgreRobot's Telegram Demoscene</b>!\nPick an option:\n{}", Cmd::descriptions()))
+                                    .send_message(chat_id, format!("Welcome to the 🤖 <b>OgreRobot's Telegram Demoscene</b>!\nPick an option:\n{}", Cmd::descriptions()))
                                     .parse_mode(ParseMode::Html)),
                                 Cmd::Help => mt(bot.send_message(chat_id, Cmd::descriptions().to_string())),
                                 Cmd::ChatId => mt(bot
-                                    .send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id))
+                                    .send_message(chat_id, format!("Your <u>UserId</u>/<u>ChatId</u> is 🪪 <b>{}</b>\nIt can be used to send you <i>daily messages</i>.\nShare wisely...", chat_id))
                                     .parse_mode(ParseMode::Html)),
                                 Cmd::Run => mts(run_long_job(bot.clone(), chat_id)),
                                 Cmd::Render => mts(render_swap(bot.clone(), chat_id)),
+                                Cmd::React => mts(react_to_message(bot.clone(), chat_id, msg.id)),
                                 Cmd::AdditionalMedia => mts(additional_media(bot.clone(), chat_id)),
                                 Cmd::Graphical | Cmd::Menu => mt(bot
                                     .send_message(chat_id, "Choose:")
@@ -180,16 +188,38 @@ impl UserMoProcessor<User, Bot, TelegramMo, TelegramBoxSendFuture> for ProcessUs
 
 pub async fn run(config: BotConfig) -> Result<()> {
     let telegram_gateway = TelegramGateway::new(config, ProcessUserMo).await;
+    register_native_command_menu(telegram_gateway.bot()).await?;
     telegram_gateway
         .await_termination()
         .await
 }
 
+async fn register_native_command_menu(bot: &Bot) -> Result<()> {
+    let my_commands = Cmd::bot_commands()
+        .into_iter()
+        .map(|mut command| {
+            command.command = command
+                .command
+                .trim_start_matches('/')
+                .to_owned();
+            command
+        })
+        .collect::<Vec<teloxide::types::BotCommand>>();
+    bot.set_my_commands(my_commands)
+        .await
+        .map_err(|err| anyhow!("registering Telegram native commands failed: {err}"))?;
+    bot.set_chat_menu_button()
+        .menu_button(MenuButton::Commands)
+        .await
+        .map(|_| ())
+        .map_err(|err| anyhow!("selecting Telegram's command-list menu button failed: {err}"))
+}
+
 fn main_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![InlineKeyboardButton::callback("💩 Show Your Chat ID", callbacks::CHAT_ID)],
-        vec![InlineKeyboardButton::callback("📈 Live Trade Simulation", callbacks::FOLLOW_ASSET), InlineKeyboardButton::callback("💩 Broadcast demo", callbacks::BROADCAST)],
-        vec![InlineKeyboardButton::callback("🧪 Progress demo", callbacks::RUN), InlineKeyboardButton::callback("🖼️ Swap media demo", callbacks::RENDER)],
+        vec![InlineKeyboardButton::callback("📈 Live Trade Simulation", callbacks::FOLLOW_ASSET), InlineKeyboardButton::callback("🎉 Broadcast demo", callbacks::BROADCAST)],
+        vec![InlineKeyboardButton::callback("✏️ Edit text", callbacks::RUN), InlineKeyboardButton::callback("🖼️ Edit image", callbacks::RENDER)],
         vec![
             InlineKeyboardButton::callback("🎞️ Additional Media", callbacks::ADDITIONAL_MEDIA),
             InlineKeyboardButton::callback("🧠 Heed Benchmarks", callbacks::HEED_BENCHMARK),
@@ -200,6 +230,15 @@ fn main_menu() -> InlineKeyboardMarkup {
         ],
         vec![InlineKeyboardButton::callback("⚙️ Settings", callbacks::SETTINGS), InlineKeyboardButton::callback("❌ Close", callbacks::CLOSE)],
     ])
+}
+
+async fn react_to_message(bot: Bot, chat_id: ChatId, message_id: MessageId) -> Result<()> {
+    bot.set_message_reaction(chat_id, message_id)
+        .reaction([ReactionType::Emoji { emoji: "🎉".to_owned() }])
+        .is_big(true)
+        .await
+        .map(|_| ())
+        .map_err(|err| anyhow!("reacting to Telegram message {message_id} failed: {err}"))
 }
 
 async fn run_long_job(bot: Bot, chat_id: ChatId) -> Result<()> {
@@ -254,7 +293,7 @@ async fn additional_media(bot: Bot, chat_id: ChatId) -> Result<()> {
         .caption("Embedded OGG/Opus voice message")
         .await?;
     bot.send_video(chat_id, InputFile::memory(DEMO_VIDEO.bytes).file_name(DEMO_VIDEO.file_name))
-        .caption("Embedded H.264 MP4 video")
+        .caption("Embedded h264 MP4 video")
         .supports_streaming(true)
         .await?;
     // bot.send_video_note(chat_id, InputFile::memory(DEMO_VIDEO.bytes).file_name("demo_video_note.mp4"))
@@ -367,6 +406,21 @@ Para quem busca trades de risco agressivo em papéis menores do mercado à vista
 
     bot.send_message(chat_id, ai_analysis)
         .parse_mode(ParseMode::Html)
+        .await?;
+
+    let market_analysis = rand::make_rng::<rand::rngs::SmallRng>().random::<f64>();
+    let bulletin = if market_analysis < 1.0 / 3.0 {
+        BULLETINS_LOW
+    } else if market_analysis < 2.0 / 3.0 {
+        BULLETINS_NEUTRAL
+    } else {
+        BULLETINS_HI
+    };
+    let i = rand::make_rng::<rand::rngs::SmallRng>().random_range(0..bulletin.len());
+
+    bot.send_video(chat_id, InputFile::memory(bulletin[i]).file_name("OgreRobot_yesterday_review.mp4"))
+        .caption("Expectations for the day")
+        .supports_streaming(true)
         .await
         .map(|_message| ())
         .map_err(|err| anyhow!("`broadcast` demo failed: {err}"))

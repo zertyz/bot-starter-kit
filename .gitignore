@@ -1,2 +1,7 @@
 /.idea
 /target
+/resources/videos/bulletins/originals/*/
+/resources/videos/bulletins/av1/
+/resources/videos/invite/originals/
+/resources/videos/invite/av1/
+/resources/videos/music

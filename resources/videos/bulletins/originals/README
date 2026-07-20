@@ -1,0 +1,61 @@
+# Command to generate the publishable versions from the originals
+out_prefix="../h264/"; for f in */*.mp4; do INPUT="${f}"; OUTPUT="${out_prefix}${f}"; INPUT_BASE=$(basename "$INPUT"); MUSIC_FILE="../../music/${INPUT_BASE/.mp4/$((RANDOM % 6 + 1)).mp3}" MUSIC_SOURCE_START=$((RANDOM % 91)) LOGO_FILE=../../../logo.png LOGO_X=1115 LOGO_Y=565 LOGO_WIDTH=100 LOGO_HEIGHT=-1 ../../../helper_scripts/concat_clips "$OUTPUT" "$INPUT" 0 10; done
+out_prefix="../av1/"; for f in */*.mp4; do INPUT="${f}"; OUTPUT="${out_prefix}${f}"; INPUT_BASE=$(basename "$INPUT"); MUSIC_FILE="../../music/${INPUT_BASE/.mp4/$((RANDOM % 6 + 1)).mp3}" MUSIC_SOURCE_START=$((RANDOM % 91)) LOGO_FILE=../../../logo.png LOGO_X=1115 LOGO_Y=565 LOGO_WIDTH=100 LOGO_HEIGHT=-1 ../../../helper_scripts/concat_clips --av1 "$OUTPUT" "$INPUT" 0 10; done
+
+# Scripts to the originals
+
+Instructions:
+ * UPPER CASE texts should be given emphasis
+
+## Set 1
+
+Scenario analysis independent from the day before
+
+### Video 1
+Com expressões faciais e voz de alegria e muito entusiasmo, com cenário alegre e convidativo:
+"BOM DIA, amigos! OLHA: Se hoje for como ontem, vocês podem esperar um dia BEM PROMISSOR pro day trading no mercado à vista! Manda ver, gente! Mas, OLHA: com responsabilidade. Sempre!" -- 10 seconds.
+
+### Video 2
+Com expressão de incerteza, voz acompanhando, e cenário blasé:
+"Hoje eu não sei não... ontem o dia foi - mais ou menos - MEIO-À-MEIO em termos de ganhos e perdas. Vamos começar com cuidado e observar. Tenham um ÓTIMO DIA!" -- 10 seconds.
+
+### Video 3
+Com expressão de lamentação -- dando pra notar no tom de voz e rítmo de fala -- e cenário com aspécto de descuidado e sujo:
+"Ai, gente... ontem não foi nada bom... hoje eu ficaria mais observando as movimentações e só entraria caso alguma coisa mude! Boa sorte pra gente!" -- 10 seconds.
+
+
+## Set 2
+
+Scenario analysis coming from a bad sequence of unspecified duration
+
+### Video 1
+Com expressões faciais e voz de alegria e muito entusiasmo, com cenário alegre e convidativo:
+"QUE MARAVILHA! Parece que a gente se recuperou daquele PREGÃO BOMBA! Ontem vimos muita liquidez, ótimo para entrar e sair rápido das posições. Vamos TORCER pelo novo dia. Tchau!" -- 10 segundos.
+
+### Video 2
+Com expressão de incerteza, voz acompanhando, e cenário nem muito bonito, nem muito feio; nem muito arrumado, nem muito bagunçado; nem muito colorido, nem muito blasé:
+"Mas que maré SEM VENTO, HEIM!?? Nossa! cadê o povo do mercado à vista? Nem os PAPÉIS TRADICIONAIS se movimentam mais? LIQUIDEZ! Cadê você? Bom dia, gente!" -- 10 segundos respeitando as pequenas pausas e expressões dramáticas.
+
+### Video 3
+Com expressão de lamentação -- dando pra notar no tom de voz e rítmo de fala -- e cenário bagunçado, com papéis espalhados e com telas de home trading dando pra ver gráficos no vermelho e em queda:
+"Ai... to pensando em tirar férias... Em épocas de mercado ruim, operar pode ser pior! De novo o mercado está em queda! LUCRO! Cadê você? Boa sorte pra gente!" -- 10 segundos.
+
+
+
+# Set 3
+
+Scenario analysis coming from a good sequence of unspecified duration
+
+### Video 1
+Com expressões faciais e voz de alegria e muito entusiasmo, com cenário alegre e convidativo e com telas de home trading dando pra ver gráficos no verde e em alta:
+"Mais um dia MARAVILHOSO espera os que começarem cedo! Que continuem vindo os COMPRADORES! Cada vez mais, HEIM? Vamos começar bem cedo pra podermos negociar com os vespertinos. Tchau!" -- 10 segundos.
+
+### Video 2
+Com expressão de incerteza, voz acompanhando, e cenário nem muito bonito, nem muito feio; nem muito arrumado, nem muito bagunçado; nem muito colorido, nem muito blasé -- e com telas de home trading dando pra ver gráficos nem verdes nem vermelhos, oscilando levemente ao longo de uma linha média:
+"BOM DIA, gente! Será que a fase boa passou? Ontem o viés de compra deu uma acalmada e terminamos o dia no zero-à-zero. Mas vamos lá! Mesmo assim dá pra fazer bons negócios! Tchau!" -- 10 segundos.
+
+### Video 3
+Texto: "USSHH" é uma interjeição passando a mensagem "mas que merda!"
+Emoções: Com expressão de lamentação no início, mas progressivamente ficando otimista ao longo das frases do texto -- dando pra notar no tom de voz e rítmo de fala.
+Cenário:  cenário levemente bagunçado, com papéis organizados mas alguns espalhados e com telas de home trading dando pra ver gráficos no vermelho e em queda:
+"USSHH... O mercado foi à LUA e agora tá voltando! Depois do frisson dos compradores, agora os vendedores voltaram. Gente, eu ficaria com posições que lucram na baixa. Tchau!" -- 10 segundos.
