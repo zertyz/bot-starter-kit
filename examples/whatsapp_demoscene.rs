@@ -2,8 +2,8 @@
 //!
 //! This is an integration example, not a production bot. It exercises text and
 //! formatting, media, reply/list/URL buttons, locations, reactions, quoted
-//! replies, read/typing indicators, batching, webhook registration, and signed
-//! webhook handling against a real Meta test number.
+//! replies, database benchmarks, read/typing indicators, batching, webhook
+//! registration, and signed webhook handling against a real Meta test number.
 //!
 //! # First setup
 //!
@@ -41,15 +41,94 @@
 //! Meta limits development-mode sends to configured test recipients. Temporary
 //! tokens expire; use a suitably permissioned system-user token for longer-lived
 //! testing. Business-initiated messages outside the customer-service window need
-//! an approved template; this crate version cannot build those template payloads.
+//! an approved template. The optional `send-template` mode demonstrates that
+//! path through a small direct Graph API request because this crate version
+//! cannot build template payloads.
+//!
+//! ## Optional approved-template demo
+//!
+//! The promotion-style screenshot with quick replies is not the same message
+//! type as the session `menu`: it is an approved message template. In
+//! **WhatsApp Manager > Message templates**, create a **Marketing** template
+//! with a static text header/body (no placeholders), then add exactly three
+//! **Quick reply** buttons, in this order: `List`, `Location`, `Inspect`. Submit
+//! it and wait for Meta to mark it **Active**. Copy its exact template name and
+//! language code into the two template variables below, start `serve`, then run
+//! `send-template` in another terminal. The demo supplies callback payloads for
+//! those static button titles.
+//!
+//! ```text
+//! export WHATSAPP_DEMO_TEMPLATE_NAME='ogrerobot_features'
+//! export WHATSAPP_DEMO_TEMPLATE_LANGUAGE='pt_BR'
+//! cargo run --example whatsapp_demoscene -- send-template
+//! ```
+//!
+//! Meta sends template quick-reply clicks as message type `button`, which
+//! `whatsapp-business-rs` 0.5.0 cannot deserialize. This example verifies the
+//! webhook signature and converts that one official payload shape to the
+//! crate's equivalent interactive-button shape before dispatch. It does not
+//! reinterpret other unsupported message types.
+//!
+//! Neither session buttons nor template buttons include row/column layout or
+//! arbitrary-icon fields. WhatsApp clients choose their presentation, so the
+//! two-plus-one layout in a screenshot cannot be requested or guaranteed.
+//!
+//! # Meta charges and sending limits (checked 2026-07-18)
+//!
+//! Meta does not describe the current free use as a fixed monthly message
+//! allowance. It charges per delivered message according to the recipient's
+//! market and the message category. Service messages sent during the rolling
+//! 24-hour customer-service window are free, and that window restarts whenever
+//! the user messages the business. Utility templates sent in response during
+//! that window are also free. Marketing and authentication templates are
+//! normally chargeable. If the user enters through an ad that clicks to
+//! WhatsApp or a Facebook Page call-to-action button, Meta does not charge for
+//! messages of any category during the following 72 hours.
+//!
+//! To keep this demo within Meta's no-charge boundary:
+//!
+//! 1. Have the test user message the bot first.
+//! 2. Send the ordinary demo replies within 24 hours of that user's latest
+//!    message.
+//! 3. Do not run `send-template`: its deliberately Marketing-category template
+//!    demonstrates business-initiated messaging and may be billed when delivered.
+//! 4. Do not treat development test-recipient restrictions or a messaging tier
+//!    as a free-message quota; they are separate account controls.
+//!
+//! Prices are not copied here because they vary by recipient market, currency,
+//! category, volume tier, and effective date. Use Meta's live [pricing page and
+//! rate-card links][pricing] before sending a chargeable template. A Business
+//! Solution Provider may add its own fees; this example calls Meta's Cloud API
+//! directly.
+//!
+//! Cost limits are separate from transport limits. Meta documents per-phone-number
+//! throughput and also protects each business/user pair from bursts. For this
+//! interactive demo, serialize sends to one recipient and leave at least six
+//! seconds between them; a one-per-minute progress sample is comfortably below
+//! that pair-rate boundary. See Meta's current [Cloud API throughput][throughput]
+//! documentation before changing the pacing or running at scale.
+//!
+//! [pricing]: https://business.whatsapp.com/products/platform-pricing
+//! [throughput]: https://developers.facebook.com/docs/whatsapp/cloud-api/overview#throughput
+//!
+//! ## Database benchmarks
+//!
+//! Open **Features > Database benchmarks** to run the existing SQLite, ReDB, or
+//! Heed comparison on the server. The benchmark implementations are shared with
+//! Telegram and Criterion unchanged. WhatsApp receives the first progress
+//! update, at most one current update per minute, and the final result. Runs use
+//! fresh temporary databases, and only one database benchmark runs at a time so
+//! repeated clicks cannot multiply the deliberately heavy Heed workload.
 //!
 //! # Environment
 //!
 //! | Variable | Value and where it comes from | Used by |
 //! | --- | --- | --- |
-//! | `WHATSAPP_ACCESS_TOKEN` | **API setup > Temporary access token**, or a system-user token | send, serve |
-//! | `WHATSAPP_PHONE_NUMBER_ID` | **API setup > Phone number ID**; not the visible number | send |
-//! | `WHATSAPP_RECIPIENT_PHONE_NUMBER` | Your verified **To** number in E.164 form, such as `+15551234567` | send |
+//! | `WHATSAPP_ACCESS_TOKEN` | **API setup > Temporary access token**, or a system-user token | send, send-template, serve |
+//! | `WHATSAPP_PHONE_NUMBER_ID` | **API setup > Phone number ID**; not the visible number | send, send-template |
+//! | `WHATSAPP_RECIPIENT_PHONE_NUMBER` | Your verified **To** number in E.164 form, such as `+15551234567` | send, send-template |
+//! | `WHATSAPP_DEMO_TEMPLATE_NAME` | Exact **Name** of your Active template in **WhatsApp Manager > Message templates** | send-template |
+//! | `WHATSAPP_DEMO_TEMPLATE_LANGUAGE` | Template language code shown in WhatsApp Manager, such as `en_US` or `pt_BR`; defaults to `en_US` | send-template |
 //! | `WHATSAPP_APP_ID` | **App settings > Basic > App ID** | registration |
 //! | `WHATSAPP_APP_SECRET` | **App settings > Basic > App secret**; also verifies webhook signatures | serve, registration |
 //! | `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | A random value you create, for example with `openssl rand -hex 32` | serve, registration |
@@ -81,7 +160,8 @@
 //! `scripts/generate_demo_media --force`. No media-path environment variable is
 //! required.
 //!
-//! Other modes are `send`, `send-batch`, `serve`, and `register-webhook`.
+//! Other modes are `send`, `send-template`, `send-batch`, `serve`, and
+//! `register-webhook`.
 //! `register-webhook` serves the verification challenge only while Meta registers
 //! the already-routable public URL; use `serve-and-register` for the bot loop.
 //!
@@ -97,17 +177,29 @@
 //! They are still sensitive operational data and need production-grade retention
 //! and access controls outside this example.
 //!
-//! # Feature and SDK assessment (2026-07-16)
+//! # Feature and SDK assessment (2026-07-18)
 //!
 //! WhatsApp also offers approved templates, contacts, catalogs/products, Flows,
 //! and media carousels. Version 0.5.0 has partial catalog/product support but no
 //! complete outgoing templates, contacts, Flows, or carousel model. WhatsApp has
 //! no documented Cloud API operation for editing an already delivered message or
-//! media. Interactive rows/buttons have no arbitrary icon field; use emoji,
-//! media headers, or product imagery where the message type permits it.
+//! media; the Telegram demo's `/run` and `/render` edits therefore have no
+//! WhatsApp counterpart. Interactive rows/buttons have no arbitrary icon field.
+//! The list glyph shown by WhatsApp is client-provided. This demo exercises
+//! Unicode emoji in ordinary text, while media headers and product imagery are
+//! the structured visual alternatives supported by their respective types.
 //! The official API also distinguishes voice audio with `voice: true`, but this
 //! crate cannot express that field. ZIP is not one of Meta's supported document
 //! MIME types, so the existing ZIP resource remains Telegram-only.
+//!
+//! The official inbound message object currently enumerates text, image,
+//! interactive, document, audio, sticker, order, video, contacts, location,
+//! unknown, system, and `button` (template quick reply) messages. The crate models text,
+//! media (image/document/audio/sticker/video), interactive replies, orders,
+//! locations, reactions, and API error content. It does not model contacts,
+//! system, unknown, referral metadata, or `button` callbacks; only the
+//! last of these is adapted here. Unsupported signed payloads are left to the
+//! crate and are reported by its error handler rather than claimed as parsed.
 //! Meta does not publish an official Rust SDK. No reviewed community crate is a
 //! clear production replacement: `wacloudapi` 0.1.0 exposes a non-cryptographic
 //! placeholder as signature verification, `whatsapp_handler` 0.2.0 unwraps
@@ -143,7 +235,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use bot_starter_kit::resources::{DEMO_AUDIO, DEMO_IMAGE, DEMO_STICKER, DEMO_VIDEO, DEMO_VOICE, EmbeddedMedia};
+use bot_starter_kit::{
+    db::{heed, redb, sqlite},
+    resources::{DEMO_AUDIO, DEMO_IMAGE, DEMO_STICKER, DEMO_VIDEO, DEMO_VOICE, EmbeddedMedia},
+};
 use hmac::{Hmac, KeyInit, Mac};
 use rustls::{
     ServerConfig,
@@ -151,6 +246,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
 };
 use serde::Deserialize;
+use serde_json::{Value, json};
 use sha2::Sha256;
 use std::{
     env,
@@ -158,11 +254,12 @@ use std::{
     io,
     net::SocketAddr,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::oneshot,
+    sync::{Mutex, Semaphore, oneshot},
+    time::sleep,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use url::Url;
@@ -175,13 +272,23 @@ use whatsapp_business_rs::{
 };
 
 const DEFAULT_WEBHOOK_BIND_ADDR: &str = "127.0.0.1:8080";
+const DEFAULT_TEMPLATE_LANGUAGE: &str = "en_US";
+// Keep the direct template request aligned with this crate version's default.
+const META_GRAPH_API_VERSION: &str = "24.0";
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const META_INTERACTIVE_FOOTER_MAX_CHARS: usize = 60;
+const DATABASE_BENCHMARK_PROGRESS_INTERVAL: Duration = Duration::from_secs(60);
+const WHATSAPP_PAIR_SEND_INTERVAL: Duration = Duration::from_secs(6);
+const STANDARD_DATABASE_BENCHMARK_RECORDS: u64 = 1024 * 1024;
+const HEED_DATABASE_BENCHMARK_RECORDS: u64 = 64 * 1024 * 1024;
+const DATABASE_BENCHMARK_PROGRESS_RECORDS: u64 = 100_000;
+static DATABASE_BENCHMARK_SEMAPHORE: Semaphore = Semaphore::const_new(1);
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Send,
+    SendTemplate,
     SendBatch,
     Serve,
     RegisterWebhook,
@@ -193,6 +300,8 @@ struct Config {
     access_token: Option<String>,
     phone_number_id: Option<String>,
     recipient_phone_number: Option<String>,
+    template_name: Option<String>,
+    template_language: Option<String>,
     app_id: Option<String>,
     app_secret: Option<String>,
     webhook_verify_token: Option<String>,
@@ -285,6 +394,7 @@ async fn main() -> Result<()> {
             let client = whatsapp_client(&config).await?;
             send_demos(&config, &client).await
         }
+        Mode::SendTemplate => send_template_demo(&config).await,
         Mode::SendBatch => {
             let client = whatsapp_client(&config).await?;
             send_batch_demo(&config, &client).await
@@ -312,6 +422,8 @@ impl Config {
             access_token: env_optional("WHATSAPP_ACCESS_TOKEN"),
             phone_number_id: env_optional("WHATSAPP_PHONE_NUMBER_ID"),
             recipient_phone_number: env_optional("WHATSAPP_RECIPIENT_PHONE_NUMBER"),
+            template_name: env_optional("WHATSAPP_DEMO_TEMPLATE_NAME"),
+            template_language: env_optional("WHATSAPP_DEMO_TEMPLATE_LANGUAGE"),
             app_id: env_optional("WHATSAPP_APP_ID"),
             app_secret: env_optional("WHATSAPP_APP_SECRET"),
             webhook_verify_token: env_optional("WHATSAPP_WEBHOOK_VERIFY_TOKEN"),
@@ -338,7 +450,20 @@ impl Config {
     fn access_token(&self) -> Result<&str> {
         self.access_token
             .as_deref()
-            .ok_or_else(|| anyhow!("WHATSAPP_ACCESS_TOKEN is required for send, send-batch, serve, and serve-and-register modes"))
+            .ok_or_else(|| anyhow!("WHATSAPP_ACCESS_TOKEN is required for send, send-template, send-batch, serve, and serve-and-register modes"))
+    }
+
+    fn template(&self) -> Result<TemplateConfig<'_>> {
+        Ok(TemplateConfig {
+            name: self
+                .template_name
+                .as_deref()
+                .ok_or_else(|| anyhow!("WHATSAPP_DEMO_TEMPLATE_NAME is required for send-template mode; copy the exact Active template name from WhatsApp Manager > Message templates"))?,
+            language: self
+                .template_language
+                .as_deref()
+                .unwrap_or(DEFAULT_TEMPLATE_LANGUAGE),
+        })
     }
 
     fn app_secret(&self) -> Result<&str> {
@@ -420,6 +545,11 @@ struct OutboundConfig<'a> {
     recipient_phone_number: &'a str,
 }
 
+struct TemplateConfig<'a> {
+    name: &'a str,
+    language: &'a str,
+}
+
 struct WebhookRegistrationConfig<'a> {
     app_id: &'a str,
     verify_token: &'a str,
@@ -478,6 +608,16 @@ struct StatusWebhookError {
     title: Option<String>,
     #[serde(default)]
     message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateSendResponse {
+    messages: Vec<TemplateSendMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateSendMessage {
+    id: String,
 }
 
 async fn whatsapp_client(config: &Config) -> Result<Client> {
@@ -576,6 +716,72 @@ async fn send_demos(config: &Config, client: &Client) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn send_template_demo(config: &Config) -> Result<()> {
+    let outbound = config.outbound()?;
+    let template = config.template()?;
+    let endpoint = format!("https://graph.facebook.com/v{META_GRAPH_API_VERSION}/{}/messages", outbound.phone_number_id);
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|err| anyhow!("WhatsApp demoscene: building approved-template HTTP client failed: {err}"))?;
+    let response = http_client
+        .post(endpoint)
+        .bearer_auth(config.access_token()?)
+        .json(&template_demo_payload(&outbound, &template))
+        .send()
+        .await
+        .map_err(|err| anyhow!("WhatsApp demoscene: sending approved-template demo failed: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| anyhow!("WhatsApp demoscene: reading approved-template response failed: {err}"))?;
+    if !status.is_success() {
+        return Err(anyhow!("WhatsApp demoscene: approved-template send returned HTTP {status}: {body}"));
+    }
+
+    let response: TemplateSendResponse = serde_json::from_str(&body).map_err(|err| anyhow!("WhatsApp demoscene: approved-template response was not understood: {err}; response={body}"))?;
+    let message = response
+        .messages
+        .first()
+        .ok_or_else(|| anyhow!("WhatsApp demoscene: approved-template response contained no message ID"))?;
+    println!("approved template: sent id={}", message.id);
+    Ok(())
+}
+
+fn template_demo_payload(outbound: &OutboundConfig<'_>, template: &TemplateConfig<'_>) -> Value {
+    json!({
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": outbound.recipient_phone_number,
+        "type": "template",
+        "template": {
+            "name": template.name,
+            "language": {"code": template.language},
+            "components": [
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": "0",
+                    "parameters": [{"type": "payload", "payload": "demo:list"}]
+                },
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": "1",
+                    "parameters": [{"type": "payload", "payload": "demo:location"}]
+                },
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": "2",
+                    "parameters": [{"type": "payload", "payload": "demo:inspect"}]
+                }
+            ]
+        }
+    })
 }
 
 async fn send_batch_demo(config: &Config, client: &Client) -> Result<()> {
@@ -769,7 +975,7 @@ async fn handle_signed_webhook(service: WebhookService<WhatsAppDemosceneHandler>
 
     println!("WEBHOOK HTTP <- method={method} path={path} content_length={content_length} x_hub_signature_256_present={signature_present}");
 
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let body = match to_bytes(body, MAX_WEBHOOK_BODY_BYTES).await {
         Ok(body) => body,
         Err(err) => {
@@ -791,8 +997,24 @@ async fn handle_signed_webhook(service: WebhookService<WhatsAppDemosceneHandler>
         log_status_updates(&status_updates);
         StatusCode::OK.into_response()
     } else {
+        let body = match normalize_template_quick_reply_callbacks(&body) {
+            Ok(Some(normalized)) => {
+                println!("WhatsApp demoscene: adapted signed template quick-reply callback for whatsapp-business-rs 0.5.0");
+                parts
+                    .headers
+                    .remove(header::CONTENT_LENGTH);
+                Body::from(normalized)
+            }
+            Ok(None) => Body::from(body),
+            Err(err) => {
+                eprintln!("WhatsApp demoscene: invalid template quick-reply callback: {err}");
+                let response = (StatusCode::BAD_REQUEST, "Invalid template quick-reply callback").into_response();
+                println!("WEBHOOK HTTP -> method={method} path={path} status={}", response.status());
+                return response;
+            }
+        };
         service
-            .handle(Request::from_parts(parts, Body::from(body)))
+            .handle(Request::from_parts(parts, body))
             .await
     };
     println!("WEBHOOK HTTP -> method={method} path={path} status={}", response.status());
@@ -877,6 +1099,77 @@ fn status_updates_if_only(body: &[u8]) -> Option<Vec<StatusWebhookUpdate>> {
     }
 
     (!updates.is_empty()).then_some(updates)
+}
+
+fn normalize_template_quick_reply_callbacks(body: &[u8]) -> Result<Option<Vec<u8>>> {
+    let Ok(mut envelope) = serde_json::from_slice::<Value>(body) else {
+        return Ok(None);
+    };
+    let Some(entries) = envelope
+        .get_mut("entry")
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(None);
+    };
+
+    let mut changed = false;
+    for entry in entries {
+        let Some(changes) = entry
+            .get_mut("changes")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for change in changes {
+            let Some(messages) = change
+                .get_mut("value")
+                .and_then(|value| value.get_mut("messages"))
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            for message in messages {
+                if message
+                    .get("type")
+                    .and_then(Value::as_str)
+                    != Some("button")
+                {
+                    continue;
+                }
+                let button = message
+                    .get("button")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| anyhow!("message type `button` has no button object"))?;
+                let payload = button
+                    .get("payload")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("template quick-reply button has no string payload"))?
+                    .to_owned();
+                let text = button
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("template quick-reply button has no string text"))?
+                    .to_owned();
+                let message = message
+                    .as_object_mut()
+                    .ok_or_else(|| anyhow!("message entry is not an object"))?;
+                message.remove("button");
+                message.insert("type".to_owned(), Value::String("interactive".to_owned()));
+                message.insert(
+                    "interactive".to_owned(),
+                    json!({
+                        "type": "button_reply",
+                        "button_reply": {"id": payload, "title": text}
+                    }),
+                );
+                changed = true;
+            }
+        }
+    }
+
+    changed
+        .then(|| serde_json::to_vec(&envelope).map_err(|err| anyhow!("serializing adapted template callback failed: {err}")))
+        .transpose()
 }
 
 fn log_status_updates(updates: &[StatusWebhookUpdate]) {
@@ -992,6 +1285,129 @@ enum DemoAction {
     Replies(Vec<Draft>),
     SwipeReply(Draft),
     React(char),
+    DatabaseBenchmark(DatabaseBenchmark),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DatabaseBenchmark {
+    Sqlite,
+    Redb,
+    Heed,
+}
+
+impl DatabaseBenchmark {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sqlite => "SQLite",
+            Self::Redb => "ReDB",
+            Self::Heed => "Heed",
+        }
+    }
+}
+
+#[derive(Default)]
+struct BenchmarkProgressState {
+    latest: Option<String>,
+    last_sent: Option<String>,
+    last_sampled_at: Option<Instant>,
+    last_sent_at: Option<Instant>,
+}
+
+impl BenchmarkProgressState {
+    fn observe(&mut self, now: Instant, message: String) -> bool {
+        self.latest = Some(message);
+        self.last_sampled_at
+            .is_none_or(|last_sampled_at| now.saturating_duration_since(last_sampled_at) >= DATABASE_BENCHMARK_PROGRESS_INTERVAL)
+    }
+
+    fn record_sampled(&mut self, now: Instant) {
+        self.last_sampled_at = Some(now);
+    }
+
+    fn latest_unsent(&self) -> Option<String> {
+        self.latest
+            .as_ref()
+            .filter(|latest| {
+                self.last_sent
+                    .as_ref()
+                    != Some(*latest)
+            })
+            .cloned()
+    }
+
+    fn pair_send_delay(&self, now: Instant) -> Duration {
+        self.last_sent_at
+            .map(|last_sent_at| WHATSAPP_PAIR_SEND_INTERVAL.saturating_sub(now.saturating_duration_since(last_sent_at)))
+            .unwrap_or_default()
+    }
+
+    fn record_sent(&mut self, now: Instant, message: String) {
+        self.last_sent = Some(message);
+        self.last_sent_at = Some(now);
+    }
+}
+
+#[derive(Clone)]
+struct BenchmarkProgressReporter {
+    incoming: IncomingMessage,
+    benchmark: DatabaseBenchmark,
+    state: Arc<Mutex<BenchmarkProgressState>>,
+}
+
+impl BenchmarkProgressReporter {
+    fn new(incoming: IncomingMessage, benchmark: DatabaseBenchmark) -> Self {
+        Self {
+            incoming,
+            benchmark,
+            state: Arc::new(Mutex::new(BenchmarkProgressState::default())),
+        }
+    }
+
+    async fn report(&self, message: String) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .await;
+        if !state.observe(Instant::now(), message.clone()) {
+            return Ok(());
+        }
+        state.record_sampled(Instant::now());
+        self.send_locked(&mut state, message)
+            .await
+    }
+
+    async fn finish_success(&self) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .await;
+        let Some(message) = state.latest_unsent() else {
+            return Ok(());
+        };
+        self.send_locked(&mut state, message)
+            .await
+    }
+
+    async fn finish_failure(&self, error: &anyhow::Error) -> Result<()> {
+        let message = format!("❌ Benchmark failed: {error}");
+        let mut state = self
+            .state
+            .lock()
+            .await;
+        state.latest = Some(message.clone());
+        self.send_locked(&mut state, message)
+            .await
+    }
+
+    async fn send_locked(&self, state: &mut BenchmarkProgressState, message: String) -> Result<()> {
+        let delay = state.pair_send_delay(Instant::now());
+        if !delay.is_zero() {
+            sleep(delay).await;
+        }
+        send_database_benchmark_reply(&self.incoming, self.benchmark, &message).await?;
+        state.record_sent(Instant::now(), message);
+        Ok(())
+    }
 }
 
 async fn execute_demo_action(incoming: &IncomingMessage, action: Result<DemoAction>) -> Result<()> {
@@ -1030,6 +1446,7 @@ async fn execute_demo_action(incoming: &IncomingMessage, action: Result<DemoActi
             .await
             .map(|_| ())
             .map_err(|err| anyhow!("sending reaction failed: {err}")),
+        DemoAction::DatabaseBenchmark(benchmark) => run_database_benchmark(incoming.clone(), benchmark).await,
     }
 }
 
@@ -1054,6 +1471,10 @@ fn response_for(message: &Message) -> Result<DemoAction> {
     let action = match command.as_str() {
         "/start" | "start" | "help" | "menu" | "demo:menu" => DemoAction::Reply(menu_draft()),
         "demo:list" | "list" => DemoAction::Reply(list_draft()),
+        "demo:benchmarks" | "benchmarks" | "database benchmarks" => DemoAction::Reply(database_benchmarks_draft()),
+        "demo:benchmark:sqlite" | "sqlite" | "sqlite benchmark" | "sqlitebenchmark" => DemoAction::DatabaseBenchmark(DatabaseBenchmark::Sqlite),
+        "demo:benchmark:redb" | "redb" | "redb benchmark" | "redbbenchmark" => DemoAction::DatabaseBenchmark(DatabaseBenchmark::Redb),
+        "demo:benchmark:heed" | "heed" | "heed benchmark" | "heedbenchmark" => DemoAction::DatabaseBenchmark(DatabaseBenchmark::Heed),
         "demo:formatting" | "formatting" => DemoAction::Reply(formatted_text_draft()),
         "demo:media" | "media" => DemoAction::Replies(
             embedded_media_drafts()?
@@ -1075,7 +1496,7 @@ fn response_for(message: &Message) -> Result<DemoAction> {
 
 fn menu_draft() -> Draft {
     Draft::new()
-        .body("OgreRobot WhatsApp Demoscene")
+        .body("🤖 OgreRobot WhatsApp Demoscene")
         .footer("Pick a WhatsApp feature.")
         .add_reply_button("demo:list", "List")
         .add_reply_button("demo:location", "Location")
@@ -1092,7 +1513,7 @@ fn list_draft() -> Draft {
         .add_list_section("Messages")
         .add_list_option("demo:menu", "Quick replies", "Buttons using Draft::add_reply_button")
         .add_list_option("demo:formatting", "Formatting", "Bold, italic, strike, and monospace text")
-        .add_list_option("demo:media", "Media", "Embedded PNG, MP3, OGG/Opus, MP4, and WebP sticker")
+        .add_list_option("demo:media", "Media", "Embedded PNG, MP3, h264/AAC MP4, and WebP sticker")
         .add_list_option("demo:reaction", "Reaction", "React to the selected message with an emoji")
         .add_list_option("demo:quote", "Quoted reply", "Reply with the selected message as context")
         .add_list_section("Interactive")
@@ -1100,7 +1521,145 @@ fn list_draft() -> Draft {
         .add_list_option("demo:location-request", "Request location", "Share a location; receive a point about 100 m south")
         .add_list_option("demo:cta", "CTA URL", "A native call-to-action link button")
         .add_list_option("demo:inspect", "Inspect", "Show safe metadata for the selected message")
+        .add_list_section("Server demos")
+        .add_list_option("demo:benchmarks", "Database benchmarks", "Run SQLite, ReDB, or Heed with sampled progress")
         .with_biz_opaque_callback_data("whatsapp-demoscene:list")
+}
+
+fn database_benchmarks_draft() -> Draft {
+    Draft::new()
+        .body("Choose a database benchmark. Only one may run at a time.")
+        .header("Database benchmarks")
+        .footer("First, one per minute, and final progress are sent.")
+        .list("Databases")
+        .add_list_section("Storage engines")
+        .add_list_option("demo:benchmark:sqlite", "SQLite", "1,048,576 records plus an indexed range query")
+        .add_list_option("demo:benchmark:redb", "ReDB", "1,048,576 records plus sampled point queries")
+        .add_list_option("demo:benchmark:heed", "Heed", "67,108,864 records plus sampled point queries")
+        .add_list_section("Navigation")
+        .add_list_option("demo:list", "Back to features", "Return to the WhatsApp feature list")
+        .with_biz_opaque_callback_data("whatsapp-demoscene:database-benchmarks")
+}
+
+async fn run_database_benchmark(incoming: IncomingMessage, benchmark: DatabaseBenchmark) -> Result<()> {
+    let Ok(_permit) = DATABASE_BENCHMARK_SEMAPHORE.try_acquire() else {
+        return send_database_benchmark_reply(&incoming, benchmark, "Another database benchmark is already running. Please wait for its final result.").await;
+    };
+
+    let reporter = BenchmarkProgressReporter::new(incoming, benchmark);
+    let result = execute_database_benchmark(benchmark, &reporter).await;
+    match result {
+        Ok(()) => {
+            reporter
+                .finish_success()
+                .await
+        }
+        Err(error) => {
+            if let Err(report_error) = reporter
+                .finish_failure(&error)
+                .await
+            {
+                return Err(anyhow!("{} benchmark failed: {error}; reporting the failure to WhatsApp also failed: {report_error}", benchmark.label()));
+            }
+            Err(anyhow!("{} benchmark failed: {error}", benchmark.label()))
+        }
+    }
+}
+
+async fn execute_database_benchmark(benchmark: DatabaseBenchmark, reporter: &BenchmarkProgressReporter) -> Result<()> {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("whatsapp-database-benchmark-")
+        .tempdir()
+        .map_err(|err| anyhow!("creating a temporary database benchmark directory failed: {err}"))?;
+    match benchmark {
+        DatabaseBenchmark::Sqlite => {
+            let reporter = reporter.clone();
+            sqlite::benchmark::run_benchmark(
+                sqlite::benchmark::BenchmarkConfig {
+                    db_path: temp_dir
+                        .path()
+                        .join("events.db"),
+                    expected_records: STANDARD_DATABASE_BENCHMARK_RECORDS,
+                    progress_every: Some(DATABASE_BENCHMARK_PROGRESS_RECORDS),
+                    benchmark_point_query: false,
+                    benchmark_range_query: true,
+                    run_wal_maintenance: true,
+                },
+                move |message| {
+                    let reporter = reporter.clone();
+                    async move {
+                        reporter
+                            .report(message)
+                            .await
+                    }
+                },
+            )
+            .await
+            .map(|_| ())
+        }
+        DatabaseBenchmark::Redb => {
+            let reporter = reporter.clone();
+            redb::benchmark::run_benchmark(
+                redb::benchmark::BenchmarkConfig {
+                    db_path: temp_dir
+                        .path()
+                        .join("events.redb"),
+                    expected_records: STANDARD_DATABASE_BENCHMARK_RECORDS,
+                    point_query_step: DATABASE_BENCHMARK_PROGRESS_RECORDS,
+                    progress_every: Some(DATABASE_BENCHMARK_PROGRESS_RECORDS),
+                },
+                move |message| {
+                    let reporter = reporter.clone();
+                    async move {
+                        reporter
+                            .report(message)
+                            .await
+                    }
+                },
+            )
+            .await
+            .map(|_| ())
+        }
+        DatabaseBenchmark::Heed => {
+            let reporter = reporter.clone();
+            heed::benchmark::run_benchmark(
+                heed::benchmark::BenchmarkConfig {
+                    db_path: temp_dir
+                        .path()
+                        .to_path_buf(),
+                    expected_records: HEED_DATABASE_BENCHMARK_RECORDS,
+                    point_query_step: DATABASE_BENCHMARK_PROGRESS_RECORDS,
+                    progress_every: Some(DATABASE_BENCHMARK_PROGRESS_RECORDS),
+                    force_sync_after_queries: true,
+                },
+                move |message| {
+                    let reporter = reporter.clone();
+                    async move {
+                        reporter
+                            .report(message)
+                            .await
+                    }
+                },
+            )
+            .await
+            .map(|_| ())
+        }
+    }
+}
+
+async fn send_database_benchmark_reply(incoming: &IncomingMessage, benchmark: DatabaseBenchmark, message: &str) -> Result<()> {
+    let draft = Draft::text(format!("*{} database benchmark*\n{message}", benchmark.label())).with_biz_opaque_callback_data(format!(
+        "whatsapp-demoscene:benchmark:{}",
+        benchmark
+            .label()
+            .to_ascii_lowercase()
+    ));
+    validate_demo_draft(&draft)?;
+    incoming
+        .reply(draft)
+        .await
+        .map(|_| ())
+        .map_err(|err| anyhow!("sending {} benchmark progress failed: {err}", benchmark.label()))
 }
 
 fn cta_draft() -> Draft {
@@ -1114,7 +1673,7 @@ fn cta_draft() -> Draft {
 }
 
 fn formatted_text_draft() -> Draft {
-    Draft::text("*Bold*\n_Italic_\n~Strikethrough~\n```Monospace```").with_biz_opaque_callback_data("whatsapp-demoscene:formatting")
+    Draft::text("*Bold*\n_Italic_\n~Strikethrough~\n```Monospace```\nEmoji text: 🤖 🧭 🎉").with_biz_opaque_callback_data("whatsapp-demoscene:formatting")
 }
 
 struct DemoMediaDraft {
@@ -1127,7 +1686,7 @@ fn embedded_media_drafts() -> Result<Vec<DemoMediaDraft>> {
         embedded_media_draft(DEMO_IMAGE, "image", Some("Embedded PNG image."), "image")?,
         embedded_media_draft(DEMO_AUDIO, "MP3 audio", None, "audio-mp3")?,
         embedded_media_draft(DEMO_VOICE, "OGG/Opus audio", None, "audio-opus")?,
-        embedded_media_draft(DEMO_VIDEO, "MP4 video", Some("Embedded H.264 MP4 video."), "video-mp4")?,
+        embedded_media_draft(DEMO_VIDEO, "MP4 video", Some("Embedded h264 MP4 video."), "video-mp4")?,
         embedded_media_draft(DEMO_STICKER, "WebP sticker", None, "sticker-webp")?,
     ])
 }
@@ -1262,6 +1821,7 @@ fn parse_mode() -> Result<Mode> {
         .as_deref()
     {
         Some("send") => Mode::Send,
+        Some("send-template") => Mode::SendTemplate,
         Some("send-batch") => Mode::SendBatch,
         Some("serve") => Mode::Serve,
         Some("register-webhook") => Mode::RegisterWebhook,
@@ -1273,7 +1833,7 @@ fn parse_mode() -> Result<Mode> {
 }
 
 fn print_usage() {
-    println!("Usage: cargo run --example whatsapp_demoscene -- <send|send-batch|serve|register-webhook|serve-and-register>");
+    println!("Usage: cargo run --example whatsapp_demoscene -- <send|send-template|send-batch|serve|register-webhook|serve-and-register>");
 }
 
 fn env_optional(name: &str) -> Option<String> {
@@ -1332,7 +1892,7 @@ mod tests {
 
     #[test]
     fn all_demo_interactive_footers_fit_meta_limit() {
-        for draft in [menu_draft(), list_draft(), cta_draft(), location_request_draft()] {
+        for draft in [menu_draft(), list_draft(), database_benchmarks_draft(), cta_draft(), location_request_draft()] {
             validate_demo_draft(&draft).unwrap();
         }
     }
@@ -1394,13 +1954,39 @@ mod tests {
     }
 
     #[test]
-    fn feature_list_has_nine_rows_in_two_sections() {
+    fn feature_list_uses_all_ten_rows_across_three_sections() {
         let draft = list_draft();
         let Content::Interactive(InteractiveContent::Message(interactive)) = draft.content else {
             panic!("feature list must be an outgoing interactive message");
         };
         let InteractiveAction::OptionList(list) = interactive.action else {
             panic!("feature list must use the list action");
+        };
+
+        assert_eq!(
+            list.sections
+                .len(),
+            3
+        );
+        assert_eq!(
+            list.sections
+                .iter()
+                .map(|section| section
+                    .items
+                    .len())
+                .sum::<usize>(),
+            10
+        );
+    }
+
+    #[test]
+    fn database_benchmark_list_exposes_three_engines_and_back_navigation() {
+        let draft = database_benchmarks_draft();
+        let Content::Interactive(InteractiveContent::Message(interactive)) = draft.content else {
+            panic!("database benchmark list must be an outgoing interactive message");
+        };
+        let InteractiveAction::OptionList(list) = interactive.action else {
+            panic!("database benchmark list must use the list action");
         };
 
         assert_eq!(
@@ -1415,8 +2001,40 @@ mod tests {
                     .items
                     .len())
                 .sum::<usize>(),
-            9
+            4
         );
+        assert_eq!(
+            list.sections[0]
+                .items
+                .iter()
+                .map(|item| item
+                    .call_back
+                    .as_str())
+                .collect::<Vec<_>>(),
+            ["demo:benchmark:sqlite", "demo:benchmark:redb", "demo:benchmark:heed"]
+        );
+    }
+
+    #[test]
+    fn benchmark_progress_keeps_latest_and_samples_at_most_once_per_minute() {
+        let started = Instant::now();
+        let mut state = BenchmarkProgressState::default();
+
+        assert!(state.observe(started, "first".to_owned()));
+        state.record_sampled(started);
+        state.record_sent(started, "first".to_owned());
+        assert!(!state.observe(started + Duration::from_secs(30), "middle".to_owned()));
+        assert_eq!(
+            state
+                .latest_unsent()
+                .as_deref(),
+            Some("middle")
+        );
+        assert!(state.observe(started + Duration::from_secs(60), "minute".to_owned()));
+        state.record_sampled(started + Duration::from_secs(60));
+        state.record_sent(started + Duration::from_secs(60), "minute".to_owned());
+        assert_eq!(state.latest_unsent(), None);
+        assert_eq!(state.pair_send_delay(started + Duration::from_secs(62)), Duration::from_secs(4));
     }
 
     #[test]
@@ -1445,6 +2063,116 @@ mod tests {
                 label => panic!("unexpected media sample: {label}"),
             }
         }
+    }
+
+    #[test]
+    fn approved_template_payload_binds_each_static_button_to_a_demo_action() {
+        let outbound = OutboundConfig { phone_number_id: "sender-id", recipient_phone_number: "+15551234567" };
+        let template = TemplateConfig { name: "ogrerobot_features", language: "pt_BR" };
+
+        let payload = template_demo_payload(&outbound, &template);
+
+        assert_eq!(
+            payload
+                .pointer("/template/name")
+                .and_then(Value::as_str),
+            Some("ogrerobot_features")
+        );
+        assert_eq!(
+            payload
+                .pointer("/template/language/code")
+                .and_then(Value::as_str),
+            Some("pt_BR")
+        );
+        assert_eq!(
+            payload
+                .pointer("/template/components/0/parameters/0/payload")
+                .and_then(Value::as_str),
+            Some("demo:list")
+        );
+        assert_eq!(
+            payload
+                .pointer("/template/components/1/parameters/0/payload")
+                .and_then(Value::as_str),
+            Some("demo:location")
+        );
+        assert_eq!(
+            payload
+                .pointer("/template/components/2/parameters/0/payload")
+                .and_then(Value::as_str),
+            Some("demo:inspect")
+        );
+    }
+
+    #[test]
+    fn template_quick_reply_is_adapted_to_the_crates_interactive_shape() {
+        let body = br#"
+        {
+          "object": "whatsapp_business_account",
+          "entry": [{
+            "changes": [{
+              "value": {
+                "messages": [{
+                  "from": "15551234567",
+                  "id": "wamid.template-button",
+                  "timestamp": "17893000",
+                  "type": "button",
+                  "button": {"text": "List", "payload": "demo:list"}
+                }]
+              }
+            }]
+          }]
+        }
+        "#;
+
+        let normalized = normalize_template_quick_reply_callbacks(body)
+            .unwrap()
+            .expect("template quick reply should be adapted");
+        let normalized: Value = serde_json::from_slice(&normalized).unwrap();
+        let message = normalized
+            .pointer("/entry/0/changes/0/value/messages/0")
+            .unwrap();
+
+        assert_eq!(
+            message
+                .pointer("/type")
+                .and_then(Value::as_str),
+            Some("interactive")
+        );
+        assert_eq!(
+            message
+                .pointer("/interactive/type")
+                .and_then(Value::as_str),
+            Some("button_reply")
+        );
+        assert_eq!(
+            message
+                .pointer("/interactive/button_reply/id")
+                .and_then(Value::as_str),
+            Some("demo:list")
+        );
+        assert_eq!(
+            message
+                .pointer("/interactive/button_reply/title")
+                .and_then(Value::as_str),
+            Some("List")
+        );
+        assert!(
+            message
+                .get("button")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unrelated_message_payload_is_not_rewritten() {
+        let body = br#"{"entry":[{"changes":[{"value":{"messages":[{"type":"text","text":{"body":"hi"}}]}}]}]}"#;
+
+        assert!(
+            normalize_template_quick_reply_callbacks(body)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

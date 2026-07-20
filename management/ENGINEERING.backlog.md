@@ -8,21 +8,26 @@
 ==> Luiz. Planned: 2026-07-05;
 ==> Blocked: 2026-07-18; Reason: Underlying requirement is under revision after the findings of the WhatsApp Demoscene
 
-## EN.Demo.02-002 -- The WhatsApp Demoscene is not fully exploring all the message types WhatsApp can deliver
-1. Please see the "Espaçolaser RJ - Shop Rio Sul" screenshot, proving WhatsApp do support "telegram-menu-like" messages, using two columns
-2. Please compare that to the screenshots showing what the current WhatsApp Demoscene is presenting, using a single column
-3. Research the docs and solve the gap: change the demoscene "menu" command to offer a 2 columns row and a 1 colum row containing the existing options
-4. Do additional resources and see if emojis / icons can be presented there, exactly as we do for Telegram
-5. Go ahead and cover additional gaps between WhatsApp and Telegram, like message editing -- for text and image
-6. Document -- in the Demoscene -- what messaging and UI features WhatsApp is missing in relation to Telegram.
-7. Now go ahead and treat the Telegram code. Check if the existing Telegram code can do everything WhatsApp is doing. Including:
-   * Offering a pop-up to select one among a long list of options -- In the WhatsApp demoscene this is called "Features" and is presented with an icon
-   * The WhatsApp demoscene do demonstrate a "reaction to a message". Make sure our Telegram code is demoing doing the same.
-   * If Telegram cannot do something WhatsApp can, please document it in the telegram demoscene code.
-   ==> Luiz. Planned: 2026-07-17
-   
-
 # Started
+
+## ER.Demo.02-002 -- Complete the WhatsApp message and UI feature comparison
+1. Distinguish session interactive reply buttons from approved template quick replies; do not claim the API controls client-side rows, columns, or button iconography.
+2. Keep the session `menu` command and add an optional approved-template demonstration for the promotion-style message shown in the supplied screenshot.
+3. Exercise and document where WhatsApp accepts emojis and where it does not expose arbitrary icons.
+4. Document WhatsApp features missing in relation to Telegram, including delivered text and media editing.
+5. Audit the official inbound WhatsApp message types against `whatsapp-business-rs` and document unsupported types without pretending the crate parses them.
+6. Keep setup requirements explicit, including the Meta-side template approval needed by the optional template demonstration.
+7. Document Meta's current pricing model, the no-charge service-window boundary, and the sending-rate constraints relevant to the demo.
+8. Add SQLite, ReDB, and Heed benchmark actions without changing their shared implementations; send the first update, at most one current update per minute, and the final outcome on WhatsApp.
+   ==> Luiz. Planned: 2026-07-17; Started: 2026-07-18;
+
+## ER.Demo.01-002 -- Complete Telegram parity demonstrations identified by the WhatsApp comparison
+1. Register the bot's native command-list menu so users can open a long option list from Telegram's menu button.
+2. Add text and graphical commands for reacting to the user's message.
+3. Make the existing text-edit and image-edit demonstrations explicit in the command list and graphical menu.
+4. Document any compared WhatsApp behavior that Telegram's Bot API cannot reproduce.
+   ==> Luiz. Planned: 2026-07-18; Started: 2026-07-18;
+
 
 # "In Code Review"
 
